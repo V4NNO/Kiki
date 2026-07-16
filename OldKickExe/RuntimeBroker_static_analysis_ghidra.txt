@@ -1,0 +1,430 @@
+Analiza statica Ghidra MCP - OldKickExe/RuntimeBroker.exe
+Data: 2026-07-16
+Metoda: observatii din executabilul activ in Ghidra prin MCP ghidra; nu s-au facut patch-uri, rename-uri sau comentarii.
+
+===============================================================================
+1. Rezumat
+===============================================================================
+
+FAPTE OBSERVATE:
+- Executabil PE64, baza imagine 0x140000000.
+- Entry point Ghidra: entry @ 0x140002f68.
+- Exporturi: entry -> 0x140002f68.
+- Segmente:
+  - Headers: 0x140000000 - 0x1400003ff
+  - .text:   0x140001000 - 0x1400d91ff
+  - .rdata:  0x1400da000 - 0x140761dff
+  - .data:   0x140762000 - 0x1407669f8
+  - .idata:  0x140772000 - 0x1407827ff
+  - .tls:    0x140784000 - 0x1407843ff
+  - .rsrc:   0x140786000 - 0x1407865ff
+- Stringuri cheie:
+  - 0x1400dbe50: R:\bbuild-9\KIC-PROD-WIN64\components\app-grabberSubAgent\main.cpp
+  - 0x1400dbed8: KickidlerGrabber
+  - 0x1400db690: subAgent
+  - 0x1400dbef0: -get-network-proxies
+  - 0x1400dbf10: -logging-postfix
+  - 0x1400dbf38: -ipc-name
+  - 0x1400dbf48: IPC name not specified
+  - 0x1400dd9e0: grabberSubAgent::io::Service
+  - 0x1400e8308: grabberAgent::slave::slave::Clipboard
+  - 0x1400ea550: impl-grabberSubAgent-http\manager.cpp
+  - 0x1400eb3b8: grabberSubAgent::ui::Manager
+  - 0x1400ec0b8: settings.sqlite
+  - 0x1400f6ed0: ui: null screen track attempt
+
+CONCLUZIE:
+- Desi fisierul se numeste RuntimeBroker.exe, stringurile si functiile observate indica un subagent Kickidler: app-grabberSubAgent.
+- Este foarte asemanator cu tssubservice.exe analizat anterior, dar build-ul este mai vechi: bbuild-9 / KIC-PROD-WIN64.
+- Rol observat: subagent user-session pentru IPC/local RPC, clipboard, user info/AD, HTTP, UI/self-control/task tracker, setari SQLite.
+- Nu am observat importuri/stringuri pentru API-urile de focus/captura din tlsservice.exe: GetForegroundWindow, SetWinEventHook, SetWindowsHookEx, GetWindowText, PrintWindow, BitBlt.
+
+Nivel incredere: ridicat pentru rolul de subagent Kickidler; ridicat pentru absenta dovezilor de focus/captura directa; mediu pentru traseul exact IPC fara runtime.
+
+===============================================================================
+2. Importuri relevante
+===============================================================================
+
+FAPTE OBSERVATE:
+- Qt/UI/clipboard:
+  - QApplication, QGuiApplication, QClipboard, QMimeData, QImage, QBuffer
+  - QSystemTrayIcon, QMenu, QQuickView, QQml/QML
+  - QScreen::availableGeometry, availableGeometryChanged
+- IPC/local:
+  - QLocalServer, QLocalSocket
+  - CreateFileW, SetNamedPipeHandleState, TransactNamedPipe, WaitNamedPipeW, WriteFile, DuplicateHandle
+- HTTP/network:
+  - QNetworkAccessManager::get/post
+  - QNetworkRequest, QUrl, QSslConfiguration, QNetworkProxy
+  - Winsock imports: accept/bind/connect/send/recv etc.
+- User/AD/registry:
+  - GetUserNameExW, GetUserNameW
+  - LoadLibraryA, GetProcAddress pentru activeds.dll / ADsGetObject / ADsOpenObject / FreeADsMem
+  - OpenProcessToken, GetTokenInformation, ConvertSidToStringSidA
+  - RegOpenKeyExA, RegQueryValueExA, RegSetValueExA
+- Crash/logging:
+  - dbghelp.dll / MiniDumpWriteDump
+  - log4cplus strings
+  - RegisterEventSourceA / ReportEventA / DeregisterEventSource
+
+NEOBSERVAT:
+- GetForegroundWindow
+- GetWindowThreadProcessId
+- GetGUIThreadInfo
+- SetWinEventHook
+- SetWindowsHookEx
+- GetWindowTextW
+- GetClassNameW
+- GetWindowRect
+- PrintWindow
+- BitBlt
+- CreateCompatibleDC / CreateCompatibleBitmap
+- DXGI / Direct3D strings
+
+===============================================================================
+3. Functii importante
+===============================================================================
+
+-------------------------------------------------------------------------------
+3.1 entry @ 0x140002f68
+-------------------------------------------------------------------------------
+
+Pseudocod observat:
+  void entry(void) {
+    __security_init_cookie();
+    FUN_1400b81b0();
+    return;
+  }
+
+Concluzie:
+- Stub de entry MSVC; transfera controlul catre runtime startup.
+
+Nivel incredere: ridicat.
+
+-------------------------------------------------------------------------------
+3.2 FUN_140017280 @ 0x140017280 - main app-grabberSubAgent
+-------------------------------------------------------------------------------
+
+FAPTE OBSERVATE:
+- Seteaza numele aplicatiei la "KickidlerGrabber".
+- Daca argumentul este "-get-network-proxies", ruleaza FUN_1400148a0 si iese.
+- Creeaza QApplication si seteaza QGuiApplication::setQuitOnLastWindowClosed(false).
+- Parseaza argumente.
+- Foloseste GetCurrentProcessId + ProcessIdToSessionId.
+- Construieste numele "subAgent <session>" plus logging postfix.
+- Cauta argumentul "-ipc-name".
+- Daca exista:
+  - logheaza "start agent for <session>"
+  - initializeaza obiectul subagent prin FUN_140019e70
+  - conecteaza IPC prin FUN_14001c2c0(local_138, ipcName)
+  - intra in QApplication::exec()
+- Daca lipseste "-ipc-name":
+  - logheaza "IPC name not specified"
+  - returneaza 1.
+
+Stringuri:
+- KickidlerGrabber
+- -get-network-proxies
+- -logging-postfix
+- subAgent
+- -ipc-name
+- start agent for
+- IPC name not specified
+- app-grabberSubAgent\main.cpp
+
+Concluzie:
+- Functia principala a subagentului. Executabilul nu este Runtime Broker Windows autentic ca rol; este subagent Kickidler care asteapta un nume IPC de la launcher/orchestrator.
+
+Nivel incredere: ridicat.
+
+Test dinamic:
+- Verifica command line pentru "-ipc-name".
+- Breakpoint pe 0x140017280 si pe FUN_14001c2c0.
+
+-------------------------------------------------------------------------------
+3.3 FUN_14001cb90 @ 0x14001cb90 - IO/local RPC service
+-------------------------------------------------------------------------------
+
+FAPTE OBSERVATE:
+- Creeaza/atasaza obiect RPC pe QLocalSocket.
+- Daca RPC object creation esueaza, logheaza "Failed to create RPC object" si abort pe QLocalSocket.
+- Inregistreaza comenzi RPC:
+  - getUserInfo -> onGetUserInfo
+  - getSystemProxies -> onGetSystemProxies
+  - resetClipboard -> onResetClipboard
+  - setClipboardText -> onSetClipboardText
+  - setClipboardHtml -> onSetClipboardHtml
+  - setClipboardImage -> onSetClipboardImage
+  - setClipboardMimeData -> onSetClipboardMimeData
+  - clearClipboard -> onClearClipboard
+  - getClipboardUrls -> onGetClipboardUrls
+  - setSelfControlState -> onSelfControlState
+  - setSelfControlDayActivity -> onSelfControlDayActivity
+  - setSelfControlDayRating -> onSelfControlDayRating
+  - setSelfControlWebToken -> onSelfControlWebToken
+  - notifySelfControlTasksChanged -> onSelfControlTasksChanged
+  - setNotificationAlert -> onNotificationAlert
+  - setWebinterfaceLink -> onWebinterfaceLink
+- Conecteaza semnale Qt: disconnected, error, stateChanged.
+- Trimite "testPing" cu valoarea "test ping".
+
+Concluzie:
+- Este centrul de comenzi locale al subagentului. Prin acest canal primeste comenzi pentru clipboard, user info, system proxies si self-control/UI.
+
+Nivel incredere: ridicat.
+
+Test dinamic:
+- Breakpoint la 0x14001cb90 si monitorizare QLocalSocket.
+- Intercepteaza mesajele RPC dupa connect.
+
+-------------------------------------------------------------------------------
+3.4 FUN_1400209f0 @ 0x1400209f0 - metaobject grabberSubAgent::io::Service
+-------------------------------------------------------------------------------
+
+Pseudocod:
+  if param_2 == "grabberSubAgent::io::Service":
+      return param_1;
+  return QObject::qt_metacast(param_1, param_2);
+
+Concluzie:
+- Metaobject Qt pentru serviciul IO.
+
+Nivel incredere: ridicat.
+
+-------------------------------------------------------------------------------
+3.5 FUN_1400320a0 / FUN_140032180 / FUN_140032210 / FUN_1400323a0 - named pipe IPC
+-------------------------------------------------------------------------------
+
+FUN_1400320a0 @ 0x1400320a0:
+- CreateFileW(pipeName, access, ..., OPEN_EXISTING)
+- retry pe ERROR_PIPE_BUSY cu WaitNamedPipeW(pipeName, 2000)
+- max doua incercari.
+
+FUN_140032180 @ 0x140032180:
+- Apeleaza FUN_1400320a0.
+- SetNamedPipeHandleState(..., mode=2).
+- Inchide handle-ul daca setarea esueaza.
+
+FUN_140032210 @ 0x140032210:
+- Deschide pipe cu CreateFileW.
+- DuplicateHandle catre proces tinta.
+
+FUN_1400323a0 @ 0x1400323a0:
+- Construieste mesaj de 0x50 bytes.
+- Include GetCurrentProcessId().
+- TransactNamedPipe(request 0x50, reply 0x50).
+- Daca reply type == 2 si status != 0, trimite ack type == 3 prin WriteFile.
+- Salveaza campuri in structura la param_1+0x40/+0x48/+0x50/+0x58.
+
+Concluzie:
+- IPC local prin named pipe, inclusiv handshake cu mesaje fixe de 0x50 bytes.
+
+Nivel incredere: ridicat.
+
+Test dinamic:
+- Breakpoint pe CreateFileW, SetNamedPipeHandleState, TransactNamedPipe, WriteFile.
+- Dump la request/reply 0x50 bytes.
+
+-------------------------------------------------------------------------------
+3.6 FUN_14006ffa0 @ 0x14006ffa0 - metaobject Clipboard
+-------------------------------------------------------------------------------
+
+Pseudocod:
+  if param_2 == "grabberAgent::slave::slave::Clipboard":
+      return param_1;
+  return QObject::qt_metacast(param_1, param_2);
+
+Concluzie:
+- Confirma componenta clipboard in subagent.
+
+Nivel incredere: ridicat.
+
+Observatie:
+- Importurile si stringurile arata comenzi pentru reset/set/clear/get clipboard, precum si callback-uri onClipboardFoundText/Html/Image/Urls/Other.
+
+-------------------------------------------------------------------------------
+3.7 FUN_140083580 @ 0x140083580 - HTTP manager
+-------------------------------------------------------------------------------
+
+FAPTE OBSERVATE:
+- Daca web token lipseste:
+  - logheaza "web token is empty await some"
+- Daca web interface link lipseste:
+  - logheaza "web interface link is empty await some"
+- Daca exista request:
+  - metoda "get": construieste URL cu "?web_token=" si foloseste QNetworkAccessManager::get.
+  - metoda "post": insereaza in JSON:
+    - skp_version
+    - web_token
+    apoi seteaza header "application/json" si foloseste QNetworkAccessManager::post.
+- Daca nu exista nimic:
+  - logheaza "nothing to send".
+
+Stringuri:
+- subAgent send http GET:
+- subAgent send http POST:
+- web_token
+- skp_version
+- application/json
+- impl-grabberSubAgent-http\manager.cpp
+
+Concluzie:
+- Componenta de transport HTTP pentru subagent. Nu este captura/focus, ci comunicare web/API.
+
+Nivel incredere: ridicat.
+
+Test dinamic:
+- Breakpoint la QNetworkAccessManager::get/post; inspecteaza URL si payload.
+
+-------------------------------------------------------------------------------
+3.8 FUN_140023ec0 @ 0x140023ec0 - user info / AD / LDAP / registry fallback
+-------------------------------------------------------------------------------
+
+FAPTE OBSERVATE:
+- Foloseste GetUserNameExW(NameFullyQualifiedDN) si GetUserNameExW(NameUniqueId).
+- Daca esueaza:
+  - incearca LDAP.
+  - apoi registry fallback.
+  - apoi GetUserNameW.
+- Completeaza campuri:
+  - fullName
+  - distinguishedName
+  - GUID
+  - local
+  - fail
+  - home
+
+Stringuri:
+- activeds.dll
+- ADsGetObject
+- ADsOpenObject
+- FreeADsMem
+- LDAP://
+- LDAP://rootDSE
+- defaultNamingContext
+- SOFTWARE\Microsoft\Windows\CurrentVersion\Group Policy\State\
+- SOFTWARE\Microsoft\Windows NT\CurrentVersion\ProfileList\
+
+Concluzie:
+- Colecteaza identitate user/AD/LDAP/registry pentru asocierea subagentului cu utilizatorul/domeniul.
+
+Nivel incredere: ridicat.
+
+Test dinamic:
+- Breakpoint pe GetUserNameExW/GetUserNameW/RegOpenKeyExA/RegQueryValueExA si LoadLibraryA("activeds.dll").
+
+-------------------------------------------------------------------------------
+3.9 FUN_140089c10 @ 0x140089c10 - SettingsProvider / settings.sqlite
+-------------------------------------------------------------------------------
+
+FAPTE OBSERVATE:
+- Seteaza:
+  - "Time tracking"
+  - "settings.sqlite"
+- Foloseste QDir::homePath.
+- Creeaza/deschide directorul de setari.
+- Deschide QSqlDatabase.
+- Migreaza/citeste settings.ini daca exista:
+  - common/language
+  - self_control/dayActivityEnabled
+  - self_control/dayActivityInPercentage
+  - self_control/dayRatingEnabled
+  - self_control/dataManagementEnabled
+  - self_control/dataFetchingEnabled
+- Sterge settings.ini dupa citire/migrare.
+
+Concluzie:
+- Persistenta locala pentru UI/self-control/time tracking.
+
+Nivel incredere: ridicat.
+
+-------------------------------------------------------------------------------
+3.10 FUN_140086b50 @ 0x140086b50 - metaobject UI Manager
+-------------------------------------------------------------------------------
+
+Pseudocod:
+  if param_2 == "grabberSubAgent::ui::Manager":
+      return param_1;
+  return base_metacast(param_1, param_2);
+
+Concluzie:
+- Confirma UI Manager in subagent.
+
+Nivel incredere: ridicat.
+
+-------------------------------------------------------------------------------
+3.11 FUN_140099230 @ 0x140099230 - screenTracker Qt
+-------------------------------------------------------------------------------
+
+FAPTE OBSERVATE:
+- Daca QScreen este NULL:
+  - logheaza "ui: null screen track attempt"
+- Altfel:
+  - deconecteaza semnale vechi.
+  - conecteaza availableGeometryChanged.
+  - citeste QScreen::availableGeometry.
+  - stocheaza x/y/width/height in obiect la +0x10/+0x14/+0x18/+0x1c.
+
+Concluzie:
+- Monitorizeaza geometria ecranului pentru UI/layout. Nu este captura ecran.
+
+Nivel incredere: ridicat.
+
+===============================================================================
+4. Relatia cu executabilele noi
+===============================================================================
+
+FAPTE:
+- `RuntimeBroker.exe` vechi si `tssubservice.exe` nou au acelasi profil functional:
+  - app-grabberSubAgent
+  - -ipc-name
+  - QLocalSocket/QLocalServer
+  - clipboard commands
+  - HTTP manager
+  - user info AD/LDAP/registry
+  - settings.sqlite
+  - UI/self-control/task tracker
+- Diferente vizibile:
+  - build path vechi: R:\bbuild-9\KIC-PROD-WIN64
+  - build path nou tssubservice: R:\bbuild-8\KICK-EVPROD-WIN64
+  - numele fisierului vechi este mascat ca RuntimeBroker.exe.
+
+CONCLUZIE:
+- RuntimeBroker.exe din OldKickExe este probabil versiunea veche a subagentului Kickidler, nu Runtime Broker Microsoft autentic ca rol.
+
+===============================================================================
+5. Relevanta pentru problema "Running Applications blocat"
+===============================================================================
+
+FAPTE:
+- In acest executabil nu s-au observat API-uri de focus/fereastra activa:
+  - GetForegroundWindow
+  - SetWinEventHook
+  - SetWindowsHookEx
+  - GetWindowTextW
+  - GetWindowThreadProcessId
+- In acest executabil se observa IPC/local RPC si comenzi UI/clipboard/userInfo.
+
+CONCLUZIE:
+- Pentru blocarea "Running Applications" pe proces/tab vechi, acest RuntimeBroker.exe este mai probabil consumator/transportor de comenzi/subagent auxiliar, nu sursa principala a HWND/PID/titlu activ.
+- Sursa principala ramane serviciul echivalent `tlsservice.exe`/componenta veche corespunzatoare care importa WinEvent/focus APIs.
+
+===============================================================================
+6. Functii de urmarit in debugger
+===============================================================================
+
+In RuntimeBroker.exe:
+- 0x140017280 FUN_140017280 - main, argumente, -ipc-name.
+- 0x14001cb90 FUN_14001cb90 - local RPC commands.
+- 0x1400320a0 FUN_1400320a0 - CreateFileW named pipe.
+- 0x140032180 FUN_140032180 - SetNamedPipeHandleState.
+- 0x140032210 FUN_140032210 - DuplicateHandle.
+- 0x1400323a0 FUN_1400323a0 - TransactNamedPipe/WriteFile handshake.
+- 0x140083580 FUN_140083580 - HTTP GET/POST.
+- 0x140023ec0 FUN_140023ec0 - user info AD/LDAP/registry.
+- 0x140089c10 FUN_140089c10 - settings.sqlite.
+- 0x140099230 FUN_140099230 - QScreen geometry.
+
+Pentru focus/Running Applications:
+- Cauta/analyzeaza in executabilele vechi ramase componenta care importa GetForegroundWindow / SetWinEventHook / GetWindowTextW / GetWindowThreadProcessId. Aceea va fi echivalentul vechi pentru `tlsservice.exe`.
+

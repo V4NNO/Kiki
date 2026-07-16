@@ -1,0 +1,363 @@
+Analiza statica Ghidra MCP - tlsservice.exe
+Data raport: 2026-07-15
+Restrictii respectate: analiza binarului s-a facut prin MCP ghidra; nu s-au facut patch-uri, rename-uri sau comentarii in Ghidra.
+
+1. Fapte observate
+
+Arhitectura / entry / exports
+- Binar PE Windows 64-bit, inferat din baza 0x140000000 si adrese 64-bit.
+- Entry point Ghidra: entry -> 0x14000d32d.
+- TLS callbacks exportate: tls_callback_0 -> 0x140011257; tls_callback_1 -> 0x140220b9c.
+- Exporturi observate: entry si TLS callbacks.
+
+Importuri relevante
+- Focus / ferestre / input:
+  GetForegroundWindow, GetWindowThreadProcessId, GetGUIThreadInfo, EnumDesktopWindows,
+  GetWindowTextW, GetClassNameW, GetWindowRect, GetWindowInfo, GetWindowLongPtrW,
+  IsWindowVisible, GetWindow, SetWinEventHook, UnhookWinEvent,
+  SetWindowsHookExA, UnhookWindowsHookEx, CallNextHookEx,
+  GetMessageA, GetKeyState, ToUnicodeEx, GetKeyboardLayout.
+- Captura GDI:
+  GetWindowDC, GetDC, ReleaseDC, CreateCompatibleDC, CreateCompatibleBitmap,
+  SelectObject, BitBlt, PrintWindow, GetDIBits, DeleteDC, DeleteObject.
+- Desktop/window station:
+  OpenInputDesktop, OpenDesktopA, CloseDesktop, GetThreadDesktop, SetThreadDesktop,
+  OpenWindowStationA, SetProcessWindowStation, CloseWindowStation.
+- Procese / WTS:
+  WTSQueryUserToken, WTSRegisterSessionNotification, WTSUnRegisterSessionNotification,
+  WTSQuerySessionInformationA, WTSFreeMemory, CreateProcessAsUserW,
+  ProcessIdToSessionId, OpenProcess, GetProcessImageFileNameW/A, EnumProcessModules.
+- IPC:
+  CreateFileW, SetNamedPipeHandleState, TransactNamedPipe, WaitNamedPipeW,
+  DuplicateHandle, WriteFile, QLocalSocket, QTcpServer/QSslSocket, QSharedMemory,
+  CreateMutexA, OpenMutexA, ReleaseMutex, CreateEventW/CreateEventA, SetEvent/ResetEvent.
+- Dinamic:
+  LoadLibraryA/W, GetProcAddress, FreeLibrary.
+- Nu am observat string-uri directe Direct3D/DXGI; nu apar "D3D", "Direct3D" sau "DXGI" in cautarile de string-uri efectuate.
+
+String-uri / referinte relevante
+- Nu am gasit string-uri definite pentru "tlshost.exe", "tlsservice.exe", "tlssubservice.exe" sau "tssubservice.exe" in acest binar activ.
+- Nu am gasit string-uri "Kick..." sau "grabber" prin filtre directe.
+- String-uri de import gasite pentru API-urile de focus/captura:
+  "GetForegroundWindow", "GetWindowRect", "GetWindowThreadProcessId",
+  "SetWindowsHookExA", "EnumDesktopWindows", "GetWindowTextW",
+  "GetWindowInfo", "PrintWindow", "GetWindowDC".
+
+2. Referinte catre tlshost.exe / tssubservice.exe
+
+Fapte:
+- Cautari directe in string-uri definite:
+  - "tlshost": fara rezultate.
+  - "tlsservice": fara rezultate.
+  - "tlssubservice": fara rezultate.
+  - "tssubservice": fara rezultate.
+
+Concluzie:
+- Spre deosebire de tlshost.exe, tlsservice.exe nu expune static aceste nume ca string-uri definite in analiza curenta Ghidra.
+- Relatia cu celelalte executabile trebuie confirmata din argumentele de runtime, configuratie, service manager, registry sau codul care construieste path-uri/nume in mod indirect.
+
+3. Functii importante
+
+FUN_14003e8e0 @ 0x14003e8e0
+- Rol observat: instaleaza hook-uri globale low-level pentru tastatura si mouse.
+- Caller-i observati: apelata din FUN_14003ee60.
+- API-uri Windows: GetModuleHandleA, SetWindowsHookExA, GetLastError.
+- Pseudocod relevant:
+  - SetWindowsHookExA(0xd, &DAT_1400088d7, module, 0) -> camp param_1+0x78.
+  - SetWindowsHookExA(0xe, &DAT_1400088d7, module, ...) -> camp param_1+0x80.
+  - logheaza erori daca hook-urile esueaza.
+- Concluzie: componenta captureaza evenimente globale de tastatura/mouse.
+- Incredere: ridicata.
+- Test dinamic: breakpoint pe SetWindowsHookExA; confirmat idHook 13/14 si threadId 0.
+
+FUN_14003ee60 @ 0x14003ee60
+- Rol observat: instaleaza hook de evenimente Windows si ruleaza message loop.
+- Functii apelate: FUN_14003e8e0, GetModuleHandleA, SetWinEventHook, GetMessageA, UnhookWindowsHookEx, UnhookWinEvent.
+- Pseudocod relevant:
+  - FUN_14003e8e0(param_1)
+  - SetWinEventHook(0x20, 0x8005, module, &UNK_140010979, ...)
+  - while GetMessageA(...) != 0
+  - la iesire: unhook keyboard/mouse/winevent.
+- Concluzie: monitorizeaza schimbari de focus/desktop/foreground si input intr-un thread cu message loop.
+- Incredere: ridicata.
+- Test dinamic: breakpoint pe SetWinEventHook si callback 0x140010979; log eventMin/eventMax/HWND.
+
+FUN_140040dd0 @ 0x140040dd0
+- Rol observat: callback/handler pentru evenimente WinEvent/focus.
+- API-uri Windows: GetGUIThreadInfo, UnhookWindowsHookEx.
+- Pseudocod relevant:
+  - daca param_2 == 0x8005: GetGUIThreadInfo si salveaza HWND la obiect+0x90.
+  - daca param_2 == 0x20: salveaza param_3 la obiect+0x90.
+  - face unhook pe hook-urile low-level si reinitializeaza prin FUN_14003fa20.
+- Concluzie: gestioneaza schimbarea de focus si actualizeaza ultimul HWND cunoscut la offset +0x90.
+- Incredere: ridicata pentru stocare HWND; medie pentru semantica exacta a evenimentelor.
+- Test dinamic: watchpoint pe obiect+0x90 si breakpoint pe 0x140040dd0.
+
+FUN_1400405d0 @ 0x1400405d0
+- Rol observat: callback low-level keyboard/mouse; colecteaza activitatea si contextul ferestrei active.
+- API-uri Windows: GetKeyState, GetGUIThreadInfo, GetWindowRect, GetForegroundWindow,
+  GetWindowThreadProcessId, GetKeyboardLayout, ToUnicodeEx, CallNextHookEx.
+- Pseudocod relevant:
+  - initializeaza tabela stare taste pentru 0x100 coduri.
+  - pentru key events, foloseste HWND din obiect+0x90 sau GetForegroundWindow().
+  - GetWindowThreadProcessId(hwnd) -> thread id.
+  - GetKeyboardLayout(thread id).
+  - ToUnicodeEx(vk, scancode, keyState, buffer, ..., layout).
+  - trimite evenimentul prin thunk_FUN_14003d5d0.
+  - pentru mouse events trimite coordonate prin thunk_FUN_14003d760.
+  - la final CallNextHookEx.
+- Concluzie: colector activitate input, corelat cu fereastra foreground.
+- Incredere: ridicata.
+- Test dinamic: breakpoint pe ToUnicodeEx si GetForegroundWindow; log vk/scancode/HWND/layout.
+
+FUN_140047d80 @ 0x140047d80
+- Rol observat: thread/worker care intra pe desktopul activ si obtine foreground HWND.
+- API-uri Windows: GetCurrentThreadId, GetThreadDesktop, OpenInputDesktop,
+  GetUserObjectInformationA, SetThreadDesktop, GetForegroundWindow, CloseDesktop.
+- Pseudocod relevant:
+  - asteapta QWaitCondition.
+  - OpenInputDesktop().
+  - verifica numele desktopului si ignora unele nume ("Default" etc., string-urile nu sunt rezolvate textual in decompiler).
+  - SetThreadDesktop(inputDesktop).
+  - GetForegroundWindow() -> *param_1.
+  - revine la desktopul initial si inchide handle-ul.
+- Concluzie: obtine HWND-ul foreground din desktopul interactiv al utilizatorului.
+- Incredere: ridicata.
+- Test dinamic: breakpoint pe OpenInputDesktop/SetThreadDesktop/GetForegroundWindow; comparat HWND cu fereastra activa reala.
+
+FUN_1400478b0 @ 0x1400478b0
+- Rol observat: enumerare ferestre pe desktop.
+- API-uri Windows: OpenDesktopA, EnumDesktopWindows, CloseDesktop.
+- Pseudocod relevant:
+  - filtreaza cateva desktop-uri dupa nume.
+  - OpenDesktopA(desktopName, ...)
+  - EnumDesktopWindows(desktopHandle, &UNK_1400034db, param_2)
+  - CloseDesktop.
+- Concluzie: enumerator de ferestre per desktop; probabil folosit pentru inventarierea ferestrelor vizibile.
+- Incredere: ridicata.
+- Test dinamic: breakpoint pe EnumDesktopWindows si callback 0x1400034db.
+
+FUN_1400471d0 @ 0x1400471d0
+- Rol observat: colecteaza metadata pentru HWND: vizibilitate, PID, path proces, titlu.
+- Caller-i observati: thunk_FUN_1400471d0 @ 0x140013b5b; data xref 0x140373e18.
+- API-uri Windows: IsWindowVisible, GetWindow, GetWindowLongPtrW, GetWindowInfo,
+  GetWindowThreadProcessId, OpenProcess, GetProcessImageFileNameW, GetWindowTextW, CloseHandle.
+- Pseudocod relevant:
+  - filtreaza ferestre invizibile sau owned windows.
+  - GetWindowInfo(hwnd).
+  - GetWindowThreadProcessId(hwnd, &pid).
+  - OpenProcess(0x410, false, pid).
+  - optional thunk_FUN_14004be80 pentru nume proces/alte date.
+  - GetProcessImageFileNameW(process, buffer).
+  - GetWindowTextW(hwnd, titleBuffer, 0x1000).
+  - construieste structura: HWND, title, PID ca QString, process path/name.
+  - trimite catre FUN_140046190.
+- Concluzie: functie principala de identificare HWND/PID/titlu/proces.
+- Incredere: ridicata.
+- Test dinamic: breakpoint pe 0x140047317/0x1400474ac; log HWND/PID/title.
+
+FUN_140046190 @ 0x140046190
+- Rol observat: normalizeaza si stocheaza metadata ferestrei intr-un QMap dupa HWND.
+- Functii/API: functii Qt QString/QMap; nu are API Windows direct.
+- Pseudocod relevant:
+  - copiaza structura primita: HWND, titlu, PID, proces/path, rect/dimensiuni.
+  - truncate la 0x1b8 pentru string-uri.
+  - toLower pentru process/path.
+  - cauta in QMap la param_1+0x68 dupa HWND.
+  - daca exista, actualizeaza campuri la nod:
+    +0x20 HWND
+    +0x28 title/label
+    +0x30 PID string
+    +0x38 process/path lower
+    +0x40 extra string
+    +0x48..+0x54 rect/dimensiuni
+  - daca nu exista, insereaza nod nou.
+- Concluzie: pastreaza ultimul/curentul set de metadata pentru ferestre, indexat dupa HWND.
+- Incredere: ridicata.
+- Test dinamic: watchpoint pe QMap param_1+0x68; inspectat nodurile la schimbarea focusului.
+
+FUN_1400515a0 @ 0x1400515a0
+- Rol observat: pregateste captura pentru o fereastra.
+- Caller-i observati: thunk_FUN_1400515a0 @ 0x1400124b8; data xref 0x140374310.
+- API-uri Windows: GetWindowRect, GetWindowDC, GetForegroundWindow, ReleaseDC.
+- Pseudocod relevant:
+  - GetWindowRect(hwnd, rect).
+  - normalizeaza rectul la (0,0,width,height).
+  - GetWindowDC(hwnd).
+  - daca GetForegroundWindow() == hwnd, paseaza hwnd=0 catre captor; altfel paseaza hwnd.
+  - FUN_1400501d0(context, hdc, hwndOrZero, rect).
+  - ReleaseDC(hwnd, hdc).
+- Concluzie: wrapper pentru captura fereastra; decide daca foloseste captura de fereastra sau captura de DC/desktop.
+- Incredere: ridicata.
+- Test dinamic: breakpoint pe GetWindowDC/ReleaseDC; log HWND si dimensiuni.
+
+FUN_1400501d0 @ 0x1400501d0
+- Rol observat: captura GDI propriu-zisa si extragere pixeli.
+- Caller-i observati: FUN_1400515a0; thunk_FUN_1400501d0 @ 0x140012fdf; data xref 0x140374304.
+- API-uri Windows: CreateCompatibleBitmap, CreateCompatibleDC, SelectObject,
+  BitBlt, PrintWindow, GetDIBits, DeleteDC, DeleteObject, GetLastError.
+- Pseudocod relevant:
+  - width = rect.right - rect.left; height = rect.bottom - rect.top.
+  - CreateCompatibleBitmap(hdc, width, height).
+  - CreateCompatibleDC(hdc); SelectObject(memDC, bitmap).
+  - daca hwndOrZero == 0: BitBlt(memDC, 0,0,width,height, hdc, left,top, SRCCOPY).
+  - altfel: PrintWindow(hwndOrZero, memDC, flags from context+0x8c).
+  - GetDIBits(memDC, bitmap, 0, height, NULL, BITMAPINFO, ...)
+  - aloca/verifica buffer; GetDIBits din nou in context+0x10+0x418.
+  - apeleaza thunk_FUN_14004dcc0 pentru impachetare/conversie.
+  - cleanup SelectObject/DeleteDC/DeleteObject.
+- Concluzie: mecanismul principal de captura ecran/fereastra; foloseste GDI PrintWindow/BitBlt, nu DXGI.
+- Incredere: foarte ridicata.
+- Test dinamic: breakpoint pe PrintWindow, BitBlt, GetDIBits; dump hwnd, flags, width/height, rezultat si GetLastError.
+
+FUN_14016ace0 @ 0x14016ace0
+- Rol observat: canal agent prin mutex + QSharedMemory.
+- API-uri Windows/Qt: CreateMutexA, WaitForSingleObject, ReleaseMutex, CloseHandle,
+  QSharedMemory::setNativeKey, QSharedMemory::create, QSharedMemory::data,
+  QCoreApplication::applicationPid.
+- Pseudocod relevant:
+  - construieste nume mutex/key din param_2 + sufix.
+  - CreateMutexA(...).
+  - WaitForSingleObject(mutex, INFINITE).
+  - QSharedMemory::create(size).
+  - zero memory; scrie counter global _DAT_14037028c la offset 0 si applicationPid la offset 8.
+  - ReleaseMutex.
+- Concluzie: IPC local prin shared memory pentru agent/channel.
+- Incredere: ridicata.
+- Test dinamic: breakpoint pe CreateMutexA si QSharedMemory::create; inspectat native key si primele 16 bytes.
+
+FUN_1400c37f0 / FUN_1400c38d0 / FUN_1400c3960 / FUN_1400c3af0
+- Rol observat: named pipe client/handshake.
+- API-uri Windows:
+  - FUN_1400c37f0: CreateFileW, WaitNamedPipeW, GetLastError.
+  - FUN_1400c38d0: SetNamedPipeHandleState.
+  - FUN_1400c3960: CreateFileW, WaitNamedPipeW, DuplicateHandle.
+  - FUN_1400c3af0: GetCurrentProcessId, TransactNamedPipe, WriteFile.
+- Pseudocod relevant:
+  - deschide pipe cu CreateFileW; retry pe ERROR_PIPE_BUSY.
+  - seteaza pipe mode 2.
+  - poate duplica handle-ul in alt proces.
+  - face TransactNamedPipe cu pachete 0x50 bytes si salveaza campuri intoarse la param_1+0x40/+0x48/+0x50/+0x58.
+- Concluzie: IPC local named-pipe similar cu ce a fost observat in tlshost.exe.
+- Incredere: ridicata.
+- Test dinamic: breakpoint pe CreateFileW/TransactNamedPipe; dump pipeName si pachete.
+
+FUN_14004a6b0 @ 0x14004a6b0
+- Rol observat: WTS/session/user-token helper si rezolvare dinamica de API-uri.
+- API-uri Windows: LoadLibraryA, GetProcAddress, WTSQuerySessionInformationA,
+  WTSQueryUserToken, GetTokenInformation, ConvertSidToStringSidW, RegOpenKeyExW,
+  WTSFreeMemory, LocalFree, CloseHandle.
+- Concluzie: helper pentru context utilizator/sesiune si registry HKU/SID; nu este captura directa.
+- Incredere: medie-ridicata.
+- Test dinamic: breakpoint pe WTSQueryUserToken/GetTokenInformation; verificat SID/session id.
+
+FUN_140085410 @ 0x140085410
+- Rol observat: acces la WinSta0/Default desktop si broadcast/post message.
+- API-uri Windows: OpenWindowStationA, SetProcessWindowStation, OpenDesktopA,
+  SetThreadDesktop, PostMessageA, CloseDesktop, CloseWindowStation.
+- Concluzie: pregateste accesul la desktopul interactiv; relevant pentru captura/focus in sesiunea user.
+- Incredere: ridicata.
+- Test dinamic: breakpoint pe OpenWindowStationA/OpenDesktopA/SetThreadDesktop.
+
+4. Flux probabil de captura
+
+Fapte confirmate static:
+1. FUN_14003ee60 instaleaza SetWinEventHook si hook-urile low-level.
+2. FUN_14003e8e0 instaleaza WH_KEYBOARD_LL / WH_MOUSE_LL.
+3. FUN_140040dd0 actualizeaza HWND-ul curent la obiect+0x90 pe evenimente focus.
+4. FUN_1400405d0 colecteaza input, foloseste HWND curent/foreground, PID/thread/layout si ToUnicodeEx.
+5. FUN_140047d80 obtine HWND foreground din desktopul activ.
+6. FUN_1400471d0 obtine PID, titlu fereastra, path/nume proces si filtreaza ferestrele.
+7. FUN_140046190 stocheaza metadata pe HWND intr-un QMap la obiect+0x68.
+8. FUN_1400515a0 obtine rect/DC pentru HWND.
+9. FUN_1400501d0 captureaza cu PrintWindow sau BitBlt si extrage pixeli cu GetDIBits.
+10. IPC-ul local include named pipes si shared memory; Qt/SSL/socket indica transmitere mai departe.
+
+Ipoteza:
+- Fluxul complet este:
+  schimbare focus / hook input -> HWND curent -> PID/titlu/path -> decizie fereastra/desktop -> captura GDI -> DIB/pixel buffer -> conversie/impachetare -> IPC shared memory/named pipe/local socket -> transport mai departe.
+
+5. Structuri / variabile probabile
+
+Fapte:
+- Obiectul folosit de focus/input:
+  - +0x78: handle WH_KEYBOARD_LL.
+  - +0x80: handle WH_MOUSE_LL.
+  - +0x88: handle SetWinEventHook.
+  - +0x90: HWND curent/foreground salvat.
+  - +0x98: flag folosit in tratarea ToUnicodeEx/dead keys.
+- Obiectul metadata ferestre:
+  - param_1+0x68 in FUN_140046190: QMap indexat dupa HWND.
+  - nod QMap actualizat:
+    +0x20 HWND
+    +0x28 titlu/label
+    +0x30 PID ca QString
+    +0x38 process/path lower-case
+    +0x40 extra string/app-id
+    +0x48..+0x54 coordonate/dimensiuni.
+- Captura GDI:
+  - FUN_1400501d0 foloseste context+0x10+0x418 ca buffer de pixeli rezultat din GetDIBits.
+  - context+0x18 pare contor/capacitate disponibila; context+0x20 seteaza dimensiune necesara daca bufferul este insuficient.
+
+Ipoteze:
+- "ultimul HWND" este campul obiect+0x90 si/sau cheia curenta in QMap param_1+0x68.
+- "ultimul PID/titlu" sunt campurile QMap +0x30 / +0x28 asociate HWND-ului.
+- "ultimul frame" nu este identificat ca QImage aici; in acest binar captura bruta este GDI/DIB in buffer intern, iar pipeline-ul QImage/delta vazut in tlshost.exe poate fi o etapa separata.
+
+6. Relatia observata cu celelalte executabile
+
+Fapte:
+- Nu exista string-uri directe tlshost/tlsservice/tlssubservice/tssubservice in cautarile curente.
+- Exista IPC named pipe compatibil structural cu cel observat in tlshost.exe.
+- Exista shared memory agent channel aproape analog cu cel din tlshost.exe.
+- Exista WTS/user-token/session helpers si CreateProcessAsUserW importat, dar nu am finalizat o functie de launch clara echivalenta cu cea din tlshost.exe.
+
+Ipoteza:
+- tlsservice.exe este componenta care ruleaza in context/sesiune interactiva sau are acces la desktopul interactic si face efectiv detectia focusului, colectarea inputului si captura GDI. tlshost.exe pare mai mult host/transport/video sequencer/orchestrare, iar tlsservice.exe contine codul mai direct pentru HWND/input/GDI.
+
+7. Top 5 cauze posibile pentru captura blocata pe Chrome desi utilizatorul lucreaza in AutoCAD
+
+Fapte relevante:
+- HWND curent se salveaza la obiect+0x90.
+- Metadata pe HWND se pastreaza in QMap la param_1+0x68.
+- Captura foloseste PrintWindow pentru hwnd non-foreground si BitBlt pentru foreground/desktop DC.
+- Desktop/input desktop sunt schimbate explicit prin OpenInputDesktop/SetThreadDesktop.
+
+Ipoteze:
+1. obiect+0x90 nu se actualizeaza la schimbarea focusului spre AutoCAD; cauza posibila: SetWinEventHook/callback blocat, message loop oprit sau desktop gresit.
+2. FUN_140047d80 ramane pe desktop/window station vechi sau OpenInputDesktop/SetThreadDesktop esueaza; GetForegroundWindow returneaza in continuare HWND Chrome.
+3. QMap-ul de metadata param_1+0x68 pastreaza intrarea Chrome si nu primeste/nu accepta AutoCAD din cauza filtrelor IsWindowVisible/GetWindowLongPtrW/GetWindowInfo.
+4. Captura AutoCAD prin PrintWindow/BitBlt/GetDIBits esueaza sau returneaza negru/vechi din cauza randarii GPU; pipeline-ul pastreaza ultimul frame valid Chrome.
+5. Dimensiunea/bufferul din FUN_1400501d0 este insuficient sau GetDIBits esueaza pentru AutoCAD; context+0x20 seteaza necesar nou, dar frame-ul transmis ramane cel anterior.
+
+8. Functii de urmarit in debugger
+
+- 0x14003ee60 FUN_14003ee60: SetWinEventHook si message loop.
+- 0x14003e8e0 FUN_14003e8e0: SetWindowsHookExA keyboard/mouse.
+- 0x140040dd0 FUN_140040dd0: update HWND la obiect+0x90.
+- 0x1400405d0 FUN_1400405d0: input hook, ToUnicodeEx, GetForegroundWindow.
+- 0x140047d80 FUN_140047d80: OpenInputDesktop/SetThreadDesktop/GetForegroundWindow.
+- 0x1400478b0 FUN_1400478b0: EnumDesktopWindows.
+- 0x1400471d0 FUN_1400471d0: GetWindowThreadProcessId/GetWindowTextW/GetProcessImageFileNameW.
+- 0x140046190 FUN_140046190: QMap metadata pe HWND.
+- 0x1400515a0 FUN_1400515a0: GetWindowRect/GetWindowDC/GetForegroundWindow.
+- 0x1400501d0 FUN_1400501d0: PrintWindow/BitBlt/GetDIBits.
+- 0x14016ace0 FUN_14016ace0: shared memory agent channel.
+- 0x1400c37f0 / 0x1400c3af0: named pipe open/handshake.
+
+9. Concluzie finala
+
+Rol probabil al tlsservice.exe:
+- Foarte probabil componenta Kickidler/TLS care detecteaza fereastra activa, colecteaza activitate input si captureaza ecran/fereastra in sesiunea interactiva a utilizatorului.
+- Spre deosebire de tlshost.exe, aici exista dovezi directe pentru hook-uri Windows, HWND/PID/titlu, desktop switching si captura GDI.
+
+Functii principale:
+- Focus/input: FUN_14003ee60, FUN_14003e8e0, FUN_140040dd0, FUN_1400405d0, FUN_140047d80.
+- Metadata ferestre: FUN_1400478b0, FUN_1400471d0, FUN_140046190.
+- Captura: FUN_1400515a0, FUN_1400501d0.
+- IPC: FUN_14016ace0, FUN_1400c37f0, FUN_1400c38d0, FUN_1400c3960, FUN_1400c3af0.
+
+Nivel general de incredere:
+- Ridicat ca tlsservice.exe este componenta care face detectia ferestrei active si colectarea activitatii.
+- Foarte ridicat ca are captura GDI prin PrintWindow/BitBlt/GetDIBits.
+- Mediu ca transmite frame-urile direct; transportul complet nu a fost reconstruit integral in aceasta trecere, dar IPC-ul local este confirmat.

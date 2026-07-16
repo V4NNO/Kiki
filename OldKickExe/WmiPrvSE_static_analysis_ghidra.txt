@@ -1,0 +1,812 @@
+STATIC ANALYSIS - OldKickExe/WmiPrSE.exe / active Ghidra program WmiPrvSE.exe
+Date: 2026-07-16
+Method: static analysis using only Ghidra MCP tools. No binary changes, no patches, no renames, no comments.
+
+NOTE:
+The file name imitates Microsoft WmiPrvSE.exe, but the observed imports and code do not match a normal WMI provider host role. Observed behavior matches the old Kickidler service/grabber component, similar to the newer tlsservice.exe.
+
+============================================================
+1. BASIC PE FACTS
+============================================================
+
+Observed:
+- Architecture: PE64 / x86-64, image base 0x140000000.
+- Entry point: entry @ 0x14000d4fe.
+- TLS callbacks exported:
+  - tls_callback_0 @ 0x140011310
+  - tls_callback_1 @ 0x140214278
+- Exported symbols:
+  - entry @ 0x14000d4fe
+  - tls_callback_0 @ 0x140011310
+  - tls_callback_1 @ 0x140214278
+
+Segments:
+- Headers: 0x140000000 - 0x1400003ff
+- .text:   0x140001000 - 0x14025c1ff
+- .rdata:  0x14025d000 - 0x14034f9ff
+- .data:   0x140350000 - 0x14035d5e0
+- .pdata:  0x14035e000 - 0x14037d5ff
+- .idata:  0x14037e000 - 0x1403915ff
+- .gfids:  0x140392000 - 0x1403921ff
+- .tls:    0x140393000 - 0x1403935ff
+- .00cfg:  0x140394000 - 0x1403941ff
+- .reloc:  0x140395000 - 0x140399dff
+- tdb:     0xff00000000 - 0xff0000184f
+
+Imported DLL namespaces observed:
+- USER32.DLL, GDI32.DLL, WTSAPI32.DLL, ADVAPI32.DLL, KERNEL32.DLL
+- PSAPI.DLL, OLE32.DLL, OLEACC.DLL, OLEAUT32.DLL
+- QT5CORE.DLL, QT5GUI.DLL, QT5NETWORK.DLL, QT5WIDGETS.DLL
+- WINMM.DLL, SETUPAPI.DLL, WS2_32.DLL
+- MSVCP140.DLL, VCRUNTIME140.DLL, API-MS-WIN-CRT-* DLLs
+- LIBEAY32.DLL, SSLEAY32.DLL
+
+Conclusion:
+- This is a Qt/C++ 64-bit executable with GUI/session/network/capture/input/audio capabilities.
+- Confidence: High.
+
+Dynamic test needed:
+- Verify actual process command line and parent process on an affected endpoint.
+
+============================================================
+2. IMPORTANT IMPORTS
+============================================================
+
+Observed focus/window/input/capture APIs:
+- GetForegroundWindow
+- GetWindowThreadProcessId
+- GetGUIThreadInfo
+- EnumDesktopWindows
+- GetWindowTextW
+- GetClassNameW
+- GetWindowRect
+- GetWindowInfo
+- GetWindowLongPtrW
+- IsWindowVisible
+- SetWinEventHook / UnhookWinEvent
+- SetWindowsHookExA / UnhookWindowsHookEx / CallNextHookEx
+- GetMessageA / PostThreadMessageA
+- ToUnicodeEx / GetKeyboardLayout / GetKeyState
+- GetCursorPos / SetCursorPos / SendInput
+- OpenInputDesktop / SetThreadDesktop / GetThreadDesktop / CloseDesktop
+- OpenDesktopA / EnumDesktopsA / OpenWindowStationA / CloseWindowStation
+- GetDesktopWindow / FindWindowExA / FindWindowExW
+- PrintWindow
+- BitBlt
+- GetDC / GetWindowDC / ReleaseDC
+- CreateCompatibleDC / CreateCompatibleBitmap
+- SelectObject / GetDIBits / DeleteObject / DeleteDC
+
+Observed session/service APIs:
+- WTSQuerySessionInformationA
+- WTSQueryUserToken
+- WTSRegisterSessionNotification
+- WTSUnRegisterSessionNotification
+- WTSFreeMemory
+- CreateProcessAsUserW
+- ProcessIdToSessionId
+- SetProcessShutdownParameters
+
+Observed IPC/sync/storage/network APIs:
+- QLocalSocket, QTcpServer, QSslSocket
+- QSharedMemory: setNativeKey, create, attach, detach, data, errorString
+- CreateFileW
+- WaitNamedPipeW
+- SetNamedPipeHandleState
+- TransactNamedPipe
+- WriteFile
+- DuplicateHandle
+- CreateEventA/W, SetEvent, ResetEvent
+- CreateMutexA, OpenMutexA, ReleaseMutex
+- CreateSemaphoreW
+- WaitForSingleObject, WaitForSingleObjectEx, WaitForMultipleObjects
+- socket/connect/bind/listen/accept/send/recv/closesocket
+
+Observed dynamic loading:
+- LoadLibraryA / LoadLibraryW
+- GetProcAddress
+- FreeLibrary
+
+Observed audio/device APIs:
+- WINMM.DLL and SETUPAPI.DLL are imported.
+- waveIn/waveOut and device enumeration imports were observed in the import set during analysis.
+
+Observed Windows Event Log APIs:
+- RegisterEventSourceA
+- ReportEventA
+- DeregisterEventSource
+
+Fact vs interpretation:
+- Fact: Event Log APIs are imported.
+- Interpretation: these are probably for service/application logging, not for active-window detection.
+- Focus/input tracking is done through USER32 WinEvent/hooks, not through Event Viewer logs.
+
+============================================================
+3. STRINGS AND RELATIONSHIPS
+============================================================
+
+Observed string results:
+- Direct searches for "Kick", "grabber", "tlshost", "tssub", "RuntimeBroker", "-ipc-name" returned no readable direct strings in this active Ghidra database.
+- Import-name strings are visible, including:
+  - "GetForegroundWindow"
+  - "SetWinEventHook"
+  - "SetWindowsHookExA"
+  - "PrintWindow"
+  - "BitBlt"
+  - "OpenInputDesktop"
+  - "SetThreadDesktop"
+  - "SetNamedPipeHandleState"
+  - "TransactNamedPipe"
+  - "WaitNamedPipeW"
+  - QSharedMemory import names
+  - QSettings import names
+
+Conclusion:
+- No direct readable relation strings to tlshost.exe / tssubservice.exe were observed in this run.
+- Relationship is inferred from role and matching capability profile with newer tlsservice.exe.
+- Confidence: Medium for relation, High for capability profile.
+
+Dynamic test needed:
+- Inspect process tree, command line, named pipe names, local socket names, and loaded modules at runtime.
+
+============================================================
+4. FUNCTIONS OF INTEREST
+============================================================
+
+------------------------------------------------------------
+Function: entry
+Address: 0x14000d4fe
+Observed role:
+- MSVC CRT startup.
+- Initializes runtime.
+- Calls _get_narrow_winmain_command_line.
+- Calls FUN_1401e1610.
+
+Called APIs/functions:
+- GetCommandLineW indirectly via later WinMain wrapper.
+- CRT init routines: _initterm_e, _initterm, exit, _cexit.
+
+Relevant pseudocode:
+  entry() {
+      initialize_crt();
+      cmd = _get_narrow_winmain_command_line();
+      code = FUN_1401e1610(image_base, 0, cmd, show_mode);
+      exit(code);
+  }
+
+Conclusion:
+- Standard PE startup wrapper.
+- Confidence: High.
+- Dynamic test: none required beyond process launch tracing.
+
+------------------------------------------------------------
+Function: FUN_1401e1610
+Address: 0x1401e1610
+Observed role:
+- Unicode command-line wrapper.
+- Uses GetCommandLineW and CommandLineToArgvW.
+- Converts argv from UTF-16 to multibyte via WideCharToMultiByte.
+- Calls FUN_1400302a0(argc, argv).
+
+Windows APIs:
+- GetCommandLineW
+- CommandLineToArgvW
+- WideCharToMultiByte
+- LocalFree
+
+Relevant pseudocode:
+  FUN_1401e1610() {
+      wchar_argv = CommandLineToArgvW(GetCommandLineW(), &argc);
+      argv = convert_each_argument_to_multibyte(wchar_argv);
+      LocalFree(wchar_argv);
+      rc = FUN_1400302a0(argc, argv);
+      free(argv);
+      return rc;
+  }
+
+Conclusion:
+- Main wrapper before real Qt/application initialization.
+- Confidence: High.
+- Dynamic test: capture process command line.
+
+------------------------------------------------------------
+Function: FUN_1400302a0
+Address: 0x1400302a0
+Observed role:
+- Main application function.
+- Sets Qt application name.
+- Builds a session-dependent name using ProcessIdToSessionId.
+- Initializes QApplication.
+- Uses QSettings.
+- Installs Qt message handler.
+- Initializes a manager object via FUN_1400872d0.
+- Calls QApplication::exec if initialization succeeds.
+
+Windows APIs:
+- SetProcessShutdownParameters
+- GetCurrentProcessId
+- ProcessIdToSessionId
+
+Qt APIs:
+- QCoreApplication::setApplicationName
+- QApplication constructor / exec / destructor
+- QSettings constructor / value
+- qInstallMessageHandler
+- QFileInfo / QDir path helpers
+
+Relevant pseudocode:
+  FUN_1400302a0(argc, argv) {
+      QCoreApplication::setApplicationName(...);
+      parse_optional_argument();
+      SetProcessShutdownParameters(0, 0);
+      session = ProcessIdToSessionId(GetCurrentProcessId());
+      build_session_name(session);
+      qInstallMessageHandler(handler);
+      QApplication app(argc, argv);
+      settings = QSettings(...);
+      init_resources();
+      manager = FUN_1400872d0(...);
+      if (manager_ok) QApplication::exec();
+      cleanup();
+  }
+
+Conclusion:
+- This is the real main. The old executable is not a passive WMI host; it starts a Qt event-loop based service/grabber process in the user/session context.
+- Confidence: High.
+- Dynamic test: inspect command line and loaded Qt modules; verify event loop thread exists.
+
+------------------------------------------------------------
+Function: FUN_14003d990
+Address: 0x14003d990
+Observed role:
+- Installs low-level keyboard and mouse hooks.
+
+Callers:
+- Not fully enumerated by MCP in this run.
+- Object constructor path FUN_14003cb20 initializes the containing object.
+
+Windows APIs:
+- GetModuleHandleA
+- SetWindowsHookExA
+- GetLastError
+
+Observed details:
+- Calls SetWindowsHookExA(0x0d, callback, module, 0)
+  - 0x0d = WH_KEYBOARD_LL
+- Stores returned hook handle at object + 0x78.
+- Calls SetWindowsHookExA(0x0e, callback, module, ...)
+  - 0x0e = WH_MOUSE_LL
+- Stores returned hook handle at object + 0x80.
+
+Relevant pseudocode:
+  FUN_14003d990(obj) {
+      hmod = GetModuleHandleA(NULL);
+      obj->keyboard_hook = SetWindowsHookExA(WH_KEYBOARD_LL, hook_proc, hmod, 0);
+      if (!obj->keyboard_hook) log(GetLastError());
+
+      hmod = GetModuleHandleA(NULL);
+      obj->mouse_hook = SetWindowsHookExA(WH_MOUSE_LL, hook_proc, hmod, 0);
+      if (!obj->mouse_hook) log(GetLastError());
+  }
+
+Conclusion:
+- This executable can collect keyboard/mouse activity by low-level hooks.
+- This is not Event Viewer. It receives events directly through USER32 hook callbacks.
+- Confidence: High.
+- Dynamic test: breakpoint SetWindowsHookExA; confirm hook IDs 13 and 14 and callback address.
+
+------------------------------------------------------------
+Function: FUN_14003ebd0
+Address: 0x14003ebd0
+Observed role:
+- Opens input desktop and attempts to switch the current thread to it.
+
+Windows APIs:
+- OpenInputDesktop
+- GetUserObjectInformationA
+- SetThreadDesktop
+- CloseDesktop
+- GetLastError
+
+Observed details:
+- Calls OpenInputDesktop(0, 0, 8).
+- Calls GetUserObjectInformationA(desktop, 2, buffer, 0x100).
+- Checks desktop name against strings that decompile as a QStringList.
+- Calls SetThreadDesktop(desktop) if checks pass.
+- Calls CloseDesktop(desktop).
+
+Relevant pseudocode:
+  FUN_14003ebd0() {
+      hdesk = OpenInputDesktop(0, FALSE, DESKTOP_SWITCHDESKTOP);
+      if (!hdesk) { log(GetLastError()); return; }
+
+      if (!GetUserObjectInformationA(hdesk, UOI_NAME, name, sizeof(name), ...)) {
+          log(GetLastError());
+      } else {
+          if (desktop_name_is_allowed(name)) {
+              if (!SetThreadDesktop(hdesk)) log(GetLastError());
+          }
+      }
+      CloseDesktop(hdesk);
+  }
+
+Conclusion:
+- The process actively tracks/switches to the active input desktop. This is relevant to stale active-window metadata bugs.
+- Confidence: High.
+- Dynamic test: breakpoint OpenInputDesktop / SetThreadDesktop / GetLastError during a stale "Running Applications" event.
+
+------------------------------------------------------------
+Function: FUN_14003e3e0
+Address: 0x14003e3e0
+Observed role:
+- OS/version capability setup.
+
+Windows APIs:
+- GetVersionExA
+- GetLastError
+
+Observed details:
+- Stores a flag at object + 0x98 depending on OS version.
+
+Relevant pseudocode:
+  FUN_14003e3e0(obj) {
+      obj->compat_flag = true;
+      if (GetVersionExA(&version)) {
+          obj->compat_flag = version_is_old_enough(version);
+      } else {
+          log(GetLastError());
+      }
+  }
+
+Conclusion:
+- Compatibility switch, probably affects capture/input strategy.
+- Confidence: Medium.
+- Dynamic test: inspect object +0x98 on affected OS.
+
+------------------------------------------------------------
+Function: FUN_14003cb20
+Address: 0x14003cb20
+Observed role:
+- Constructor-like initializer for the input/activity collector object.
+
+Called functions:
+- FUN_14003aee0
+- FUN_14003e3e0
+
+Observed details:
+- Initializes QObject-derived object fields.
+- Initializes state fields at offsets 0x68, 0x70, 0x78, 0x80, 0x88, 0x90.
+- Calls OS/version setup.
+
+Relevant pseudocode:
+  FUN_14003cb20(obj) {
+      init_QObject_and_activity_state(obj);
+      obj->keyboard_hook = 0;
+      obj->mouse_hook = 0;
+      obj->other_state = 0;
+      FUN_14003e3e0(obj);
+  }
+
+Conclusion:
+- Activity/input tracking object initializer.
+- Confidence: Medium.
+- Dynamic test: inspect constructor caller and object lifetime.
+
+------------------------------------------------------------
+Function: FUN_1400409b0
+Address: 0x1400409b0
+Observed role:
+- Constructor-like initializer for a window/focus metadata object.
+
+Qt APIs:
+- QObject constructor
+- QMutex
+- QTimer
+- QTimer::setInterval(500)
+- QObject::connect to timeout handler thunk_FUN_140043c20
+
+Observed fields:
+- QMap/QHash containers at object offsets around +0x38, +0x40, +0x48, +0x58, +0x68.
+- State byte at object +0x7a.
+- Timer interval: 500 ms.
+
+Relevant pseudocode:
+  FUN_1400409b0(obj) {
+      QObject::QObject(obj);
+      QMutex::QMutex(obj+0x10, recursive);
+      QTimer::QTimer(obj+0x18);
+      init_maps_and_hashes(obj);
+      connect(timer.timeout, obj, thunk_FUN_140043c20);
+      QTimer::setInterval(timer, 500);
+  }
+
+Conclusion:
+- The focus/window metadata pipeline has a polling/timer component in addition to hooks/events.
+- Confidence: Medium-High.
+- Dynamic test: breakpoint QTimer timeout / thunk_FUN_140043c20 and see what metadata is emitted.
+
+------------------------------------------------------------
+Function: FUN_140043c20
+Address: 0x140043c20
+Observed role:
+- Timer timeout callback wrapper.
+
+Called functions:
+- Locks QMutex.
+- Asserts object state byte at +0x7a.
+- Calls virtual method at vtable +0x68.
+
+Relevant pseudocode:
+  FUN_140043c20(obj) {
+      lock(obj->mutex);
+      assert(obj->running_state != 0);
+      obj->vtable->tick_or_flush(obj);
+      unlock(obj->mutex);
+  }
+
+Conclusion:
+- Periodic metadata/capture state flush/update dispatcher.
+- Confidence: Medium.
+- Dynamic test: breakpoint this function during stale Running Applications metadata.
+
+------------------------------------------------------------
+Function: FUN_140049860
+Address: 0x140049860
+Observed role:
+- Session/user-helper initializer.
+- Dynamically loads helper DLLs and resolves functions.
+- Queries active WTS session and user token.
+- Reads registry under user SID.
+
+Windows APIs:
+- LoadLibraryA
+- GetProcAddress
+- FreeLibrary
+- WTSQuerySessionInformationA
+- WTSFreeMemory
+- WTSQueryUserToken
+- GetTokenInformation
+- ConvertSidToStringSidW
+- RegOpenKeyExW
+- LocalFree
+- CloseHandle
+- GetLastError
+
+Relevant pseudocode:
+  FUN_140049860(obj) {
+      obj->lib1 = LoadLibraryA(...);
+      obj->lib2 = LoadLibraryA(...);
+      resolve_multiple_functions_with_GetProcAddress();
+      if (resolve_failed) unload_and_disable();
+
+      if (WTSQuerySessionInformationA(..., WTSActiveConsoleSessionId, ...)) {
+          token = WTSQueryUserToken(session_id);
+          sid = GetTokenInformation(TokenUser);
+          sid_string = ConvertSidToStringSidW(sid);
+          RegOpenKeyExW(HKEY_USERS, sid_string, ...);
+      }
+  }
+
+Conclusion:
+- Bridges service/session/user context. This matters because stale metadata may be session or desktop related.
+- Confidence: High.
+- Dynamic test: log return values of WTSQuerySessionInformationA/WTSQueryUserToken/GetTokenInformation on affected machines.
+
+------------------------------------------------------------
+Function: FUN_140046270
+Address: 0x140046270
+Observed role:
+- Constructor-like initializer for a higher-level capture/session object.
+
+Called functions:
+- FUN_1400409b0
+- FUN_140049860
+
+Observed details:
+- Allocates 0xe0 bytes.
+- Initializes a metadata object.
+- Initializes session/user helper at object +0x88.
+- Clears field at object +0xd8.
+
+Relevant pseudocode:
+  FUN_140046270() {
+      obj = new object(0xe0);
+      FUN_1400409b0(obj);
+      obj->vtable = ...;
+      FUN_140049860(obj + 0x88);
+      obj->field_d8 = 0;
+      return obj;
+  }
+
+Conclusion:
+- Top-level collector/grabber object constructor candidate.
+- Confidence: Medium.
+- Dynamic test: inspect object references and vtable virtual methods.
+
+------------------------------------------------------------
+Function: FUN_140050370
+Address: 0x140050370
+Observed role:
+- Constructor-like initializer for an accessibility/window enumeration helper.
+
+Called functions:
+- FUN_140051810
+- FUN_1400536e0
+
+Observed details:
+- Initializes fields.
+- Initializes QMap at +0x28.
+- Calls dynamic COM/accessibility setup and enumeration.
+
+Relevant pseudocode:
+  FUN_140050370(obj) {
+      clear_fields(obj);
+      obj->map = shared_null_QMap;
+      FUN_140051810(obj);
+      FUN_1400536e0(obj);
+      return obj;
+  }
+
+Conclusion:
+- Helper for enumerating/accessing window/UI elements, likely via COM/accessibility.
+- Confidence: Medium.
+- Dynamic test: breakpoint OLEACC/COM calls and map updates.
+
+------------------------------------------------------------
+Function: FUN_140051810
+Address: 0x140051810
+Observed role:
+- Dynamic loader for COM/accessibility helper libraries/functions.
+
+Windows APIs:
+- LoadLibraryW
+- GetProcAddress
+- FreeLibrary
+
+Called functions:
+- FUN_140050bf0
+- FUN_140050c70
+- FUN_140050970
+
+Observed details:
+- Loads two DLLs by wide string.
+- Resolves two function pointers.
+- Calls one resolved function with an IID-like/static object and callback/state.
+- On failure logs errors and unloads.
+
+Relevant pseudocode:
+  FUN_140051810(obj) {
+      cleanup_previous_state(obj);
+      obj->lib1 = LoadLibraryW(...);
+      obj->lib2 = LoadLibraryW(...);
+      obj->fn1 = GetProcAddress(obj->lib1, ...);
+      obj->fn2 = GetProcAddress(obj->lib2, ...);
+      if (!obj->fn1 || !obj->fn2) cleanup();
+      else {
+          hr = obj->fn1(..., callback_object);
+          if (hr < 0) cleanup();
+      }
+  }
+
+Conclusion:
+- Dynamic capability loader. Exact DLL/function names were not decoded by MCP string output, but behavior is clear.
+- Confidence: Medium.
+- Dynamic test: breakpoint LoadLibraryW/GetProcAddress and capture resolved names.
+
+------------------------------------------------------------
+Function: FUN_1400536e0
+Address: 0x1400536e0
+Observed role:
+- Enumerates interfaces/objects from a COM-like provider.
+
+Observed details:
+- Checks function pointers at object +0x10/+0x18/+0x20.
+- Loops index from zero.
+- Calls virtual method at provider +0x60 to get item.
+- Passes each item to FUN_140052240.
+
+Relevant pseudocode:
+  FUN_1400536e0(obj) {
+      if (!obj->provider_ready) return false;
+      for (i = 0; provider->get_item(i, &item) >= 0; i++) {
+          add_or_process_item(obj, item);
+      }
+      return true;
+  }
+
+Conclusion:
+- Enumerates UI/accessibility/monitor capture helper objects.
+- Confidence: Medium.
+- Dynamic test: inspect COM interfaces and HRESULTs.
+
+------------------------------------------------------------
+Function: FUN_140052240
+Address: 0x140052240
+Observed role:
+- Processes/enumerates objects from the dynamic provider.
+- Maintains a QMap keyed by QString.
+
+Observed details:
+- Calls a provider method repeatedly with retry counter.
+- Extracts wide string name with _fromWCharArray_QString.
+- Updates QMap at object +0x28.
+- Uses reference-counted objects.
+
+Relevant pseudocode:
+  FUN_140052240(obj, provider_item) {
+      retry provider setup;
+      for each child/interface {
+          name = QString::fromWCharArray(...);
+          wrapped = build_object_from_interfaces(...);
+          obj->map[name] = wrapped;
+      }
+  }
+
+Conclusion:
+- Maintains a map of dynamic UI/accessibility/provider objects. Could support title/process/window metadata enrichment.
+- Confidence: Medium.
+- Dynamic test: inspect QMap keys during application switches.
+
+============================================================
+5. CAPTURE / FOCUS / IPC FLOW
+============================================================
+
+Observed facts:
+- The executable imports all APIs needed for:
+  - active window detection: GetForegroundWindow, GetGUIThreadInfo, GetWindowThreadProcessId
+  - window metadata: GetWindowTextW, GetClassNameW, GetWindowRect, GetWindowInfo
+  - focus/window events: SetWinEventHook
+  - keyboard/mouse events: SetWindowsHookExA with WH_KEYBOARD_LL and WH_MOUSE_LL
+  - desktop/session switching: OpenInputDesktop, SetThreadDesktop, WTS APIs
+  - GDI capture: PrintWindow, BitBlt, GetDC/GetWindowDC, CreateCompatibleDC, CreateCompatibleBitmap, GetDIBits
+  - IPC: QLocalSocket/QTcpServer/QSharedMemory/named pipes/sockets/events/mutexes
+  - logging: ReportEventA/RegisterEventSourceA and internal Qt/std logging
+
+Observed code:
+- FUN_14003d990 installs keyboard/mouse hooks.
+- FUN_14003ebd0 opens/switches to input desktop.
+- FUN_1400409b0 creates a timer-driven metadata object.
+- FUN_140043c20 periodically dispatches state update/flush.
+- FUN_140049860 bridges active WTS session/user token.
+- FUN_1400302a0 starts QApplication event loop and manager.
+
+Probable flow:
+  process start
+  -> real main FUN_1400302a0
+  -> Qt event loop and manager init
+  -> session/user/desktop setup
+  -> WinEvent/hook/timer based activity tracking
+  -> active HWND/PID/title/class/rect collection
+  -> GDI/other capture path when needed
+  -> frame/metadata stored in Qt containers/shared memory
+  -> IPC through QLocalSocket/named pipe/socket to service/host/viewer pipeline
+
+Confidence:
+- High that this binary performs focus/input/capture/session work.
+- Medium for exact ordering of all components because complete caller graph was not fully reconstructed.
+
+============================================================
+6. GLOBALS / STRUCTURES LIKELY HOLDING STATE
+============================================================
+
+Observed:
+- FUN_14003d990 stores hook handles:
+  - object +0x78: keyboard hook handle
+  - object +0x80: mouse hook handle
+- FUN_14003e3e0 stores OS capability/compatibility flag:
+  - object +0x98
+- FUN_1400409b0 initializes maps/hashes and timer:
+  - object +0x18: QTimer
+  - object +0x38, +0x40, +0x48, +0x58, +0x68: QMap/QHash-like containers
+  - object +0x7a: running/state byte
+- FUN_140049860 stores dynamically loaded libraries/function pointers and user/session registry state.
+- FUN_140050370 / FUN_140052240 maintain QMap at object +0x28 keyed by QString.
+
+Hypotheses:
+- Last HWND/PID/title/window metadata is likely in QMap/QHash containers initialized by FUN_1400409b0.
+- Last provider/window/UI object map is likely object +0x28 in FUN_140050370/FUN_140052240.
+- Capture thread state is likely tied to QTimer/Qt object state byte +0x7a and virtual method called by FUN_140043c20.
+
+Confidence:
+- Medium, because original variable names are stripped and MCP xrefs to import thunks were incomplete.
+
+Dynamic test:
+- Watch writes to object fields after GetForegroundWindow / GetWindowThreadProcessId / GetWindowTextW / SetWinEventHook callback.
+
+============================================================
+7. TOP 5 CAUSES FOR STALE "RUNNING APPLICATIONS" METADATA
+============================================================
+
+Context-specific note:
+- User reported video can look normal while Kickidler Viewer "Running Applications" remains stuck on an old process/tab.
+- Therefore the likely bug is in focus/window metadata pipeline, not necessarily screen pixels.
+
+1. WinEvent/hook/timer pipeline misses or drops a focus transition.
+   - Relevant functions/APIs: SetWinEventHook, SetWindowsHookExA, FUN_140043c20, QTimer interval 500 ms.
+   - Why: video can continue while last active HWND/PID/title metadata remains stale.
+   - Confidence: High.
+
+2. Internal QMap/QHash state is not updated or not flushed after a focus change.
+   - Relevant functions: FUN_1400409b0, FUN_140043c20, vtable method at +0x68, FUN_140052240.
+   - Why: stale "Running Applications" sounds like stale metadata cache.
+   - Confidence: Medium-High.
+
+3. Input desktop/session switch fails intermittently.
+   - Relevant function: FUN_14003ebd0.
+   - APIs: OpenInputDesktop, SetThreadDesktop, GetUserObjectInformationA.
+   - Why: if tracking thread reads wrong desktop, GetForegroundWindow / GUI info may return old or unusable state.
+   - Confidence: Medium.
+
+4. IPC carries stale metadata even if local tracking updates correctly.
+   - Relevant imports: QLocalSocket, QSharedMemory, named pipe APIs, events/mutexes.
+   - Why: Running Applications can be a separate metadata channel from video.
+   - Confidence: Medium.
+
+5. Race/lock/wait in Qt timer or worker thread.
+   - Relevant functions/imports: FUN_140043c20, QMutex, WaitForSingleObject, WaitForMultipleObjects, condition variables, QTimer.
+   - Why: random occurrence across processes/tabs fits race/timing/lock issue better than an AutoCAD-only capture issue.
+   - Confidence: Medium.
+
+============================================================
+8. FUNCTIONS/APIS TO WATCH IN DEBUGGER
+============================================================
+
+Primary breakpoints:
+- FUN_1400302a0: main init
+- FUN_14003d990: low-level keyboard/mouse hook install
+- FUN_14003ebd0: input desktop switch
+- FUN_1400409b0: metadata tracker object constructor
+- FUN_140043c20: 500 ms timer dispatcher
+- FUN_140049860: WTS/session/user helper init
+- FUN_140046270: top-level collector object constructor
+- FUN_140050370: provider/helper object constructor
+- FUN_140051810: dynamic LoadLibrary/GetProcAddress helper
+- FUN_140052240: QMap update from provider/UI objects
+
+Primary API breakpoints:
+- SetWinEventHook
+- GetForegroundWindow
+- GetGUIThreadInfo
+- GetWindowThreadProcessId
+- GetWindowTextW
+- GetClassNameW
+- GetWindowRect
+- SetWindowsHookExA
+- OpenInputDesktop
+- SetThreadDesktop
+- WTSQuerySessionInformationA
+- WTSQueryUserToken
+- PrintWindow
+- BitBlt
+- GetDIBits
+- QLocalSocket write/read methods if symbols are available
+- QSharedMemory::data / attach / detach
+- CreateFileW / WaitNamedPipeW / TransactNamedPipe / WriteFile
+- ReportEventA only for logging/diagnostics, not for focus collection.
+
+============================================================
+9. FINAL CONCLUSION
+============================================================
+
+Observed role:
+- WmiPrvSE.exe from OldKickExe is very likely the old Kickidler service/grabber component equivalent to the newer tlsservice.exe.
+- It is not merely a subagent like old RuntimeBroker.exe.
+- It imports and contains code paths for:
+  - keyboard/mouse hooks
+  - focus/window/session/desktop tracking
+  - GDI capture
+  - shared memory/local socket/named pipe IPC
+  - Qt timer-driven metadata updates
+  - user/session bridging through WTS
+
+Relation to other executables:
+- Direct readable strings linking to tlshost.exe/tssubservice.exe were not observed here.
+- Functional relation is clear by role:
+  - old RuntimeBroker.exe: subagent/UI/clipboard/settings/HTTP role.
+  - old WmiPrvSE.exe: service/grabber/focus/input/capture role.
+  - newer tlsservice.exe: same broad service/grabber role as this old WmiPrSE.exe.
+
+Most relevant hypothesis for the user's issue:
+- Since video can be normal while "Running Applications" is stale, the likely failure is not GDI frame capture itself.
+- The likely failure is stale active-window metadata caused by missed focus event, failed desktop/session switch, stale QMap/QHash cache, or IPC flush/race in the metadata channel.
+
