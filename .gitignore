@@ -1,3 +1,8 @@
 # Ghidra și Ghidra MCP
 GhidraMCP-release-1-4/
 ghidra_12.1_PUBLIC/
+.ghidra-work/
+ghidra-work/
+
+# Executabile generate local
+*.exe
