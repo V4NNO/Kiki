@@ -1,0 +1,347 @@
+ANALIZA STATICA GHIDRA MCP - tlssubservice.exe / grabberSubAgent
+Data: 2026-09-01
+
+1. IDENTIFICAREA PROGRAMULUI ANALIZAT
+
+Analiza a fost efectuata asupra programului activ din Ghidra MCP, deschis de
+utilizator ca tlssubservice.exe.
+
+Observatie importanta: binarul activ nu contine literalul "tlssubservice.exe"
+sau "tlssubservice". Identitatea interna si rolul sunt sustinute de:
+
+- 0x1400DBE50:
+  R:\bbuild-8\KICK-EVPROD-WIN64\components\app-grabberSubAgent\main.cpp
+- 0x1400DBEE0: "KickidlerGrabber"
+- 0x1400DBF40: "-ipc-name"
+- 0x1400DDD50: "grabberSubAgent::io::Service"
+- cai de build impl-grabberSubAgent-io, -userInfo, -http si -ui.
+
+Concluzia prudenta este ca programul analizat este componenta
+grabberSubAgent folosita sub numele extern tlssubservice.exe. Maparea numelui
+tlssubservice apare in tlshost.exe, nu ca literal in acest subagent.
+
+Fisierul tlssubservice.exe nu este prezent ca fisier normal in arborele local
+al workspace-ului. Nu au putut fi calculate local hash-ul, dimensiunea sau
+semnatura Authenticode; analiza foloseste programul incarcat in Ghidra.
+
+2. FORMAT, LIMBAJ SI TOOLCHAIN
+
+- Executabil PE pe 64 de biti, image base 0x140000000.
+- Limbaj principal: C++.
+- Runtime/compiler: Microsoft Visual C++ din generatia v14, indicat de CRT,
+  __security_init_cookie, RTTI si template-urile C++.
+- Framework: Qt 5.6.2, vizibil in caile de build si in importurile/clasele
+  QApplication, QLocalServer, QLocalSocket, QNetworkAccessManager, QJsonDocument,
+  QClipboard, QSystemTrayIcon, QImage si QML/Quick.
+
+Concluzie: extensia .cpp este corecta. Fisierul
+tlssubservice_ghidra_decompiled.cpp contine pseudocodul C/C++ emis de Ghidra,
+cu numele FUN_/DAT_/LAB_ pastrate si fara functii inventate.
+
+3. DIMENSIUNE SI STRUCTURA
+
+Ghidra recunoaste:
+
+- 7.914 functii;
+- 966 simboluri importate;
+- 284 clase/namespace-uri.
+
+Segmente:
+
+- Headers: 0x140000000 - 0x1400003FF
+- .text:   0x140001000 - 0x1400D93FF
+- .rdata:  0x1400DA000 - 0x1407621FF
+- .data:   0x140763000 - 0x1407679F8
+- .pdata:  0x140768000 - 0x140772FFF
+- .idata:  0x140773000 - 0x1407837FF
+- .gfids:  0x140784000 - 0x1407841FF
+- .tls:    0x140785000 - 0x1407853FF
+- .00cfg:  0x140786000 - 0x1407861FF
+- .rsrc:   0x140787000 - 0x1407875FF
+- .reloc:  0x140788000 - 0x14078CDFF
+
+Singurul export numit de Ghidra este:
+
+- entry -> 0x140002F3B
+
+Sectiunea .gfids indica folosirea Control Flow Guard. Exista o sectiune .tls,
+dar Ghidra nu expune callback-uri TLS cu nume in aceasta analiza; raportul nu
+inventeaza adrese sau functii pentru ele.
+
+4. PORNIREA SI MODURILE APLICATIEI
+
+- entry @ 0x140002F3B initializeaza security cookie-ul si transfera controlul
+  catre startup-ul CRT FUN_1400B8390.
+- FUN_140017280 @ 0x140017280 are semnatura
+  int FUN_140017280(int param_1, char **param_2) si este functia main.
+- Numele aplicatiei Qt este "KickidlerGrabber".
+- Este construita QApplication si este dezactivata inchiderea automata la
+  disparitia ultimei ferestre prin QGuiApplication::setQuitOnLastWindowClosed.
+- Codul proceseaza optiunile "-get-network-proxies", "-logging-postfix" si
+  "-ipc-name".
+- Sunt apelate SetProcessShutdownParameters, GetCurrentProcessId si
+  ProcessIdToSessionId, iar identificatorul sesiunii este inclus in eticheta
+  subagentului.
+- In modul IPC este creat serviciul local, este pornit listener-ul si apoi
+  aplicatia intra in QApplication::exec().
+
+5. MODUL AUXILIAR -get-network-proxies
+
+Daca primul argument este "-get-network-proxies", main apeleaza
+FUN_1400148A0 @ 0x1400148A0.
+
+Aceasta functie:
+
+- interogheaza QNetworkProxyFactory::systemProxyForQuery;
+- parcurge lista de QNetworkProxy;
+- extrage pentru fiecare intrare type, hostName, password, port si user;
+- construieste structuri QVariant/QMap;
+- serializeaza rezultatul prin QJsonDocument::fromVariant si toJson.
+
+Acesta corespunde helper-ului lansat de tlshost.exe in sesiunea utilizatorului.
+In analiza tlshost, procesul copil era pornit cu CreateProcessAsUserW, iar
+rezultatul JSON era citit din pipe si interpretat prin campurile "uid" si
+"proxies".
+
+6. PARAMETRUL OBLIGATORIU -ipc-name
+
+In modul normal, main cauta argumentul "-ipc-name". Daca nu exista:
+
+- logheaza "IPC name not specified";
+- nu porneste serviciul local normal.
+
+Daca numele IPC este prezent:
+
+- construieste grabberSubAgent::io::Service;
+- transmite numele catre FUN_14001C2C0;
+- intra in event loop-ul QApplication.
+
+Numele pipe/socket-ului nu este fix in binar; este primit la runtime. Aceasta
+explica de ce legatura cu tlshost/tlsservice nu necesita un literal cu numele
+executabilului in subagent.
+
+7. SERVERUL IPC LOCAL
+
+FUN_140019E70 @ 0x140019E70 construieste obiectul serviciului:
+
+- initializeaza QObject, QLocalServer si QTimer;
+- inregistreaza metatipurile Qt necesare.
+
+FUN_14001C2C0 @ 0x14001C2C0:
+
+- conecteaza semnalul newConnection;
+- porneste QLocalServer::listen cu numele primit prin -ipc-name;
+- logheaza "Starting to listen";
+- porneste un timer de 60.000 ms;
+- trateaza "local server does not listen" si "server refuse listening".
+
+FUN_14001D930 @ 0x14001D930:
+
+- trateaza expirarea asteptarii conexiunii;
+- logheaza "await conection timeout. aborting.";
+- apeleaza QCoreApplication::quit().
+
+FUN_14001A7E0 si FUN_14001AAA0 logheaza erorile si tranzitiile de stare ale
+socket-ului IPC.
+
+8. OBIECTUL RPC SI OPERATIILE EXPUSE
+
+FUN_14001CB90 @ 0x14001CB90 gestioneaza o conexiune noua si creeaza obiectul
+local RPC. Sunt inregistrate explicit urmatoarele perechi operatie/handler:
+
+- getUserInfo -> onGetUserInfo
+- getSystemProxies -> onGetSystemProxies
+- resetClipboard -> onResetClipboard
+- setClipboardText -> onSetClipboardText
+- setClipboardHtml -> onSetClipboardHtml
+- setClipboardImage -> onSetClipboardImage
+- setClipboardMimeData -> onSetClipboardMimeData
+- clearClipboard -> onClearClipboard
+- getClipboardUrls -> onGetClipboardUrls
+- setSelfControlState -> onSelfControlState
+- setSelfControlDayActivity -> onSelfControlDayActivity
+- setSelfControlDayRating -> onSelfControlDayRating
+- setSelfControlWebToken -> onSelfControlWebToken
+- notifySelfControlTasksChanged -> onSelfControlTasksChanged
+- setNotificationAlert -> onNotificationAlert
+- setWebinterfaceLink -> onWebinterfaceLink
+
+Dupa conectare este transmis si apelul de test "testPing" cu valoarea
+"test ping". O conexiune duplicata este refuzata cu mesajul
+"Attempted to connect to already connected IPC (!)".
+
+9. SERIALIZAREA SI SCRIEREA RPC
+
+FUN_14007B590 @ 0x14007B590, din impl-localRPC\caller.cpp:
+
+- serializeaza mesajul intern;
+- scrie incremental in QIODevice/QLocalSocket prin QIODevice::write;
+- asteapta confirmarea scrierii;
+- logheaza error, errorString, errno si socketState;
+- apeleaza QLocalSocket::abort la erori;
+- trateaza distrugerea si inchiderea IPC.
+
+Stringurile globale confirma si limite de buffer:
+
+- "Max buffer size exceed for IPC"
+- "Going to shutdown IPC"
+- "Going to destroy IPC"
+
+10. INFORMATIILE UTILIZATORULUI SI ACTIVE DIRECTORY
+
+FUN_140023EC0 @ 0x140023EC0:
+
+- incearca GetUserNameExW pentru distinguished name si GUID;
+- foloseste GetUserNameW pentru numele local;
+- incearca sursele in ordine: API-ul Windows, LDAP, apoi registry;
+- construieste campurile fullName, distinguishedName, GUID, local, fail si home.
+
+Mesajele de log includ:
+
+- "AD info successfully fetched by GetUserNameEx"
+- "failed to query AD info from AD, trying to get from LDAP"
+- "AD info successfully fetched from LDAP"
+- "failed to query AD info from LDAP, trying to get from registry"
+- "AD info successfully fetched from registry"
+- "Failed to obtain AD GUID and DN in anyway"
+
+FUN_1400228D0 @ 0x1400228D0:
+
+- construieste calea "LDAP://";
+- interogheaza obiecte ADSI;
+- extrage firstName, lastName si fullName;
+- trateaza ADsGetObject si elibereaza BSTR-urile.
+
+11. CLIPBOARD
+
+FUN_14006F410 @ 0x14006F410 inspecteaza QMimeData in aceasta ordine:
+
+- URL-uri;
+- HTML;
+- text;
+- imagine.
+
+Imaginile sunt convertite in PNG prin QImage::save intr-un QBuffer. Codul
+serviciului RPC expune si setarea/curatarea clipboard-ului, MIME arbitrar si
+citirea URL-urilor.
+
+FUN_14006F8F0 initializeaza obiectul Clipboard, conecteaza semnalele Qt si
+gestioneaza starea/memoria.
+
+12. HTTP SI API-URILE EMPLOYEE/SELF-CONTROL
+
+FUN_140083580 @ 0x140083580, din
+impl-grabberSubAgent-http\manager.cpp:
+
+- foloseste QNetworkAccessManager::get si post;
+- asteapta web token-ul si web interface link-ul;
+- pentru GET adauga "?web_token=" la URL;
+- pentru POST construieste JSON cu skp_version si web_token;
+- seteaza Content-Type la "application/json";
+- logheaza URL-ul/metoda si payload-ul transmis.
+
+Endpoint-uri definite in binar:
+
+- /service/branding
+- /service/skp_employee/version
+- /service/skp_employee/tasks
+- /service/skp_employee/task
+
+Exista URL-uri Kickidler pentru site, documentatie si version history.
+
+13. INTERFATA UTILIZATOR, NOTIFICARI SI SELF-CONTROL
+
+FUN_1400875D0 @ 0x1400875D0:
+
+- initializeaza managerul UI;
+- creeaza QSystemTrayIcon, QMenu si iconita selfcontrol_icon.ico;
+- selecteaza limba prin QLocale;
+- initializeaza baza de setari;
+- logheaza succesul sau "agent ui cannot be initialized".
+
+FUN_140091870 gestioneaza modelul de notificari si inserarea randurilor in
+QAbstractItemModel.
+
+FUN_1400A1E40 proceseaza date JSON de branding/self-control si imaginea logo.
+
+FUN_1400A6B50 proceseaza elemente ale modelului task tracker si verifica strict
+indexarea listei.
+
+Clasele/importurile QQuickView, QQuickWindow, QQuickImageProvider si
+QQmlElement arata ca interfata foloseste si Qt Quick/QML.
+
+14. RETEA SI SSL
+
+Programul foloseste QNetworkAccessManager si include tipuri/importuri pentru
+QSslCertificate, QSslConfiguration, QSslKey si semnalul encrypted. Aceasta
+permite cereri HTTPS in subsistemul HTTP. In functiile selectate, logica
+principala este la nivel QNetworkAccessManager, nu implementarea directa a
+handshake-ului TLS.
+
+15. DIFERENTA FATA DE tlsservice.exe SI tlshost.exe
+
+In importurile tlssubservice/grabberSubAgent nu apar:
+
+- GetForegroundWindow, GetGUIThreadInfo, SetWinEventHook sau SetWindowsHookEx;
+- OpenInputDesktop sau SetThreadDesktop;
+- PrintWindow, BitBlt sau GetDIBits;
+- WTSEnumerateSessionsW, WTSQueryUserToken sau CreateProcessAsUserW;
+- OpenSCManagerW sau CreateServiceW.
+
+Separarea sustinuta de cele trei analize:
+
+- tlsservice.exe: focus/input, desktop interactiv si captura GDI;
+- tlshost.exe: serviciu Windows, sesiuni WTS, pornirea proceselor utilizator,
+  manageri/collector, transport si rutarea cadrelor video;
+- tlssubservice.exe/grabberSubAgent: IPC local, proxy-uri sistem, informatii
+  utilizator/AD, clipboard, HTTP si interfata self-control/notificari.
+
+16. CONCLUZIE
+
+Programul activ este o aplicatie C++ x64, compilata cu Microsoft Visual C++ si
+bazata pe Qt 5.6.2. Continutul confirma rolul grabberSubAgent folosit ca
+tlssubservice: un proces auxiliar din sesiunea utilizatorului, controlat prin
+QLocalServer/QLocalSocket si RPC.
+
+Capabilitatile confirmate static sunt:
+
+- modul JSON pentru enumerarea proxy-urilor sistemului;
+- server IPC cu nume primit prin -ipc-name;
+- operatii RPC pentru user info, proxy, clipboard si UI;
+- interogare Active Directory/LDAP/registry;
+- citire si modificare clipboard, inclusiv imagini PNG si MIME;
+- cereri HTTP GET/POST cu JSON si web token;
+- tray icon, notificari, branding, self-control si task tracker;
+- integrare Qt Quick/QML.
+
+Analiza este statica. Ea confirma codul si traseele disponibile, dar nu poate
+demonstra singura ce comenzi sunt trimise intr-o instalare concreta sau ce
+date sunt efectiv schimbate la runtime.
+
+17. FUNCTII INCLUSE IN FISIERUL .CPP
+
+- entry @ 0x140002F3B
+- FUN_1400B8390 @ 0x1400B8390
+- FUN_140017280 @ 0x140017280
+- FUN_1400148A0 @ 0x1400148A0
+- FUN_140015EB0 @ 0x140015EB0
+- FUN_140019E70 @ 0x140019E70
+- FUN_14001C2C0 @ 0x14001C2C0
+- FUN_14001CB90 @ 0x14001CB90
+- FUN_14001A7E0 @ 0x14001A7E0
+- FUN_14001AAA0 @ 0x14001AAA0
+- FUN_14001D930 @ 0x14001D930
+- FUN_14001A520 @ 0x14001A520
+- FUN_14007B590 @ 0x14007B590
+- FUN_140023EC0 @ 0x140023EC0
+- FUN_1400228D0 @ 0x1400228D0
+- FUN_14006F410 @ 0x14006F410
+- FUN_14006F8F0 @ 0x14006F8F0
+- FUN_140083580 @ 0x140083580
+- FUN_1400875D0 @ 0x1400875D0
+- FUN_140091870 @ 0x140091870
+- FUN_1400A1E40 @ 0x1400A1E40
+- FUN_1400A6B50 @ 0x1400A6B50
+
+Fisierul .cpp pastreaza pseudocodul si numele emise de Ghidra. Nu contine
+functii reconstruite creativ si nu pretinde ca este codul-sursa original.

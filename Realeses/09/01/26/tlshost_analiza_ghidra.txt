@@ -1,0 +1,319 @@
+ANALIZA STATICA GHIDRA MCP - tlshost.exe
+Data: 2026-09-01
+
+1. IDENTIFICAREA PROGRAMULUI ANALIZAT
+
+Analiza a fost efectuata asupra programului activ din Ghidra MCP. Identitatea
+programului este sustinuta de urmatoarele date observate direct:
+
+- 0x14034DCC8: "tlshost.exe"
+- 0x14034DD08: "tlshost"
+- 0x14034DCD8: "tlsservice.exe"
+- 0x14034DCF0: "tlssubservice.exe"
+- 0x14034DD40: "Telemetry Service Host"
+- 0x14034D618: "KickidlerGrabber"
+- cale de build:
+  R:\bbuild-8\KICK-EVPROD-WIN64\components\app-grabber\service.cpp
+
+Fisierul tlshost.exe nu este prezent ca fisier normal in arborele local al
+workspace-ului. Din acest motiv nu au putut fi calculate local hash-ul,
+dimensiunea sau semnatura Authenticode. Analiza foloseste programul deja
+incarcat si analizat in Ghidra.
+
+2. FORMAT, LIMBAJ SI TOOLCHAIN
+
+- Executabil PE pe 64 de biti, cu image base 0x140000000.
+- Limbaj principal: C++.
+- Compilator/runtime: Microsoft Visual C++ din generatia v14. Dovezile includ
+  VCRUNTIME140.DLL, __security_init_cookie, RTTI, STL si template-uri C++.
+- Framework principal: Qt 5.6.2. Versiunea apare in caile de build, iar
+  importurile/clasele includ QGuiApplication, QCoreApplication, QString,
+  QProcess, QJsonDocument, QSslSocket, QImage si QtService.
+- Codul include mai multe biblioteci si componente statice, dar aplicatia si
+  logica serviciului sunt C++.
+
+Concluzie: extensia .cpp este corecta. Fisierul
+tlshost_ghidra_decompiled.cpp contine pseudocodul C/C++ emis de Ghidra,
+pastrand numele FUN_/DAT_/LAB_ si fara functii inventate.
+
+3. DIMENSIUNE SI STRUCTURA
+
+Ghidra recunoaste:
+
+- 29.766 functii;
+- 1.137 simboluri importate;
+- 738 clase/namespace-uri recunoscute.
+
+Numarul mare include Qt, CRT/STL, transport, billing, telemetry si alte
+biblioteci integrate, nu numai codul propriu al functiei main.
+
+Segmente:
+
+- Headers: 0x140000000 - 0x1400003FF
+- .text:   0x140001000 - 0x14033C5FF
+- .rdata:  0x14033D000 - 0x14050D1FF
+- .data:   0x14050E000 - 0x140557310
+- .pdata:  0x140558000 - 0x1405877FF
+- .idata:  0x140588000 - 0x14059A3FF
+- .gfids:  0x14059B000 - 0x14059B1FF
+- .tls:    0x14059C000 - 0x14059C5FF
+- _RDATA:  0x14059D000 - 0x1405A09FF
+- .00cfg:  0x1405A1000 - 0x1405A11FF
+- .rsrc:   0x1405A2000 - 0x1405A27FF
+- .reloc:  0x1405A3000 - 0x1405AB9FF
+
+Exporturi:
+
+- entry          -> 0x14000E890
+- tls_callback_0 -> 0x140013525
+- tls_callback_1 -> 0x1402DAF48
+
+Sectiunea .gfids si _guard_check_icall indica folosirea Control Flow Guard.
+
+4. PORNIREA SI MODURILE APLICATIEI
+
+- entry @ 0x14000E890 initializeaza security cookie-ul si intra in startup-ul
+  CRT FUN_1402985D4.
+- FUN_140085290 @ 0x140085290 are semnatura decompilata
+  int FUN_140085290(int param_1, undefined8 *param_2) si este functia main a
+  aplicatiei.
+- Numele Qt al aplicatiei este setat la "KickidlerGrabber".
+- Sunt procesate moduri auxiliare precum "-utilize-invite" si "-encrypt".
+- In modul normal este construita componenta de serviciu, apoi executia intra
+  in event loop-ul Qt/QtService.
+- Clasele RTTI includ grabber::Service, QtService<QGuiApplication>,
+  QtServiceBase, QtServiceController si QtServiceStarter.
+
+5. MAPAREA PROFILULUI tlshost
+
+FUN_140089540 @ 0x140089540 compara numele executabilului si construieste un
+profil de cinci denumiri. Pentru familia TLS observata:
+
+- host: tlshost
+- serviciu: tlsservice
+- subserviciu: tlssubservice
+- familie/prefix: tls
+- descriere: Telemetry Service Host
+
+Aceeasi functie contine profilurile grabber/ngs si variante cu nume care imita
+procese Windows: svchost, WmiPrvSE, RuntimeBroker si WmiProviderSE. Aceasta este
+o constatare despre maparea statica a denumirilor, nu o concluzie separata
+despre intentia programului.
+
+6. ROLUL DE SERVICIU WINDOWS
+
+FUN_1400914E0 @ 0x1400914E0 este traseul principal de pornire a serviciului:
+
+- initializeaza componentele si conexiunile Qt;
+- porneste colectorul de proxy/sesiuni FUN_140086B60;
+- determina profilul executabilului prin FUN_140089540;
+- foloseste calea executabilului curent pentru initializarea subsistemelor;
+- initializeaza manageri/collector, transport si alte obiecte de serviciu;
+- logheaza "started" sau "unable to setup aup collector".
+
+FUN_140092270 @ 0x140092270 implementeaza oprirea:
+
+- asteapta finalizarea startInitialization folosind QMutex,
+  QCoreApplication::processEvents si QThread::msleep;
+- opreste componentele interne in ordine;
+- logheaza "startInitialization completed, do real stop now" si "stopped".
+
+FUN_14008F800 si FUN_14008F520 implementeaza suspend/resume.
+
+FUN_14008F0D0 implementeaza restartul dupa actualizare:
+
+- construieste argumentul "-restart";
+- porneste detasat executabilul curent prin QProcess::startDetached.
+
+FUN_14008FAE0 gestioneaza lucrul activ/pasiv si asteapta sincronizarea timpului,
+conform stringurilor "time synchronization required for useful work" si
+"passive work".
+
+7. CONFIGURAREA SCM SI DEPENDENTA TermService
+
+FUN_14008E8C0 @ 0x14008E8C0:
+
+- deschide Service Control Manager prin OpenSCManagerW;
+- deschide serviciul profilului curent cu OpenServiceW;
+- apeleaza ChangeServiceConfigW;
+- transmite "TermService" ca lista de dependente;
+- logheaza codurile GetLastError si inchide handle-urile SCM.
+
+TermService este serviciul Windows Remote Desktop Services. Codul arata ca,
+pentru ramura param_2 == 1, configuratia serviciului este modificata pentru a
+depinde de TermService.
+
+8. SESIUNI WTS, PROCESE UTILIZATOR SI COLECTAREA PROXY
+
+FUN_140086B60 @ 0x140086B60, asociata prin calea de build cu
+networkProxyCollector.cpp:
+
+- enumera sesiunile Windows prin WTSEnumerateSessionsW;
+- interogheaza informatii despre sesiune prin WTSQuerySessionInformationW;
+- obtine tokenul utilizatorului prin WTSQueryUserToken;
+- construieste pipe-uri anonime cu CreatePipe;
+- configureaza mostenirea handle-urilor prin SetHandleInformation;
+- porneste un proces in contextul utilizatorului prin CreateProcessAsUserW;
+- asteapta procesul si citeste rezultatul prin ReadFile;
+- interpreteaza rezultatul ca JSON prin QJsonDocument::fromJson;
+- extrage campurile "uid" si "proxies";
+- mentine rezultatele intr-o colectie asociata sesiunilor/utilizatorilor.
+
+Acest traseu demonstreaza ca tlshost ruleaza ca orchestrator de serviciu si
+lanseaza un helper/proces in sesiunile utilizator pentru a colecta configuratia
+de proxy. Pseudocodul nu justifica inventarea unui nume suplimentar pentru
+helper; raportul pastreaza concluzia la nivelul confirmat de apeluri.
+
+9. VIDEO, CADRE SI RUTARE CATRE NOD
+
+Clasele si protocoalele includ VideoSink, AudioSequencer, InfoSequencer,
+PostStreamFrame, RespStreamFrame, SelectIds si MsgVideoAudioStreamSuspend.
+
+FUN_140282230 @ 0x140282230:
+
+- initializeaza subsistemul identificat prin stringurile "video" si
+  "videoRouter4Grabber";
+- configureaza timerul si conexiunile Qt ale routerului video.
+
+FUN_14028B2C0 @ 0x14028B2C0:
+
+- proceseaza selectia de stream-uri si sesiuni;
+- valideaza apartenenta sesiunii/grabberului;
+- gestioneaza starea si cererile VideoSink.
+
+FUN_14028ACD0 @ 0x14028ACD0:
+
+- proceseaza raspunsurile pentru cadre;
+- detecteaza raspunsuri absente sau provenite de la alt grabber;
+- actualizeaza starea si temporizarea stream-ului.
+
+FUN_14028C570 @ 0x14028C570:
+
+- obtine cadrul de la videoStreamSequencer;
+- verifica daca timpul este negociat/sincronizat;
+- construieste si trimite cadrul pe traseul VideoSink;
+- logheaza incercarile de transmitere inaintea negocierii timpului.
+
+FUN_14028EE20 @ 0x14028EE20:
+
+- extrage/sequenceaza un QImage;
+- valideaza Format_RGB555;
+- calculeaza dreptunghiuri, dimensiuni si numarul de octeti.
+
+FUN_14028FFF0 @ 0x14028FFF0:
+
+- reconstruieste QImage din bufferul cadrului;
+- verifica bpp, latimea, inaltimea, dataSize si bytesPerLine;
+- trateaza bpp necunoscut si imagini corupte;
+- copiaza/normalizeaza imaginea pentru pasii urmatori.
+
+Concluzie: tlshost contine logica de primire, secventiere, validare, stocare si
+rutare a cadrelor video. Captura Win32 directa a ecranului nu apare aici.
+
+10. DIFERENTA FATA DE tlsservice.exe
+
+In lista de importuri a tlshost.exe nu apar:
+
+- GetForegroundWindow
+- GetGUIThreadInfo
+- SetWinEventHook
+- SetWindowsHookExA/W
+- OpenInputDesktop
+- SetThreadDesktop
+- PrintWindow
+- BitBlt
+- GetDIBits
+
+Aceste API-uri au fost confirmate in analiza separata a tlsservice.exe.
+Separarea sustinuta de date este:
+
+- tlsservice.exe: input/focus, desktop interactiv si captura GDI;
+- tlshost.exe: serviciu/orchestrare, sesiuni WTS, pornire procese in sesiunea
+  utilizatorului, manageri/collector, transport si pipeline video.
+
+tlshost poate procesa si transmite cadrele furnizate de componentele agent,
+fara a face el insusi captura GDI directa in functiile/importurile observate.
+
+11. RETEA, SSL/TLS, BILLING SI TELEMETRY
+
+Programul importa si foloseste QSslSocket, QSslCertificate, QSslKey,
+QSslConfiguration, QSslError, OpenSSL SSLEAY32.dll si functiile
+SSL_library_init/SSL_load_error_strings.
+
+Stringurile includ:
+
+- ":/ssl/crt/tlsca.crt"
+- ":/ssl/crt/holms.crt"
+- "ssl peer verification failed"
+- "ssl handshake failed"
+- "ssl internal error"
+
+Clasele/protocoalele includ transport::Session, PeerVerifier, billing::Grabber,
+telemetry::client::Session, InstallationReport si UninstallationReport.
+
+Aceste date confirma canale SSL/TLS, verificare de certificate, comunicare cu
+nodurile/serverele si raportare telemetry/billing. Numele profilului
+"Telemetry Service Host" este explicit in binar.
+
+12. CALLBACK-URI TLS ALE LOADERULUI
+
+Callback-urile de mai jos apartin Thread Local Storage din formatul PE si nu
+trebuie confundate cu TLS-ul criptografic:
+
+- tls_callback_0 @ 0x140013525 executa lista de initializatori la
+  DLL_THREAD_ATTACH (param_2 == 2), cu verificare CFG.
+- __dyn_tls_init @ 0x1402DAED0 gestioneaza initializarea/desfiintarea
+  obiectelor thread-local.
+- tls_callback_1 @ 0x1402DAF48 ruleaza destructorii thread-local la
+  DLL_THREAD_DETACH sau DLL_PROCESS_DETACH.
+
+13. CONCLUZIE
+
+tlshost.exe este o aplicatie C++ x64 compilata cu Microsoft Visual C++ si
+bazata pe Qt 5.6.2. Executabilul reprezinta serviciul/orchestratorul principal
+al familiei Kickidler/Telemetry Service Host.
+
+Capabilitatile confirmate static sunt:
+
+- executie ca serviciu Windows prin QtService;
+- configurare SCM si dependenta de TermService;
+- pornire, oprire, suspendare, reluare si restart;
+- enumerare sesiuni WTS si pornire de procese cu tokenul utilizatorului;
+- IPC prin pipe si parsare JSON pentru configuratia proxy;
+- initializare si coordonare manageri/collector;
+- procesare, secventiere si rutare de cadre video;
+- transport criptat SSL/TLS si verificare de certificate;
+- protocoale de node, billing, telemetry si crash reporting.
+
+Analiza este statica. Ea confirma existenta si traseele codului, dar nu poate
+demonstra singura configuratia activa intr-o instalare, destinatiile reale de
+retea sau toate efectele runtime.
+
+14. FUNCTII INCLUSE IN FISIERUL .CPP
+
+- entry @ 0x14000E890
+- FUN_1402985D4 @ 0x1402985D4
+- FUN_140085290 @ 0x140085290
+- FUN_140089540 @ 0x140089540
+- FUN_140086B60 @ 0x140086B60
+- FUN_14008E8C0 @ 0x14008E8C0
+- FUN_1400914E0 @ 0x1400914E0
+- FUN_140092270 @ 0x140092270
+- FUN_14008F800 @ 0x14008F800
+- FUN_14008F520 @ 0x14008F520
+- FUN_14008F0D0 @ 0x14008F0D0
+- FUN_14008FAE0 @ 0x14008FAE0
+- FUN_1400902E0 @ 0x1400902E0
+- FUN_140282230 @ 0x140282230
+- FUN_140289760 @ 0x140289760
+- FUN_14028ACD0 @ 0x14028ACD0
+- FUN_14028B2C0 @ 0x14028B2C0
+- FUN_14028C570 @ 0x14028C570
+- FUN_14028EE20 @ 0x14028EE20
+- FUN_14028FFF0 @ 0x14028FFF0
+- __dyn_tls_init @ 0x1402DAED0
+- tls_callback_0 @ 0x140013525
+- tls_callback_1 @ 0x1402DAF48
+
+Fisierul .cpp pastreaza pseudocodul si numele emise de Ghidra. Nu contine
+functii reconstruite creativ si nu pretinde ca este codul-sursa original.
