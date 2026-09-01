@@ -1,0 +1,237 @@
+ANALIZA STATICA GHIDRA MCP - tlsservice.exe
+Data: 2026-09-01
+
+1. IDENTIFICAREA PROGRAMULUI ANALIZAT
+
+Analiza a fost efectuata asupra programului activ din Ghidra MCP.
+Identitatea lui este sustinuta de stringurile si codul observate in baza
+Ghidra:
+
+- 0x14026EA88: "tlsservice.exe"
+- 0x14026EAC8: "tlsservice"
+- 0x14026EAF0: "Telemetry Service Host"
+- 0x14026EBB0: "KickidlerGrabber"
+- cale de build:
+  R:\bbuild-8\KICK-EVPROD-WIN64\components\app-grabberAgent\main.cpp
+
+Fisierul tlsservice.exe nu este prezent ca fisier normal in arborele local al
+workspace-ului, deci nu au putut fi calculate local hash-ul, dimensiunea sau
+semnatura Authenticode. Concluziile de mai jos provin din programul deja
+incarcat si analizat in Ghidra.
+
+2. FORMAT SI LIMBAJ
+
+- Executabil PE pe 64 de biti (image base 0x140000000).
+- Limbaj principal: C++.
+- Toolchain: Microsoft Visual C++ / runtime din generatia v14; sunt prezente
+  VCRUNTIME140.DLL, initializarea __security_init_cookie, RTTI si nume/template
+  C++ de tip std::, QSharedPointer, MessageImplHelper si clase cu namespace.
+- Framework: Qt 5.6.2. Versiunea este vizibila in caile de build, iar importurile
+  includ QT5CORE.DLL si QT5NETWORK.DLL, QString, QApplication, QSettings,
+  QSslSocket etc.
+- Exista si cod C de biblioteca integrat (de exemplu PortAudio), dar aplicatia
+  si logica principala sunt C++.
+
+Concluzie privind cerinta de limbaj: extensia .cpp este corecta. Fisierul
+tlsservice_ghidra_decompiled.cpp contine pseudocodul C/C++ emis de Ghidra,
+nemodificat semantic si fara functii inventate.
+
+3. DIMENSIUNEA SI STRUCTURA PROGRAMULUI
+
+Ghidra recunoaste 20.152 functii si 1.246 simboluri importate. Numarul mare
+include Qt, CRT/STL si biblioteci statice, nu numai codul aplicatiei.
+
+Segmente:
+
+- Headers: 0x140000000 - 0x1400003FF
+- .text:   0x140001000 - 0x14026B5FF
+- .rdata:  0x14026C000 - 0x1403635FF
+- .data:   0x140364000 - 0x1403714B0
+- .pdata:  0x140372000 - 0x140391DFF
+- .idata:  0x140392000 - 0x1403A59FF
+- .gfids:  0x1403A6000 - 0x1403A61FF
+- .tls:    0x1403A7000 - 0x1403A75FF
+- .00cfg:  0x1403A8000 - 0x1403A81FF
+- .reloc:  0x1403A9000 - 0x1403ADFFF
+
+Exporturi:
+
+- entry          -> 0x14000D32D
+- tls_callback_0 -> 0x140011257
+- tls_callback_1 -> 0x140220B9C
+
+Prezenta .gfids si apelurile _guard_check_icall indica Control Flow Guard.
+
+4. PORNIREA APLICATIEI
+
+- entry @ 0x14000D32D initializeaza security cookie-ul si transfera controlul
+  catre FUN_1401900A0, codul de startup CRT.
+- FUN_140030AE0 @ 0x140030AE0 are semnatura decompilata
+  int FUN_140030ae0(int param_1, char **param_2) si este functia principala a
+  aplicatiei identificata si prin calea app-grabberAgent\main.cpp.
+- Functia seteaza numele aplicatiei "KickidlerGrabber", proceseaza optiunea
+  "-logging-postfix", construieste QApplication, citeste /grabber.ini si cheia
+  misc/stealthMode, initializeaza subAgentIo si communicator, apoi intra in
+  QApplication::exec().
+- Mesajele observate includ "start agent",
+  "This build using brand new subAgentIo system!" si
+  "communicator initialization failed".
+
+5. MAPAREA PROFILULUI tlsservice
+
+FUN_14002EC90 @ 0x14002EC90 compara numele executabilului si construieste un
+set de cinci denumiri. Pentru familia TLS observata in cod, valorile sunt:
+
+- host/executabil: tlshost
+- serviciu: tlsservice
+- subserviciu: tlssubservice
+- prefix/familie: tls
+- descriere: Telemetry Service Host
+
+Aceeasi functie contine profilurile grabber/ngs si nume care imita procese
+Windows (svchost, WmiPrvSE, RuntimeBroker). Aceasta este o observatie statica
+despre maparea numelor; singura nu demonstreaza intentie rau-intentionata.
+
+6. INPUT, FOCUS SI FEREASTRA ACTIVA
+
+FUN_14003E8E0 @ 0x14003E8E0:
+
+- instaleaza SetWindowsHookExA cu id 0x0D (WH_KEYBOARD_LL);
+- instaleaza SetWindowsHookExA cu id 0x0E (WH_MOUSE_LL);
+- callback-ul transmis de ambele hook-uri este thunk_FUN_1400405D0;
+- logheaza erorile de instalare din inputTrackerImpl_win.cpp.
+
+FUN_14003EE60 @ 0x14003EE60:
+
+- apeleaza instalarea hook-urilor de input;
+- instaleaza SetWinEventHook pentru intervalul 0x20 - 0x8005;
+- callback-ul WinEvent este thunk_FUN_140040DD0;
+- gestioneaza UnhookWinEvent si UnhookWindowsHookEx la curatare.
+
+FUN_1400405D0 @ 0x1400405D0:
+
+- foloseste GetGUIThreadInfo pentru hwndFocus si pozitia ferestrei;
+- foloseste GetForegroundWindow daca nu exista deja un HWND retinut;
+- obtine thread-ul ferestrei prin GetWindowThreadProcessId;
+- obtine layout-ul de tastatura prin GetKeyboardLayout;
+- proceseaza evenimentele hook-urilor de tastatura/mouse.
+
+FUN_140040DD0 @ 0x140040DD0:
+
+- este callback-ul WinEvent;
+- interogheaza GetGUIThreadInfo si retransmite starea catre logica interna;
+- poate reinstala hook-urile daca starea lor nu mai este valida.
+
+FUN_1400471D0 @ 0x1400471D0:
+
+- asociaza HWND-ul cu PID-ul prin GetWindowThreadProcessId;
+- citeste titlul ferestrei prin GetWindowTextW;
+- actualizeaza structurile interne pentru programul/fereastra observata.
+
+7. DESKTOP INTERACTIV SI ENUMERAREA PROGRAMELOR
+
+FUN_140047D80 @ 0x140047D80:
+
+- obtine desktopul thread-ului cu GetThreadDesktop;
+- deschide desktopul activ cu OpenInputDesktop;
+- foloseste GetUserObjectInformation pentru numele desktopului;
+- trateaza explicit stringurile "Winlogon" si "Screen-saver";
+- schimba temporar desktopul cu SetThreadDesktop;
+- citeste fereastra activa cu GetForegroundWindow;
+- restaureaza desktopul anterior si semnalizeaza QWaitCondition.
+
+Acest cod arata ca agentul incearca sa urmareasca sesiunea/desktopul interactiv,
+inclusiv tranzitiile catre desktopul Winlogon sau screen saver.
+
+8. CAPTURA ECRANULUI/FERESTREI
+
+FUN_1400515A0 @ 0x1400515A0:
+
+- valideaza dreptunghiul si device context-ul ferestrei;
+- compara HWND-ul cerut cu GetForegroundWindow;
+- transfera captura catre FUN_1400501D0;
+- elibereaza DC-ul cu ReleaseDC.
+
+FUN_1400501D0 @ 0x1400501D0:
+
+- creeaza bitmap si DC compatibile;
+- pentru captura de monitor foloseste BitBlt cu ROP 0x00CC0020 (SRCCOPY);
+- pentru captura unei ferestre foloseste PrintWindow;
+- extrage pixelii si informatiile bitmap cu GetDIBits;
+- are fallback la biBitCount 16 si logheaza campurile biCompression,
+  biSizeImage, latime si inaltime;
+- trateaza esecurile CreateCompatibleBitmap, CreateCompatibleDC, SelectObject,
+  BitBlt, PrintWindow si GetDIBits.
+
+Acesta este un traseu direct si bine sustinut pentru captura GDI a monitorului
+sau a unei ferestre.
+
+9. RETEA, TRANSPORT SI TLS/SSL
+
+Importurile si clasele arata folosirea Qt Network si a componentelor proprii:
+QSslSocket, QSslCertificate, QSslConfiguration, QTcpSocket, QLocalSocket,
+transport::Session, PeerVerifier si protocoale de control. Stringurile includ:
+
+- "TLS FAIL [peer-closed]"
+- "TLS OK [late-after-timeout]"
+- ":/ssl/crt/tlsca.crt"
+- "tlsca.crt"
+
+Acestea sustin existenta unui canal de transport criptat si a verificarii de
+certificate. Numele executabilului "tlsservice" este mapat explicit la
+"Telemetry Service Host"; el nu trebuie interpretat automat doar ca abreviere
+pentru protocolul TLS.
+
+10. CALLBACK-URI TLS ALE LOADERULUI
+
+Aceste callback-uri apartin mecanismului Thread Local Storage al PE si sunt
+distincte de TLS-ul criptografic:
+
+- tls_callback_0 @ 0x140011257 executa o lista de initializatori la
+  DLL_THREAD_ATTACH (param_2 == 2), cu verificare CFG.
+- __dyn_tls_init @ 0x140220B24 initializeaza/desfiinteaza obiectele thread-local.
+- tls_callback_1 @ 0x140220B9C ruleaza destructorii thread-local la
+  DLL_THREAD_DETACH sau DLL_PROCESS_DETACH.
+
+11. CONCLUZIE
+
+Programul activ este o aplicatie C++ x64, compilata cu Microsoft Visual C++ si
+bazata pe Qt 5.6.2. Este componenta Kickidler/Grabber profilata, cand numele
+executabilului este tlsservice.exe, ca "Telemetry Service Host".
+
+Capabilitatile confirmate static in functiile decompilate sunt:
+
+- hook global low-level pentru tastatura si mouse;
+- urmarire WinEvent, focus, HWND, PID si titlu de fereastra;
+- schimbare temporara pe desktopul interactiv;
+- enumerare de programe/ferestre;
+- captura GDI prin BitBlt, PrintWindow si GetDIBits;
+- configurare Qt, event loop, IPC/subAgentIo si communicator;
+- transport de retea cu suport SSL/TLS si verificare de certificate.
+
+Analiza este statica. Ea confirma existenta si traseele codului, dar nu poate
+demonstra singura ce optiuni sunt activate intr-o instalare concreta, ce date
+sunt efectiv transmise sau comportamentul exact in toate conditiile runtime.
+
+12. FUNCTII INCLUSE IN FISIERUL .CPP
+
+- entry @ 0x14000D32D
+- FUN_1401900A0 @ 0x1401900A0
+- FUN_140030AE0 @ 0x140030AE0
+- FUN_14002EC90 @ 0x14002EC90
+- FUN_14002F830 @ 0x14002F830
+- __dyn_tls_init @ 0x140220B24
+- tls_callback_0 @ 0x140011257
+- tls_callback_1 @ 0x140220B9C
+- FUN_14003E8E0 @ 0x14003E8E0
+- FUN_14003EE60 @ 0x14003EE60
+- FUN_140040DD0 @ 0x140040DD0
+- FUN_1400405D0 @ 0x1400405D0
+- FUN_140047D80 @ 0x140047D80
+- FUN_1400471D0 @ 0x1400471D0
+- FUN_1400515A0 @ 0x1400515A0
+- FUN_1400501D0 @ 0x1400501D0
+- FUN_140098A10 @ 0x140098A10
+
+Fisierul .cpp pastreaza numele Ghidra si pseudocodul decompilat. Nu contine
+functii reconstruite creativ si nu pretinde ca este sursa originala.

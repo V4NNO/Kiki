@@ -1,0 +1,1143 @@
+Analiza statica Ghidra MCP - tssubservice.exe
+Data: 2026-07-16
+Metoda: exclusiv observatii din MCP server ghidra pentru binar; fara patch-uri, redenumiri sau comentarii in Ghidra.
+
+===============================================================================
+1. Rezumat executiv
+===============================================================================
+
+FAPTE OBSERVATE:
+- Executabil PE64, baza imagine 0x140000000.
+- Entry point Ghidra: entry @ 0x140002f3b.
+- Exporturi: numai entry -> 0x140002f3b.
+- Segmente principale:
+  - Headers: 0x140000000 - 0x1400003ff
+  - .text:   0x140001000 - 0x1400d93ff
+  - .rdata:  0x1400da000 - 0x1407621ff
+  - .data:   0x140763000 - 0x1407679f8
+  - .idata:  0x140773000 - 0x1407837ff
+  - .tls:    0x140785000 - 0x1407853ff
+- Stringuri de identificare:
+  - 0x1400dbe50: R:\bbuild-8\KICK-EVPROD-WIN64\components\app-grabberSubAgent\main.cpp
+  - 0x1400dbee0: KickidlerGrabber
+  - 0x1400db690: subAgent
+  - 0x1400dbf40: -ipc-name
+  - 0x1400dbf50: IPC name not specified
+  - 0x1400ddd50: grabberSubAgent::io::Service
+  - 0x1400e8358: grabberAgent::slave::slave::Clipboard
+  - 0x1400e9968: localrpc::Caller
+  - 0x1400eac10: grabberSubAgent::http::Manager
+  - 0x1400eb438: grabberSubAgent::ui::Manager
+  - 0x1400ec608: grabberSubAgent::ui::SettingsProvider
+  - 0x1400f4b30: GrabberSubAgentUI
+- Path-uri de build observate:
+  - impl-grabberSubAgent-io\service.cpp
+  - impl-grabberSubAgent-userInfo\adsiQuery.cpp
+  - impl-grabberSubAgent-http\manager.cpp
+  - impl-grabberSubAgent-ui\manager.cpp
+  - impl-grabberSubAgent-ui\settingsProvider.cpp
+  - impl-grabberAgent-slave\slave\clipboard.cpp
+  - impl-localRPC\caller.cpp
+  - impl-gui-base\screenTracker.cpp
+
+CONCLUZIE:
+- tssubservice.exe este foarte probabil subagent Kickidler care ruleaza in sesiunea utilizatorului, dar rolul observat static este auxiliar: UI/QML, clipboard, HTTP, local RPC/IPC, user info/AD, setari SQLite si screen geometry tracking.
+- Nu am observat in acest executabil importuri sau stringuri pentru API-urile clasice de detectare focus/captura ecran: GetForegroundWindow, GetWindowThreadProcessId, GetGUIThreadInfo, EnumWindows/EnumDesktopWindows, GetWindowText, GetClassName, GetWindowRect, BitBlt, PrintWindow, GetDC/GetWindowDC, CreateCompatibleDC, CreateCompatibleBitmap, SetWinEventHook, SetWindowsHookEx, Direct3D, DXGI.
+- Prin comparatie cu analiza anterioara, functiile directe de focus/captura raman in tlsservice.exe, nu in tssubservice.exe.
+
+Nivel incredere: ridicat pentru rolul de subagent Kickidler; ridicat pentru absenta dovezilor de captura/focus direct in importuri/stringuri; mediu pentru fluxul exact IPC, deoarece multe simboluri sunt Qt/thunk-uri.
+
+===============================================================================
+2. Importuri si categorii API
+===============================================================================
+
+FAPTE OBSERVATE:
+
+Importuri Windows relevante:
+- IPC/named pipe:
+  - CreateFileW
+  - SetNamedPipeHandleState
+  - TransactNamedPipe
+  - WaitNamedPipeW
+  - WriteFile
+  - DuplicateHandle
+- Synchronizare/thread/process:
+  - WaitForSingleObject
+  - CreateThread
+  - CreateSemaphoreW
+  - CreateEventW
+  - SetEvent
+  - GetCurrentProcessId
+  - GetCurrentThreadId
+  - GetProcessId
+  - GetThreadContext
+  - OpenThread
+  - SuspendThread
+  - ResumeThread
+  - TerminateThread
+  - VirtualQueryEx
+- Dinamic:
+  - LoadLibraryA
+  - LoadLibraryW
+  - GetProcAddress
+  - FreeLibrary
+- User/AD/registry:
+  - GetUserNameExW
+  - GetUserNameW
+  - RegCreateKeyExA
+  - RegOpenKeyExA
+  - RegQueryValueExA
+  - RegSetValueExA
+  - OpenProcessToken
+  - GetTokenInformation
+  - ConvertSidToStringSidA
+- COM:
+  - CoInitialize
+  - CoUninitialize
+  - StringFromGUID2
+  - SysAllocString
+  - SysFreeString
+  - VariantClear
+- Networking:
+  - socket/connect/bind/listen/accept/send/recv/closesocket
+  - gethostbyname/gethostname
+  - WSAStartup/WSACleanup
+- Qt/network/UI observat prin importuri/stringuri:
+  - QApplication/QGuiApplication/QClipboard/QMimeData/QImage/QBuffer
+  - QLocalSocket
+  - QNetworkAccessManager, QNetworkRequest, QUrl
+  - QSqlDatabase, QSettings
+  - QSystemTrayIcon, QMenu, QScreen
+  - QQml/QQuick/QML resources
+
+API-uri cautate, dar neobservate ca importuri/stringuri directe:
+- GetForegroundWindow
+- GetWindowThreadProcessId
+- GetGUIThreadInfo
+- EnumWindows / EnumDesktopWindows
+- GetWindowText
+- GetClassName
+- GetWindowRect
+- BitBlt
+- PrintWindow
+- GetDC / GetWindowDC
+- CreateCompatibleDC
+- CreateCompatibleBitmap
+- SetWinEventHook
+- SetWindowsHookEx
+- WTS APIs
+- Direct3D
+- DXGI
+
+CONCLUZIE:
+- tssubservice.exe are profil de aplicatie Qt/subagent cu IPC, local RPC, clipboard, HTTP si UI.
+- Nu are profil de componenta care face captura GDI sau detectie focus la nivel Win32.
+
+===============================================================================
+3. Referinte catre tlshost.exe / tlsservice.exe / tssubservice.exe
+===============================================================================
+
+FAPTE OBSERVATE:
+- Cautarile de string pentru:
+  - tlshost
+  - tlsservice
+  - tssubservice
+  - tlssubservice
+  au returnat lista vida in tssubservice.exe.
+- Exista stringuri interne "subAgent", "-ipc-name" si clase/path-uri "grabberSubAgent".
+
+IPOTEZA:
+- Legatura cu tlshost.exe/tlsservice.exe nu este prin stringuri explicite de nume executabil in acest binar, ci prin IPC denumit la runtime, transmis prin argumentul "-ipc-name".
+
+Nivel incredere: ridicat pentru absenta stringurilor; mediu pentru mecanismul exact de lansare/legare.
+
+Test dinamic:
+- Pornește tssubservice.exe sub debugger sau Process Monitor si observa command line: asteptat argument "-ipc-name <nume>".
+- Coreleaza creator process cu tlsservice.exe/tlshost.exe si handlerele de pipe/local socket.
+
+===============================================================================
+4. Functii importante
+===============================================================================
+
+-------------------------------------------------------------------------------
+4.1 entry
+-------------------------------------------------------------------------------
+
+Nume Ghidra: entry
+Adresa: 0x140002f3b
+
+Pseudocod relevant:
+  void entry(void) {
+    __security_init_cookie();
+    FUN_1400b8390();
+    return;
+  }
+
+Calleri:
+- Entry point PE.
+
+Functii apelate:
+- __security_init_cookie
+- FUN_1400b8390
+
+API-uri Windows:
+- Nu direct.
+
+Stringuri asociate:
+- Nu direct in entry.
+
+Concluzie:
+- Stub de initializare CRT, transfera controlul spre runtime startup.
+
+Nivel incredere: ridicat.
+
+Test dinamic:
+- Breakpoint la 0x140002f3b si step pana la FUN_1400b8390 / WinMain wrapper.
+
+-------------------------------------------------------------------------------
+4.2 FUN_1400b8390 - CRT startup / apel WinMain
+-------------------------------------------------------------------------------
+
+Nume Ghidra: FUN_1400b8390
+Adresa: 0x1400b8390
+
+Pseudocod relevant:
+  __scrt_initialize_crt(1);
+  __scrt_acquire_startup_lock();
+  _initterm_e(...);
+  _initterm(...);
+  uVar5 = __scrt_get_show_window_mode();
+  cmd = _get_narrow_winmain_command_line();
+  ret = thunk_FUN_1400b9cc0(&IMAGE_DOS_HEADER_140000000, 0, cmd, uVar5);
+  exit(ret);
+
+Calleri:
+- entry @ 0x140002f3b.
+
+Functii apelate:
+- CRT init, initterm, command line helper, WinMain thunk.
+
+API-uri Windows:
+- Nu direct in pseudocodul principal.
+
+Concluzie:
+- Startup standard MSVC pentru aplicatie GUI.
+
+Nivel incredere: ridicat.
+
+Test dinamic:
+- Breakpoint dupa _get_narrow_winmain_command_line pentru a vedea argumentele.
+
+-------------------------------------------------------------------------------
+4.3 FUN_140017280 - main/WinMain logic app-grabberSubAgent
+-------------------------------------------------------------------------------
+
+Nume Ghidra: FUN_140017280
+Adresa: 0x140017280
+
+Calleri:
+- Indirect din thunk_FUN_1400b9cc0 / startup.
+
+Functii apelate observate:
+- QCoreApplication::setApplicationName
+- QApplication::QApplication
+- QGuiApplication::setQuitOnLastWindowClosed(false)
+- QCoreApplication::arguments
+- SetProcessShutdownParameters
+- GetCurrentProcessId
+- ProcessIdToSessionId
+- qInstallMessageHandler
+- QApplication::exec
+- FUN_140019e70
+- FUN_14001c2c0
+
+API-uri Windows:
+- SetProcessShutdownParameters
+- GetCurrentProcessId
+- ProcessIdToSessionId
+
+Stringuri asociate:
+- "KickidlerGrabber"
+- "-get-network-proxies"
+- "-logging-postfix"
+- "subAgent"
+- "-ipc-name"
+- "start agent for "
+- "IPC name not specified"
+- Path: app-grabberSubAgent\main.cpp
+
+Pseudocod relevant:
+  QCoreApplication::setApplicationName("KickidlerGrabber");
+  if argc == 2 && argv[1] == "-get-network-proxies":
+      FUN_1400148a0();
+      return 0;
+  QApplication app(argc, argv, ...);
+  QGuiApplication::setQuitOnLastWindowClosed(false);
+  args = QCoreApplication::arguments();
+  parse args into hash;
+  session = ProcessIdToSessionId(GetCurrentProcessId());
+  ipcLogName = "subAgent" + session + optional logging postfix;
+  if "-ipc-name" exists:
+      log "start agent for <session>";
+      FUN_140019e70(local_obj);
+      FUN_14001c2c0(local_obj, ipcName);
+      ret = QApplication::exec();
+      cleanup;
+      return ret;
+  else:
+      log "IPC name not specified";
+      return 1;
+
+Concluzie:
+- Functia principala a subagentului. Binarul asteapta un nume IPC din command line si intra in event loop Qt. Identificarea "KickidlerGrabber" si path-ul app-grabberSubAgent confirma apartenenta Kickidler.
+
+Nivel incredere: ridicat.
+
+Test dinamic:
+- Ruleaza sub debugger si verifica command line pentru "-ipc-name".
+- Breakpoint la 0x140017280, apoi la apelul FUN_14001c2c0 pentru numele IPC efectiv.
+
+-------------------------------------------------------------------------------
+4.4 FUN_1400320a0 - deschidere named pipe client
+-------------------------------------------------------------------------------
+
+Nume Ghidra: FUN_1400320a0
+Adresa: 0x1400320a0
+
+Calleri:
+- FUN_140032180
+- FUN_140032210
+
+Functii apelate:
+- CreateFileW
+- GetLastError
+- WaitNamedPipeW
+
+API-uri Windows:
+- CreateFileW
+- WaitNamedPipeW
+- GetLastError
+
+Stringuri asociate:
+- Nu direct; numele pipe-ului vine prin param_2.
+
+Pseudocod relevant:
+  for up to 2 attempts:
+      h = CreateFileW(pipeName, desiredAccess, 0, NULL, OPEN_EXISTING, flags, NULL);
+      if h != INVALID_HANDLE_VALUE:
+          return h;
+      if GetLastError() == ERROR_PIPE_BUSY:
+          WaitNamedPipeW(pipeName, 2000);
+  return NULL;
+
+Concluzie:
+- Helper de conectare la named pipe, cu retry scurt pe ERROR_PIPE_BUSY.
+
+Nivel incredere: ridicat.
+
+Test dinamic:
+- Breakpoint pe CreateFileW/WaitNamedPipeW; captura numele pipe-ului si codurile GetLastError.
+
+-------------------------------------------------------------------------------
+4.5 FUN_140032180 - seteaza named pipe message mode
+-------------------------------------------------------------------------------
+
+Nume Ghidra: FUN_140032180
+Adresa: 0x140032180
+
+Calleri:
+- Functii de transport/IPC, apel indirect din obiecte locale.
+
+Functii apelate:
+- FUN_1400320a0
+- SetNamedPipeHandleState
+- CloseHandle
+
+API-uri Windows:
+- SetNamedPipeHandleState
+- CloseHandle
+
+Pseudocod relevant:
+  h = FUN_1400320a0(name, 0x103, 0x110000);
+  if h:
+      mode = 2;
+      if !SetNamedPipeHandleState(h, &mode, NULL, NULL):
+          CloseHandle(h);
+          h = NULL;
+  return h;
+
+Concluzie:
+- Configureaza pipe-ul pentru mod de mesaj; acesta pare canal IPC principal.
+
+Nivel incredere: ridicat.
+
+Test dinamic:
+- Breakpoint pe SetNamedPipeHandleState si inspecteaza handle-ul/numele pipe-ului deschis anterior.
+
+-------------------------------------------------------------------------------
+4.6 FUN_140032210 - duplicate handle catre alt proces
+-------------------------------------------------------------------------------
+
+Nume Ghidra: FUN_140032210
+Adresa: 0x140032210
+
+Functii apelate:
+- CreateFileW
+- WaitNamedPipeW
+- DuplicateHandle
+- GetCurrentProcess
+
+API-uri Windows:
+- CreateFileW
+- WaitNamedPipeW
+- DuplicateHandle
+- GetCurrentProcess
+
+Pseudocod relevant:
+  h = CreateFileW(pipeName, 0x103, 0, NULL, OPEN_EXISTING, 0x110000, NULL);
+  if h != INVALID_HANDLE_VALUE:
+      DuplicateHandle(GetCurrentProcess(), h, targetProcess, &out, 0, 0, 3);
+      return out;
+  retry on ERROR_PIPE_BUSY;
+  return INVALID_HANDLE_VALUE;
+
+Concluzie:
+- Deschide pipe si duplica handle-ul in alt proces. Relevant pentru relatie cu proces parinte/orchestrator.
+
+Nivel incredere: ridicat.
+
+Test dinamic:
+- Breakpoint pe DuplicateHandle; inspecteaza target process handle/PID.
+
+-------------------------------------------------------------------------------
+4.7 FUN_1400323a0 - handshake prin TransactNamedPipe
+-------------------------------------------------------------------------------
+
+Nume Ghidra: FUN_1400323a0
+Adresa: 0x1400323a0
+
+Functii apelate:
+- GetCurrentProcessId
+- TransactNamedPipe
+- WriteFile
+
+API-uri Windows:
+- GetCurrentProcessId
+- TransactNamedPipe
+- WriteFile
+
+Pseudocod relevant:
+  request.type = 1;
+  request.pid = GetCurrentProcessId();
+  request.fields = param_1 + offsets;
+  ok = TransactNamedPipe(pipe, &request, 0x50, &reply, 0x50, &bytes, NULL);
+  if ok && reply.type == 2 && reply.status != 0 && reply pointers nonzero:
+      ack.type = 3;
+      WriteFile(pipe, &ack, 0x50, &bytes, NULL);
+      param_1+0x40 = reply.field1;
+      param_1+0x48 = reply.field2;
+      param_1+0x50 = reply.field3;
+      param_1+0x58 = reply.status;
+      return success;
+
+Concluzie:
+- Handshake IPC binar pe named pipe. Mesajele au dimensiune 0x50 si tipuri observate 1/2/3.
+
+Nivel incredere: ridicat.
+
+Test dinamic:
+- Breakpoint la TransactNamedPipe si dump request/reply 0x50 bytes.
+- Coreleaza cu pipe server-ul din tlsservice.exe/tlshost.exe.
+
+-------------------------------------------------------------------------------
+4.8 FUN_1400209f0 - Qt metacast grabberSubAgent::io::Service
+-------------------------------------------------------------------------------
+
+Nume Ghidra: FUN_1400209f0
+Adresa: 0x1400209f0
+
+Stringuri asociate:
+- "grabberSubAgent::io::Service"
+
+Pseudocod relevant:
+  if param_2 == "grabberSubAgent::io::Service":
+      return param_1;
+  return QObject::qt_metacast(param_1, param_2);
+
+Concluzie:
+- Metaobject Qt pentru serviciul IO al subagentului. Este dovada structurala pentru componenta IPC/IO.
+
+Nivel incredere: ridicat.
+
+Test dinamic:
+- Urmareste semnalele/sloturile Qt conectate la acest obiect si mesajele venite prin pipe/local RPC.
+
+-------------------------------------------------------------------------------
+4.9 FUN_14006f410 - clasificare continut clipboard
+-------------------------------------------------------------------------------
+
+Nume Ghidra: FUN_14006f410
+Adresa: 0x14006f410
+
+Calleri:
+- Functii din clasa grabberAgent::slave::slave::Clipboard.
+
+Functii apelate:
+- QMimeData::hasUrls / urls
+- QMimeData::hasHtml / html
+- QMimeData::hasText / text
+- QMimeData::hasImage / imageData
+- QImage::isNull
+- QBuffer::open/close
+- QImage::save(..., "PNG", -1)
+- sloturi/thunk-uri pentru emitere rezultat: FUN_14006fe20, FUN_14006fce0, FUN_14006fdc0, FUN_14006fd40, FUN_14006fda0
+
+API-uri Windows:
+- Nu direct; Qt clipboard/mime/image.
+
+Stringuri asociate:
+- Path: impl-grabberAgent-slave\slave\clipboard.cpp
+- "PNG"
+
+Pseudocod relevant:
+  mime = get clipboard mime data;
+  if mime.hasUrls(): emit urls;
+  else if mime.hasHtml(): emit html;
+  else if mime.hasText(): emit text;
+  else if mime.hasImage():
+      image = mime.imageData();
+      if !image.isNull():
+          buffer.open(write);
+          image.save(buffer, "PNG", -1);
+          emit image bytes;
+  else:
+      emit other/empty;
+
+Concluzie:
+- Colecteaza si clasifica continutul clipboard-ului; poate transforma imagini clipboard in PNG.
+- Aceasta este colectare de activitate/date de utilizator, dar nu captura ecran/focus.
+
+Nivel incredere: ridicat.
+
+Test dinamic:
+- Breakpoint in 0x14006f410; copiaza text/html/imagine in clipboard si observa semnalele/mesajele IPC emise.
+
+-------------------------------------------------------------------------------
+4.10 FUN_14006f8f0 - initializare/legare QClipboard
+-------------------------------------------------------------------------------
+
+Nume Ghidra: FUN_14006f8f0
+Adresa: 0x14006f8f0
+
+Functii apelate:
+- helper obtinere clipboard
+- QObject::disconnectImpl
+- conectare semnal Qt catre callback clipboard
+
+API-uri Windows:
+- Nu direct.
+
+Stringuri asociate:
+- "memory fail"
+- Path: impl-grabberAgent-slave\slave\clipboard.cpp
+
+Pseudocod relevant:
+  if feature flag clipboard enabled:
+      clipboard = getClipboard();
+      if clipboard == NULL:
+          log "memory fail";
+      else:
+          disconnect old callback;
+          attach clipboard object;
+          connect signal to handler;
+
+Concluzie:
+- Initializeaza monitorizarea clipboard-ului prin Qt.
+
+Nivel incredere: ridicat.
+
+Test dinamic:
+- Breakpoint la 0x14006f8f0 si pe QClipboard::dataChanged; modifica clipboard-ul.
+
+-------------------------------------------------------------------------------
+4.11 FUN_140083580 - HTTP manager GET/POST
+-------------------------------------------------------------------------------
+
+Nume Ghidra: FUN_140083580
+Adresa: 0x140083580
+
+Functii apelate:
+- QNetworkAccessManager::get
+- QNetworkAccessManager::post
+- QNetworkRequest::setHeader
+- QJsonDocument::toJson
+- QJsonObject::insert
+- QUrl/QNetworkRequest constructors
+
+API-uri Windows:
+- Nu direct; Qt network foloseste socket/SSL in backend.
+
+Stringuri asociate:
+- "web token is empty await some"
+- "web interface link is empty await some"
+- "request in process method: "
+- "nothing to send"
+- "subAgent send http GET: "
+- "subAgent send http POST: "
+- "skp_version"
+- "web_token"
+- "application/json"
+- Path: impl-grabberSubAgent-http\manager.cpp
+
+Pseudocod relevant:
+  if web_token empty:
+      log and wait/update state;
+  else if web_interface_link empty:
+      log and wait/update state;
+  else if queue not empty:
+      method = request.method;
+      if method == "get":
+          url = base + postfix + "?web_token=" + token;
+          log "subAgent send http GET";
+          QNetworkAccessManager::get(request);
+      else if method == "post":
+          json["skp_version"] = version;
+          json["web_token"] = token;
+          log "subAgent send http POST";
+          QNetworkAccessManager::post(request, json);
+
+Concluzie:
+- Componenta de transport HTTP pentru subagent. Poate transmite date colectate de subagent sau primi comenzi/date UI.
+
+Nivel incredere: ridicat.
+
+Test dinamic:
+- Breakpoint la QNetworkAccessManager::get/post; inspecteaza URL, payload si token.
+
+-------------------------------------------------------------------------------
+4.12 FUN_1400875d0 - UI manager / tray / setari
+-------------------------------------------------------------------------------
+
+Nume Ghidra: FUN_1400875d0
+Adresa: 0x1400875d0
+
+Functii apelate:
+- QObject::QObject
+- QSystemTrayIcon::QSystemTrayIcon
+- QMenu::QMenu
+- QApplication::setWindowIcon
+- QSystemTrayIcon::setIcon
+- QSystemTrayIcon::setContextMenu
+- QLocale::system/language
+- functii SettingsProvider
+
+API-uri Windows:
+- Nu direct.
+
+Stringuri asociate:
+- "gsa"
+- "agent ui initialized"
+- "agent ui cannot be initialized"
+- "unable to open settings database"
+- ":/images/selfcontrol_icon.ico"
+- Path: impl-grabberSubAgent-ui\manager.cpp
+
+Pseudocod relevant:
+  QObject init;
+  create QSystemTrayIcon and QMenu;
+  init settings provider with "gsa";
+  if init fails: log "agent ui cannot be initialized";
+  else:
+      log "agent ui initialized";
+      open settings DB/provider;
+      set language;
+      set icon ":/images/selfcontrol_icon.ico";
+      set tray icon/context menu;
+
+Concluzie:
+- Manager UI al subagentului, nu modul de captura. Gestioneaza tray, self-control/task tracker/settings.
+
+Nivel incredere: ridicat.
+
+Test dinamic:
+- Breakpoint la 0x1400875d0; verifica daca apare tray icon si ce fisiere de setari sunt deschise.
+
+-------------------------------------------------------------------------------
+4.13 FUN_140089c10 - SettingsProvider / settings.sqlite
+-------------------------------------------------------------------------------
+
+Nume Ghidra: FUN_140089c10
+Adresa: 0x140089c10
+
+Functii apelate:
+- QDir::homePath
+- QDir::exists/mkpath
+- QSqlDatabase
+- QFile::exists/remove
+- QSettings::QSettings/status/value
+
+API-uri Windows:
+- Nu direct; acces fisiere prin Qt.
+
+Stringuri asociate:
+- "Time tracking"
+- "settings.sqlite"
+- "settings.ini"
+- "common/language"
+- "self_control/dayActivityEnabled"
+- "self_control/dayActivityInPercentage"
+- "self_control/dayRatingEnabled"
+- "self_control/dataManagementEnabled"
+- "self_control/dataFetchingEnabled"
+- "unable to locate home path"
+- "unable to create settings directory: "
+- Path: impl-grabberSubAgent-ui\settingsProvider.cpp
+
+Pseudocod relevant:
+  set title "Time tracking";
+  set db name "settings.sqlite";
+  home = QDir::homePath();
+  create/open settings dir;
+  open SQL database;
+  if settings.ini exists:
+      read language and self_control flags;
+      remove settings.ini after migration/read;
+
+Concluzie:
+- Persistenta locala pentru UI/time tracking/self-control. Nu stocheaza frame-uri sau HWND/PID observabil in aceasta functie.
+
+Nivel incredere: ridicat.
+
+Test dinamic:
+- Process Monitor pe settings.sqlite/settings.ini; breakpoint la QSqlDatabase open.
+
+-------------------------------------------------------------------------------
+4.14 FUN_140023ec0 - colectare user info / AD / LDAP / registry fallback
+-------------------------------------------------------------------------------
+
+Nume Ghidra: FUN_140023ec0
+Adresa: 0x140023ec0
+
+Functii apelate:
+- GetUserNameExW
+- GetUserNameW
+- QStandardPaths::writableLocation
+- functii LDAP/registry helper
+
+API-uri Windows:
+- GetUserNameExW
+- GetUserNameW
+- GetLastError
+
+Stringuri asociate:
+- "GetUserNameEx failed for NameFullyQualifiedDN feature with error code: "
+- "AD info successfully fetched by GetUserNameEx"
+- "GetUserNameEx failed for NameUniqueId feature with error code: "
+- "failed to query AD info from AD, trying to get from LDAP"
+- "AD info successfully fetched from LDAP"
+- "failed to query AD info from LDAP, trying to get from registry"
+- "AD info successfully fetched from registry"
+- "Failed to obtain AD GUID and DN in anyway"
+- "GetUserNameW failed: "
+- "fullName"
+- "distinguishedName"
+- "GUID"
+- "local"
+- "fail"
+- "home"
+- Path: impl-grabberSubAgent-userInfo\adsiQuery.cpp
+
+Pseudocod relevant:
+  try GetUserNameExW(NameFullyQualifiedDN);
+  try GetUserNameExW(NameUniqueId);
+  if missing fields:
+      try LDAP helper;
+  if still missing:
+      try registry helper;
+  fallback:
+      GetUserNameW -> fullName;
+  fill map: fullName, distinguishedName, GUID, local, fail, home;
+
+Concluzie:
+- Colecteaza identitate utilizator/domeniu/AD, probabil pentru asocierea sesiunii cu utilizatorul.
+
+Nivel incredere: ridicat.
+
+Test dinamic:
+- Breakpoint pe GetUserNameExW/GetUserNameW si monitorizare registry/LDAP.
+
+-------------------------------------------------------------------------------
+4.15 FUN_1400210d0 - incarcare dinamica ActiveDS
+-------------------------------------------------------------------------------
+
+Nume Ghidra: FUN_1400210d0
+Adresa: 0x1400210d0
+
+Functii apelate:
+- LoadLibraryA
+- GetProcAddress
+- CoInitialize
+
+API-uri Windows:
+- LoadLibraryA("activeds.dll")
+- GetProcAddress("ADsGetObject")
+- GetProcAddress("ADsOpenObject")
+- GetProcAddress("FreeADsMem")
+- CoInitialize
+
+Stringuri asociate:
+- "activeds.dll"
+- "ADsGetObject"
+- "ADsOpenObject"
+- "FreeADsMem"
+- "Failed to load activeds.dll: "
+- "Failed to find ADsGetObject in activeds.dll: "
+- "Failed to find ADsOpenObject in activeds.dll: "
+- "Failed to find FreeADsMem in activeds.dll: "
+- Path: impl-grabberSubAgent-userInfo\adsiQuery.cpp
+
+Pseudocod relevant:
+  h = LoadLibraryA("activeds.dll");
+  pADsGetObject = GetProcAddress(h, "ADsGetObject");
+  pADsOpenObject = GetProcAddress(h, "ADsOpenObject");
+  pFreeADsMem = GetProcAddress(h, "FreeADsMem");
+  if all present:
+      CoInitialize(NULL);
+
+Concluzie:
+- Modulul foloseste ADSI dinamic pentru informatii AD; acesta explica importurile LoadLibrary/GetProcAddress fara legatura cu captura.
+
+Nivel incredere: ridicat.
+
+Test dinamic:
+- Breakpoint pe LoadLibraryA/GetProcAddress; confirma activeds.dll si functiile rezolvate.
+
+-------------------------------------------------------------------------------
+4.16 FUN_140099410 - screenTracker Qt, geometrie ecran
+-------------------------------------------------------------------------------
+
+Nume Ghidra: FUN_140099410
+Adresa: 0x140099410
+
+Functii apelate:
+- QObject::disconnect
+- QScreen::availableGeometry
+- conectare la availableGeometryChanged
+
+API-uri Windows:
+- Nu direct.
+
+Stringuri asociate:
+- "ui: null screen track attempt"
+- Path: impl-gui-base\screenTracker.cpp
+
+Pseudocod relevant:
+  if screen == NULL:
+      log "ui: null screen track attempt";
+  else:
+      disconnect old screen signals;
+      store new screen;
+      connect availableGeometryChanged;
+      geom = QScreen::availableGeometry(screen);
+      if geometry changed:
+          store x/y/w/h at object offsets +0x10..+0x1c;
+          emit/update geometry changed;
+
+Concluzie:
+- Urmareste geometria ecranului pentru UI/layout; nu este captura ecran. Poate influenta UI sau dimensiuni, dar nu contine BitBlt/PrintWindow/DXGI.
+
+Nivel incredere: ridicat.
+
+Test dinamic:
+- Breakpoint la 0x140099410; schimba rezolutia/DPI/monitorul si observa valorile x/y/w/h.
+
+-------------------------------------------------------------------------------
+4.17 FUN_140030100 - scriere dump/diagnostic intr-un fisier
+-------------------------------------------------------------------------------
+
+Nume Ghidra: FUN_140030100
+Adresa: 0x140030100
+
+Functii apelate:
+- CreateFileW
+- VirtualQueryEx
+- GetProcessId
+- CloseHandle
+- apel indirect la functie din param_1+0xa0, posibil MiniDumpWriteDump
+
+API-uri Windows:
+- CreateFileW
+- VirtualQueryEx
+- GetProcessId
+- CloseHandle
+
+Stringuri asociate:
+- Nu direct in fragment.
+
+Pseudocod relevant:
+  hFile = CreateFileW(path, GENERIC_WRITE, 0, NULL, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
+  if context provided:
+      VirtualQueryEx(targetProcess, contextAddress, ...);
+      set memory range around context;
+  result = callback(param_5, GetProcessId(param_5), hFile, flags);
+  CloseHandle(hFile);
+
+Concluzie:
+- Pare infrastructura de raportare crash/minidump, nu captura ecran. In acelasi subsistem se observa LoadLibraryW("dbghelp.dll") si GetProcAddress("MiniDumpWriteDump") in FUN_14002eed0.
+
+Nivel incredere: mediu-ridicat.
+
+Test dinamic:
+- Breakpoint la LoadLibraryW("dbghelp.dll") / MiniDumpWriteDump si CreateFileW pentru path-ul dump.
+
+===============================================================================
+5. Mecanisme IPC / comunicare / persistenta
+===============================================================================
+
+FAPTE OBSERVATE:
+
+Named pipes:
+- FUN_1400320a0: CreateFileW + WaitNamedPipeW.
+- FUN_140032180: SetNamedPipeHandleState(mode=2).
+- FUN_140032210: CreateFileW + DuplicateHandle.
+- FUN_1400323a0: TransactNamedPipe + WriteFile, handshake 0x50 bytes.
+
+Local RPC / QLocalSocket:
+- Stringuri:
+  - impl-localRPC\caller.cpp
+  - "unknown localrpc connection: "
+  - "localrpc::Caller"
+- Importuri/stringuri Qt:
+  - QLocalSocket::LocalSocketState
+  - QLocalSocket::LocalSocketError
+  - QLocalSocket::abort/error/stateChanged/isValid/state
+
+Socket/HTTP:
+- Importuri Winsock si Qt network.
+- FUN_140083580 foloseste QNetworkAccessManager::get/post.
+
+Events/semaphores/threads:
+- CreateSemaphoreW in FUN_14002eed0.
+- CreateThread in FUN_14002eed0.
+- CreateEventW/SetEvent importate; xrefs catre FUN_140032780 si alte helper-e.
+
+Shared memory:
+- Nu am identificat in tssubservice.exe o functie clara CreateFileMapping/MapViewOfFile in importurile observate.
+- Spre deosebire de tlshost/tlsservice, aici nu a aparut un subsistem evident de frame/shared-memory pentru captura.
+
+Fisiere temporare / persistenta:
+- settings.sqlite
+- settings.ini
+- QStandardPaths::writableLocation / home path
+- posibile fisiere dump prin infrastructura dbghelp/MiniDumpWriteDump.
+
+CONCLUZIE:
+- IPC principal observabil: named pipe si localRPC/QLocalSocket.
+- Transmiterea datelor HTTP este facuta de subagent prin Qt network.
+
+===============================================================================
+6. Variabile globale / structuri relevante
+===============================================================================
+
+FAPTE OBSERVATE:
+- FUN_140017280:
+  - pastreaza numele IPC din "-ipc-name" in QString local_660.
+  - construieste numele de log/agent cu "subAgent" + session id.
+- FUN_1400323a0:
+  - structura la param_1 contine campuri actualizate dupa handshake:
+    - param_1+0x40 = local_c0
+    - param_1+0x48 = local_b8
+    - param_1+0x50 = lStack_b0
+    - param_1+0x58 = status/reply field
+  - request contine PID curent prin GetCurrentProcessId.
+- FUN_140083580:
+  - campuri probabile in obiect HTTP:
+    - param_1+0x68: web_token
+    - param_1+0x70: web interface/base URL
+    - param_1+0x90: skp_version
+    - param_1+0x98: coada request-uri
+    - param_1+0xa0/+0xa8: metoda/postfix
+    - param_1+0xb0: QJsonObject payload
+    - param_1+0xc0: stare request in progress
+- FUN_140099410:
+  - param_1+0x10/+0x14/+0x18/+0x1c: geometrie ecran x/y/w/h.
+- FUN_1400875d0:
+  - param_1+0xa0: QSystemTrayIcon
+  - param_1+0xb0: QMenu
+  - param_1+0xe8: QIcon
+  - param_1+0xf0: SettingsProvider pointer.
+
+NEOBSERVAT IN TSSUBSERVICE:
+- Nu am identificat variabile globale/structuri pentru:
+  - ultimul HWND
+  - ultimul PID al ferestrei active
+  - ultimul titlu de fereastra
+  - ultimul frame capturat
+  - starea thread-ului de captura ecran
+
+IPOTEZA:
+- Aceste structuri exista in tlsservice.exe, nu in tssubservice.exe. In tssubservice.exe apar structuri pentru IPC, clipboard, HTTP, UI si user info.
+
+===============================================================================
+7. Flux probabil focus -> captura -> procesare -> IPC -> transmitere
+===============================================================================
+
+FAPTE OBSERVATE IN TSSUBSERVICE:
+- Nu exista dovezi directe pentru:
+  - schimbare focus
+  - identificare HWND/PID
+  - captura GDI/DXGI/D3D
+  - compresie frame
+- Exista dovezi pentru:
+  - pornire subagent cu "-ipc-name"
+  - handshake named pipe
+  - localRPC/QLocalSocket
+  - colectare clipboard
+  - HTTP GET/POST
+  - UI/tray/settings/self-control/task-tracker
+  - user info AD/registry
+
+IPOTEZA DE FLUX GLOBAL, COROBORATA CU ANALIZELE ANTERIOARE:
+1. tlsservice.exe detecteaza focusul si fereastra activa prin Win32 hooks/WinEvent/GetForegroundWindow.
+2. tlsservice.exe face captura GDI/window/screen prin PrintWindow/BitBlt/GetDIBits.
+3. tlshost.exe gestioneaza probabil host/orchestrare/transport/video sequencing.
+4. tssubservice.exe este lansat in sesiunea userului ca subagent auxiliar:
+   - primeste "-ipc-name";
+   - face handshake named pipe/localRPC;
+   - monitorizeaza clipboard;
+   - gestioneaza UI si setari locale;
+   - trimite/primeste date HTTP via QNetworkAccessManager;
+   - furnizeaza identitate utilizator/AD.
+
+Nivel incredere:
+- Ridicat pentru rolul tssubservice ca subagent auxiliar.
+- Mediu pentru ordinea exacta intre procese, deoarece aceasta cere runtime tracing.
+
+===============================================================================
+8. Top 5 cauze posibile pentru captura blocata pe Chrome desi userul lucreaza in AutoCAD
+===============================================================================
+
+IMPORTANT:
+- Cauzele de mai jos sunt ipoteze pentru sistemul global Kickidler, nu dovezi directe din tssubservice.exe. In tssubservice.exe nu am observat codul care pastreaza ultimul HWND/frame.
+
+1. Stare "last active HWND/PID" blocata in tlsservice.exe
+   - Fapt suport: tlsservice.exe, nu tssubservice.exe, contine GetForegroundWindow/GetGUIThreadInfo/WinEvent hooks.
+   - Ipoteza: handler-ul de focus nu actualizeaza HWND cand AutoCAD devine activ sau callback-ul WinEvent se blocheaza.
+   - Test: breakpoint in tlsservice.exe la GetForegroundWindow/GetGUIThreadInfo/SetWinEventHook callback si compara HWND/PID Chrome vs AutoCAD.
+
+2. Captura PrintWindow/BitBlt esueaza pentru AutoCAD si pipeline-ul reutilizeaza ultimul frame valid
+   - Fapt suport: tlsservice.exe contine PrintWindow/BitBlt/GetDIBits; tssubservice.exe nu.
+   - Ipoteza: AutoCAD foloseste suprafete accelerate/GPU care nu raspund bine la PrintWindow/BitBlt, iar codul trimite ultimul frame Chrome.
+   - Test: breakpoint in tlsservice.exe la PrintWindow/BitBlt/GetDIBits si verifica return code cand AutoCAD este activ.
+
+3. Thread-ul/event loop de captura este blocat sau asteapta un semnal vechi
+   - Fapt suport: tlsservice.exe are thread-uri/WaitCondition pentru captura; tssubservice.exe are event loop Qt si IPC.
+   - Ipoteza: pipeline-ul captureaza in thread separat si ramane pe bufferul anterior.
+   - Test: debugger pe thread-urile tlsservice.exe; inspecteaza waits, critical sections si timestamp-ul ultimului frame.
+
+4. Canal IPC/transport mentine un state vechi sau pierde mesajul de schimbare focus
+   - Fapt suport: tssubservice.exe foloseste named pipe/localRPC; tlshost/tlsservice au IPC similar.
+   - Ipoteza: evenimentul de schimbare focus se pierde intre componenta de detectie si componenta de transport, iar UI/transport continua sa trimita metadata/frame vechi.
+   - Test: breakpoint/log pe TransactNamedPipe/WriteFile in toate procesele si corelare timestamp focus/frame.
+
+5. Problema de desktop/session/integrity/privilegii pentru AutoCAD
+   - Fapt suport: tlsservice.exe foloseste OpenInputDesktop/SetThreadDesktop in analiza anterioara; tssubservice.exe porneste pe session id curent.
+   - Ipoteza: AutoCAD ruleaza elevat, pe alt desktop, sau cu grafica/privilegii care blocheaza capturarea, iar serviciul ramane cu captura Chrome.
+   - Test: compara integrity level si session/desktop pentru Chrome, AutoCAD, tlsservice.exe, tssubservice.exe; testeaza AutoCAD normal vs elevated.
+
+===============================================================================
+9. Functii de urmarit ulterior in debugger
+===============================================================================
+
+In tssubservice.exe:
+- 0x140017280 FUN_140017280
+  - confirma command line, "-ipc-name", session id si pornirea event loop.
+- 0x1400320a0 FUN_1400320a0
+  - nume pipe si CreateFileW/WaitNamedPipeW.
+- 0x140032180 FUN_140032180
+  - SetNamedPipeHandleState si handle pipe.
+- 0x140032210 FUN_140032210
+  - DuplicateHandle si procesul tinta.
+- 0x1400323a0 FUN_1400323a0
+  - handshake TransactNamedPipe/WriteFile, mesajele 0x50 bytes.
+- 0x14006f8f0 FUN_14006f8f0
+  - atasare QClipboard si callback-uri.
+- 0x14006f410 FUN_14006f410
+  - clasificare clipboard: text/html/image/urls/other.
+- 0x140083580 FUN_140083580
+  - HTTP GET/POST si payload JSON.
+- 0x1400875d0 FUN_1400875d0
+  - init UI/tray/settings.
+- 0x140089c10 FUN_140089c10
+  - settings.sqlite/settings.ini.
+- 0x140023ec0 FUN_140023ec0
+  - GetUserNameExW/GetUserNameW si AD info.
+- 0x1400210d0 FUN_1400210d0
+  - LoadLibraryA("activeds.dll"), GetProcAddress ADSI.
+- 0x140099410 FUN_140099410
+  - QScreen::availableGeometry si schimbari monitor/rezolutie.
+
+In tlsservice.exe (pentru problema Chrome -> AutoCAD):
+- FUN_140040dd0 @ 0x140040dd0 - WinEvent/focus handler.
+- FUN_1400405d0 @ 0x1400405d0 - keyboard/mouse hook callback, GetForegroundWindow.
+- FUN_140047d80 @ 0x140047d80 - OpenInputDesktop/SetThreadDesktop/GetForegroundWindow.
+- FUN_1400471d0 @ 0x1400471d0 - metadata HWND/PID/title/process path.
+- FUN_1400515a0 @ 0x1400515a0 - wrapper capturare fereastra.
+- FUN_1400501d0 @ 0x1400501d0 - PrintWindow/BitBlt/GetDIBits.
+
+===============================================================================
+10. Raspunsuri finale cerute
+===============================================================================
+
+1. Rolul probabil al tssubservice.exe
+- Subagent Kickidler din sesiunea utilizatorului, bazat pe Qt, responsabil de IPC/localRPC, UI/tray/self-control/task tracker, clipboard, user info/AD si HTTP.
+- Nu pare componenta principala care detecteaza fereastra activa sau captureaza ecranul.
+
+2. Functiile principale identificate
+- entry @ 0x140002f3b - entry stub.
+- FUN_1400b8390 @ 0x1400b8390 - CRT startup.
+- FUN_140017280 @ 0x140017280 - main app-grabberSubAgent.
+- FUN_1400320a0 @ 0x1400320a0 - CreateFileW/WaitNamedPipeW helper.
+- FUN_140032180 @ 0x140032180 - SetNamedPipeHandleState.
+- FUN_140032210 @ 0x140032210 - DuplicateHandle pipe.
+- FUN_1400323a0 @ 0x1400323a0 - TransactNamedPipe handshake.
+- FUN_14006f410 @ 0x14006f410 - clipboard MIME classification/extraction.
+- FUN_14006f8f0 @ 0x14006f8f0 - clipboard hookup.
+- FUN_140083580 @ 0x140083580 - HTTP GET/POST manager.
+- FUN_1400875d0 @ 0x1400875d0 - UI manager/tray/settings.
+- FUN_140089c10 @ 0x140089c10 - settings provider/settings.sqlite.
+- FUN_140023ec0 @ 0x140023ec0 - user info AD/LDAP/registry fallback.
+- FUN_1400210d0 @ 0x1400210d0 - dynamic ADSI loader.
+- FUN_140099410 @ 0x140099410 - QScreen geometry tracker.
+
+3. Relatia observata cu celelalte executabile
+- Nu exista stringuri directe "tlshost.exe", "tlsservice.exe", "tssubservice.exe" in tssubservice.exe.
+- Relatia observabila este prin "-ipc-name", named pipes/localRPC si numele "subAgent".
+- Rolul global probabil:
+  - tlsservice.exe: focus/input/captura.
+  - tlshost.exe: host/orchestrare/transport/video pipeline.
+  - tssubservice.exe: subagent user-session pentru UI/clipboard/HTTP/user info/IPC.
+
+4. Flux probabil de captura
+- tssubservice.exe nu contine flux de captura observabil.
+- Fluxul probabil global:
+  focus/capture in tlsservice.exe -> IPC/transport catre tlshost.exe/subagent -> HTTP/local UI/clipboard auxiliary prin tssubservice.exe.
+
+5. Top 5 cauze posibile pentru blocarea capturii pe o fereastra veche
+- State HWND/PID vechi in tlsservice.exe.
+- PrintWindow/BitBlt esueaza pe AutoCAD si se reutilizeaza ultimul frame Chrome.
+- Thread/event de captura blocat.
+- Mesaj IPC/focus/frame pierdut sau ramas vechi.
+- Diferente desktop/session/integrity/GPU intre Chrome si AutoCAD.
+
+6. Functii de urmarit ulterior intr-un debugger
+- In tssubservice.exe: 0x140017280, 0x1400320a0, 0x140032180, 0x140032210, 0x1400323a0, 0x14006f8f0, 0x14006f410, 0x140083580, 0x1400875d0, 0x140089c10, 0x140023ec0, 0x1400210d0, 0x140099410.
+- In tlsservice.exe pentru problema focus/captura: 0x140040dd0, 0x1400405d0, 0x140047d80, 0x1400471d0, 0x1400515a0, 0x1400501d0.
+
+===============================================================================
+11. Limite ale analizei
+===============================================================================
+
+- MCP Ghidra a returnat timeout la decompilarea unor functii localRPC mai mari, deci am folosit xrefs/stringuri/importuri si functiile decompilate disponibile.
+- Nu am modificat binarul, nu am redenumit functii si nu am adaugat comentarii.
+- Concluziile despre fluxul complet intre procese sunt ipoteze bazate pe coroborarea celor trei analize statice; confirmarea necesita tracing dinamic.
