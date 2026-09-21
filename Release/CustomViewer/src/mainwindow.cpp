@@ -1,5 +1,6 @@
 #include "mainwindow.h"
 
+#include "historyview.h"
 #include "monitorwidget.h"
 
 #include <QCheckBox>
@@ -24,6 +25,7 @@
 #include <QScrollArea>
 #include <QSettings>
 #include <QSpinBox>
+#include <QStackedWidget>
 #include <QStandardPaths>
 #include <QStatusBar>
 #include <QStyle>
@@ -116,6 +118,15 @@ void MainWindow::connectOrDisconnect()
                                 m_fingerprintEdit->text());
 }
 
+void MainWindow::autoConnect(const QString &host, quint16 port, const QString &token, bool useTls)
+{
+    m_hostEdit->setText(host);
+    m_portSpin->setValue(port);
+    m_tokenEdit->setText(token);
+    m_tlsCheck->setChecked(useTls);
+    connectOrDisconnect();
+}
+
 void MainWindow::startDemo()
 {
     clearMonitors();
@@ -152,19 +163,31 @@ void MainWindow::setAgentIdentity(const QString &agentName, const QString &sessi
         ? agentName : QStringLiteral("%1  /  %2").arg(agentName, sessionName));
 }
 
-void MainWindow::addMonitor(quint32 streamId, const QString &name, const QSize &size)
+void MainWindow::addMonitor(quint32 streamId, const QString &name, const QSize &size,
+                            quint32 sessionId, const QString &sessionUsername,
+                            const QString &sessionState)
 {
     Q_UNUSED(size)
+    Q_UNUSED(sessionState)
     if (m_monitors.contains(streamId)) {
         return;
     }
-    auto *monitor = new MonitorWidget(streamId, name, m_monitorContainer);
+    const QString displayName = sessionUsername.isEmpty()
+        ? name : QStringLiteral("%1 — %2").arg(sessionUsername, name);
+    auto *monitor = new MonitorWidget(streamId, displayName, m_monitorContainer);
     connect(monitor, &MonitorWidget::selected, this, &MainWindow::selectMonitor);
     connect(monitor, &MonitorWidget::fullScreenRequested,
             this, &MainWindow::showMonitorFullScreen);
     m_monitors.insert(streamId, monitor);
+    m_monitorNames.insert(streamId, displayName);
+    // Group monitors from the same session together in the grid: everything
+    // sorts by this key, which is the session id when the agent reports
+    // one (PersonalHost), or just the streamId when it doesn't (demo mode,
+    // single-session PersonalScreenAgent).
+    m_monitorSessionOrder.insert(streamId, sessionId != 0 ? sessionId : streamId);
     m_emptyLabel->hide();
     relayoutMonitors();
+    m_historyView->setMonitors(m_monitorNames);
     if (m_selectedStream == 0) {
         selectMonitor(streamId);
     }
@@ -174,7 +197,8 @@ void MainWindow::updateFrame(quint32 streamId, const QImage &image,
                              quint64 sequence, qint64 latencyMs)
 {
     if (!m_monitors.contains(streamId)) {
-        addMonitor(streamId, QStringLiteral("Monitor %1").arg(streamId), image.size());
+        addMonitor(streamId, QStringLiteral("Monitor %1").arg(streamId), image.size(), 0,
+                  QString(), QString());
     }
     m_monitors.value(streamId)->setFrame(image, sequence, latencyMs);
 }
@@ -231,6 +255,29 @@ void MainWindow::showProtocolError(const QString &message)
     statusBar()->showMessage(message, 8000);
 }
 
+void MainWindow::showTrackerPage()
+{
+    m_trackerNavButton->setObjectName(QStringLiteral("navActive"));
+    m_historyNavButton->setObjectName(QStringLiteral("navButton"));
+    style()->unpolish(m_trackerNavButton);
+    style()->polish(m_trackerNavButton);
+    style()->unpolish(m_historyNavButton);
+    style()->polish(m_historyNavButton);
+    m_contentStack->setCurrentWidget(m_trackerPage);
+}
+
+void MainWindow::showHistoryPage()
+{
+    m_historyNavButton->setObjectName(QStringLiteral("navActive"));
+    m_trackerNavButton->setObjectName(QStringLiteral("navButton"));
+    style()->unpolish(m_historyNavButton);
+    style()->polish(m_historyNavButton);
+    style()->unpolish(m_trackerNavButton);
+    style()->polish(m_trackerNavButton);
+    m_contentStack->setCurrentWidget(m_historyView);
+    m_historyView->activate();
+}
+
 void MainWindow::buildInterface()
 {
     setWindowTitle(QStringLiteral("Personal Viewer"));
@@ -276,15 +323,17 @@ void MainWindow::buildInterface()
     headerLayout->addWidget(brand);
     headerLayout->addStretch();
 
-    auto *tracker = new QPushButton(QStringLiteral("◉  Tracker"), header);
-    tracker->setObjectName(QStringLiteral("navActive"));
+    m_trackerNavButton = new QPushButton(QStringLiteral("◉  Tracker"), header);
+    m_trackerNavButton->setObjectName(QStringLiteral("navActive"));
+    connect(m_trackerNavButton, &QPushButton::clicked, this, &MainWindow::showTrackerPage);
     auto *reports = new QPushButton(QStringLiteral("▤  Reports"), header);
     reports->setObjectName(QStringLiteral("navButton"));
-    auto *history = new QPushButton(QStringLiteral("↶  History"), header);
-    history->setObjectName(QStringLiteral("navButton"));
-    headerLayout->addWidget(tracker);
+    m_historyNavButton = new QPushButton(QStringLiteral("↶  History"), header);
+    m_historyNavButton->setObjectName(QStringLiteral("navButton"));
+    connect(m_historyNavButton, &QPushButton::clicked, this, &MainWindow::showHistoryPage);
+    headerLayout->addWidget(m_trackerNavButton);
     headerLayout->addWidget(reports);
-    headerLayout->addWidget(history);
+    headerLayout->addWidget(m_historyNavButton);
     headerLayout->addStretch();
 
     m_statusLabel = new QLabel(QStringLiteral("●  Deconectat"), header);
@@ -339,13 +388,13 @@ void MainWindow::buildInterface()
     subLayout->addWidget(tabs);
     rootLayout->addWidget(subbar);
 
-    auto *content = new QWidget(root);
-    auto *contentLayout = new QVBoxLayout(content);
+    m_trackerPage = new QWidget(root);
+    auto *contentLayout = new QVBoxLayout(m_trackerPage);
     contentLayout->setContentsMargins(5, 5, 5, 5);
     contentLayout->setSpacing(0);
-    m_agentLabel = new QLabel(QStringLiteral("Niciun agent selectat"), content);
+    m_agentLabel = new QLabel(QStringLiteral("Niciun agent selectat"), m_trackerPage);
     m_agentLabel->hide();
-    auto *scroll = new QScrollArea(content);
+    auto *scroll = new QScrollArea(m_trackerPage);
     scroll->setWidgetResizable(true);
     scroll->setFrameShape(QFrame::NoFrame);
     m_monitorContainer = new QWidget(scroll);
@@ -362,7 +411,13 @@ void MainWindow::buildInterface()
     m_monitorGrid->addWidget(m_emptyLabel, 0, 0);
     scroll->setWidget(m_monitorContainer);
     contentLayout->addWidget(scroll, 1);
-    rootLayout->addWidget(content, 1);
+
+    m_historyView = new HistoryView(m_connection, root);
+
+    m_contentStack = new QStackedWidget(root);
+    m_contentStack->addWidget(m_trackerPage);
+    m_contentStack->addWidget(m_historyView);
+    rootLayout->addWidget(m_contentStack, 1);
     setCentralWidget(root);
     statusBar()->setSizeGripEnabled(false);
 
@@ -443,6 +498,8 @@ void MainWindow::applyStyle()
         QMenu::item:selected { background: #1da06f; }
         QDialog { background: #30323a; }
         QStatusBar { background: #272a30; color: #f2a4a4; min-height: 18px; }
+        QLabel#historyPreview { background: #05080f; border: 1px solid #4b4e57; }
+        QLabel#historyTime { font-weight: 700; padding: 0 8px; }
     )"));
 }
 
@@ -450,6 +507,8 @@ void MainWindow::clearMonitors()
 {
     const auto monitors = m_monitors;
     m_monitors.clear();
+    m_monitorSessionOrder.clear();
+    m_monitorNames.clear();
     for (MonitorWidget *monitor : monitors) {
         m_monitorGrid->removeWidget(monitor);
         monitor->deleteLater();
@@ -459,6 +518,7 @@ void MainWindow::clearMonitors()
     m_agentLabel->setText(QStringLiteral("Niciun agent selectat"));
     m_emptyLabel->show();
     relayoutMonitors();
+    m_historyView->setMonitors(m_monitorNames);
 }
 
 void MainWindow::relayoutMonitors()
@@ -467,7 +527,14 @@ void MainWindow::relayoutMonitors()
     const int availableWidth = qMax(300, m_monitorContainer ? m_monitorContainer->width() : width());
     const int columns = qMax(1, availableWidth / 315);
     QList<quint32> ids = m_monitors.keys();
-    std::sort(ids.begin(), ids.end());
+    std::sort(ids.begin(), ids.end(), [this](quint32 a, quint32 b) {
+        const quint32 sessionA = m_monitorSessionOrder.value(a, a);
+        const quint32 sessionB = m_monitorSessionOrder.value(b, b);
+        if (sessionA != sessionB) {
+            return sessionA < sessionB;
+        }
+        return a < b;
+    });
     for (quint32 id : ids) {
         MonitorWidget *monitor = m_monitors.value(id);
         m_monitorGrid->removeWidget(monitor);

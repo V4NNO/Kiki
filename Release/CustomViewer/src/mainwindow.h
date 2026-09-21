@@ -10,11 +10,11 @@ class QDialog;
 class QGridLayout;
 class QLabel;
 class QLineEdit;
-class QListWidget;
 class QPushButton;
 class QSpinBox;
 class QStackedWidget;
 class MonitorWidget;
+class HistoryView;
 class QResizeEvent;
 
 class MainWindow final : public QMainWindow
@@ -24,6 +24,10 @@ class MainWindow final : public QMainWindow
 public:
     explicit MainWindow(QWidget *parent = nullptr);
 
+    // Used by --autostart-* command-line switches for unattended interop
+    // testing (fills the settings dialog fields, then connects).
+    void autoConnect(const QString &host, quint16 port, const QString &token, bool useTls);
+
 private slots:
     void connectOrDisconnect();
     void startDemo();
@@ -31,7 +35,9 @@ private slots:
     void showAbout();
     void updateStatus(const QString &text, bool connected);
     void setAgentIdentity(const QString &agentName, const QString &sessionName);
-    void addMonitor(quint32 streamId, const QString &name, const QSize &size);
+    void addMonitor(quint32 streamId, const QString &name, const QSize &size,
+                    quint32 sessionId, const QString &sessionUsername,
+                    const QString &sessionState);
     void updateFrame(quint32 streamId, const QImage &image, quint64 sequence,
                      qint64 latencyMs);
     void updateMetadata(quint32 streamId, const QString &application,
@@ -40,6 +46,9 @@ private slots:
     void showMonitorFullScreen(quint32 streamId);
     void saveSnapshot();
     void showProtocolError(const QString &message);
+
+    void showTrackerPage();
+    void showHistoryPage();
 
 private:
     void buildInterface();
@@ -67,5 +76,16 @@ protected:
     QWidget *m_monitorContainer = nullptr;
     QGridLayout *m_monitorGrid = nullptr;
     QHash<quint32, MonitorWidget *> m_monitors;
+    // Sort key for relayoutMonitors(): monitors from the same session
+    // cluster together in the grid, ordered by whichever streamId that
+    // session's monitors got first.
+    QHash<quint32, quint32> m_monitorSessionOrder;
+    QHash<quint32, QString> m_monitorNames;
     quint32 m_selectedStream = 0;
+
+    QStackedWidget *m_contentStack = nullptr;
+    QWidget *m_trackerPage = nullptr;
+    HistoryView *m_historyView = nullptr;
+    QPushButton *m_trackerNavButton = nullptr;
+    QPushButton *m_historyNavButton = nullptr;
 };

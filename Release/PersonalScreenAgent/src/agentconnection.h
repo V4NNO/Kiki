@@ -68,7 +68,7 @@ private:
 
     QSslSocket *m_socket = nullptr;
     AgentSettings m_settings;
-    QByteArray m_receiveBuffer;
+    ViewerProtocol::PsvFrameReader m_frameReader;
     QHash<quint32, StreamState> m_streams;
     QList<MonitorInfo> m_monitors;
     QTimer m_handshakeTimeout;

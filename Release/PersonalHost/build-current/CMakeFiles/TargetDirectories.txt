@@ -1,0 +1,9 @@
+C:/Users/IonSacaliuc/OneDrive - Utilities One Inc/Desktop/SCRIPTS/KickDecompile/Release/PersonalHost/build-current/CMakeFiles/PersonalHost.dir
+C:/Users/IonSacaliuc/OneDrive - Utilities One Inc/Desktop/SCRIPTS/KickDecompile/Release/PersonalHost/build-current/CMakeFiles/edit_cache.dir
+C:/Users/IonSacaliuc/OneDrive - Utilities One Inc/Desktop/SCRIPTS/KickDecompile/Release/PersonalHost/build-current/CMakeFiles/rebuild_cache.dir
+C:/Users/IonSacaliuc/OneDrive - Utilities One Inc/Desktop/SCRIPTS/KickDecompile/Release/PersonalHost/build-current/CMakeFiles/list_install_components.dir
+C:/Users/IonSacaliuc/OneDrive - Utilities One Inc/Desktop/SCRIPTS/KickDecompile/Release/PersonalHost/build-current/CMakeFiles/install.dir
+C:/Users/IonSacaliuc/OneDrive - Utilities One Inc/Desktop/SCRIPTS/KickDecompile/Release/PersonalHost/build-current/CMakeFiles/install/local.dir
+C:/Users/IonSacaliuc/OneDrive - Utilities One Inc/Desktop/SCRIPTS/KickDecompile/Release/PersonalHost/build-current/CMakeFiles/install/strip.dir
+C:/Users/IonSacaliuc/OneDrive - Utilities One Inc/Desktop/SCRIPTS/KickDecompile/Release/PersonalHost/build-current/CMakeFiles/PersonalHost_autogen_timestamp_deps.dir
+C:/Users/IonSacaliuc/OneDrive - Utilities One Inc/Desktop/SCRIPTS/KickDecompile/Release/PersonalHost/build-current/CMakeFiles/PersonalHost_autogen.dir

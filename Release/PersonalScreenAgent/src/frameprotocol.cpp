@@ -58,4 +58,23 @@ bool decodeHeader(const QByteArray &buffer, Header *header, QString *error)
     return true;
 }
 
+PsvFrameReader::Result PsvFrameReader::next(Header *header, QByteArray *payload, QString *error)
+{
+    if (m_buffer.size() < HeaderSize) {
+        return Result::NeedMoreData;
+    }
+    if (!decodeHeader(m_buffer, header, error)) {
+        return Result::Error;
+    }
+    const qsizetype totalSize = HeaderSize + static_cast<qsizetype>(header->payloadSize);
+    if (m_buffer.size() < totalSize) {
+        return Result::NeedMoreData;
+    }
+    if (payload) {
+        *payload = m_buffer.mid(HeaderSize, header->payloadSize);
+    }
+    m_buffer.remove(0, totalSize);
+    return Result::Ok;
+}
+
 } // namespace ViewerProtocol

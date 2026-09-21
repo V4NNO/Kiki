@@ -15,6 +15,8 @@ qt_add_executable(PersonalScreenViewer WIN32
     src/mainwindow.h
     src/monitorwidget.cpp
     src/monitorwidget.h
+    src/historyview.cpp
+    src/historyview.h
     src/viewerconnection.cpp
     src/viewerconnection.h
     src/frameprotocol.cpp

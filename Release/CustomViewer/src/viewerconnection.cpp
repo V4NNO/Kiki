@@ -3,6 +3,7 @@
 #include <QCryptographicHash>
 #include <QDataStream>
 #include <QHostAddress>
+#include <QJsonArray>
 #include <QJsonDocument>
 #include <QJsonObject>
 #include <QPainter>
@@ -39,7 +40,7 @@ void ViewerConnection::connectToAgent(const QString &host, quint16 port,
     m_token = token;
     m_useTls = useTls;
     m_certificateSha256 = normalizedFingerprint(certificateSha256);
-    m_receiveBuffer.clear();
+    m_frameReader.clear();
     m_streams.clear();
 
     if (m_host.isEmpty() || port == 0) {
@@ -92,7 +93,7 @@ void ViewerConnection::startDemo()
         QStringLiteral("Roxana Vasile HR & Payroll Specialist")};
     for (int index = 0; index < names.size(); ++index) {
         emit monitorDiscovered(static_cast<quint32>(index + 1), names.at(index),
-                               QSize(1600, 900));
+                               QSize(1600, 900), 0, QString(), QString());
     }
     emit statusChanged(QStringLiteral("Mod demonstrativ"), true);
     m_demoTimer.start();
@@ -129,9 +130,9 @@ void ViewerConnection::onSocketEncrypted()
 
 void ViewerConnection::onReadyRead()
 {
-    m_receiveBuffer.append(m_socket.readAll());
-    if (m_receiveBuffer.size() > static_cast<qsizetype>(ViewerProtocol::MaxPayloadSize)
-                                    + ViewerProtocol::HeaderSize) {
+    m_frameReader.append(m_socket.readAll());
+    if (m_frameReader.bufferedSize() > static_cast<qsizetype>(ViewerProtocol::MaxPayloadSize)
+                                          + ViewerProtocol::HeaderSize) {
         failProtocol(QStringLiteral("Bufferul de intrare a depasit limita admisa."));
         return;
     }
@@ -187,21 +188,19 @@ void ViewerConnection::sendClientHello()
 
 void ViewerConnection::parseAvailableMessages()
 {
-    while (m_receiveBuffer.size() >= ViewerProtocol::HeaderSize) {
+    using ViewerProtocol::PsvFrameReader;
+    while (true) {
         ViewerProtocol::Header header;
+        QByteArray payload;
         QString error;
-        if (!ViewerProtocol::decodeHeader(m_receiveBuffer, &header, &error)) {
+        const PsvFrameReader::Result result = m_frameReader.next(&header, &payload, &error);
+        if (result == PsvFrameReader::Result::NeedMoreData) {
+            return;
+        }
+        if (result == PsvFrameReader::Result::Error) {
             failProtocol(error);
             return;
         }
-        const qsizetype totalSize = ViewerProtocol::HeaderSize
-            + static_cast<qsizetype>(header.payloadSize);
-        if (m_receiveBuffer.size() < totalSize) {
-            return;
-        }
-        const QByteArray payload = m_receiveBuffer.mid(ViewerProtocol::HeaderSize,
-                                                       header.payloadSize);
-        m_receiveBuffer.remove(0, totalSize);
         processMessage(header, payload);
     }
 }
@@ -221,6 +220,12 @@ void ViewerConnection::processMessage(const ViewerProtocol::Header &header,
         break;
     case MessageType::DeltaFrame:
         processDeltaFrame(header, payload);
+        break;
+    case MessageType::HistoryQuery:
+        processHistoryQuery(header, payload);
+        break;
+    case MessageType::HistoryFrame:
+        processHistoryFrame(header, payload);
         break;
     case MessageType::Heartbeat:
         break;
@@ -265,9 +270,13 @@ void ViewerConnection::processJsonMessage(const ViewerProtocol::Header &header,
             StreamState &state = m_streams[header.streamId];
             state.name = monitor.value(QStringLiteral("name")).toString(
                 QStringLiteral("Monitor %1").arg(header.streamId));
+            const QJsonObject session = object.value(QStringLiteral("session")).toObject();
             emit monitorDiscovered(header.streamId, state.name,
                                    QSize(monitor.value(QStringLiteral("width")).toInt(),
-                                         monitor.value(QStringLiteral("height")).toInt()));
+                                         monitor.value(QStringLiteral("height")).toInt()),
+                                   static_cast<quint32>(session.value(QStringLiteral("id")).toInt()),
+                                   session.value(QStringLiteral("username")).toString(),
+                                   session.value(QStringLiteral("state")).toString());
         }
         return;
     }
@@ -289,7 +298,7 @@ void ViewerConnection::processFullFrame(const ViewerProtocol::Header &header,
     StreamState &state = m_streams[header.streamId];
     if (state.name.isEmpty()) {
         state.name = QStringLiteral("Monitor %1").arg(header.streamId);
-        emit monitorDiscovered(header.streamId, state.name, image.size());
+        emit monitorDiscovered(header.streamId, state.name, image.size(), 0, QString(), QString());
     }
     state.image = image.convertToFormat(QImage::Format_ARGB32_Premultiplied);
     state.sequence = header.sequence;
@@ -333,12 +342,170 @@ void ViewerConnection::processDeltaFrame(const ViewerProtocol::Header &header,
     emit frameReady(header.streamId, state.image, header.sequence, latency);
 }
 
+void ViewerConnection::requestHistoryDays(quint32 streamId)
+{
+    sendHistoryQuery(streamId, QJsonObject{{QStringLiteral("action"), QStringLiteral("listDays")}});
+}
+
+void ViewerConnection::requestHistoryFrames(quint32 streamId, const QString &day)
+{
+    sendHistoryQuery(streamId, QJsonObject{{QStringLiteral("action"), QStringLiteral("listFrames")},
+                                           {QStringLiteral("day"), day}});
+}
+
+void ViewerConnection::requestHistoryFrame(quint32 streamId, qint64 timestampMs)
+{
+    sendHistoryQuery(streamId, QJsonObject{{QStringLiteral("action"), QStringLiteral("getFrame")},
+                                           {QStringLiteral("timestampMs"), timestampMs}});
+}
+
+void ViewerConnection::requestHistoryActivity(quint32 streamId, const QString &day)
+{
+    sendHistoryQuery(streamId, QJsonObject{{QStringLiteral("action"), QStringLiteral("listActivity")},
+                                           {QStringLiteral("day"), day}});
+}
+
+void ViewerConnection::requestHistoryAppSegments(quint32 streamId, const QString &day)
+{
+    sendHistoryQuery(streamId,
+                     QJsonObject{{QStringLiteral("action"), QStringLiteral("listAppSegments")},
+                                 {QStringLiteral("day"), day}});
+}
+
+void ViewerConnection::requestRunningApplications(quint32 streamId, const QString &day)
+{
+    sendHistoryQuery(streamId,
+                     QJsonObject{{QStringLiteral("action"), QStringLiteral("listRunningApplications")},
+                                 {QStringLiteral("day"), day}});
+}
+
+void ViewerConnection::requestCategories(quint32 streamId)
+{
+    sendHistoryQuery(streamId, QJsonObject{{QStringLiteral("action"), QStringLiteral("listCategories")}});
+}
+
+void ViewerConnection::setAppCategory(quint32 streamId, const QString &application,
+                                      const QString &category)
+{
+    sendHistoryQuery(streamId, QJsonObject{{QStringLiteral("action"), QStringLiteral("setCategory")},
+                                           {QStringLiteral("application"), application},
+                                           {QStringLiteral("category"), category}});
+}
+
+void ViewerConnection::requestKeystrokes(quint32 streamId, const QString &day)
+{
+    sendHistoryQuery(streamId, QJsonObject{{QStringLiteral("action"), QStringLiteral("listKeystrokes")},
+                                           {QStringLiteral("day"), day}});
+}
+
+void ViewerConnection::sendHistoryQuery(quint32 streamId, const QJsonObject &object)
+{
+    const QByteArray payload = QJsonDocument(object).toJson(QJsonDocument::Compact);
+    m_socket.write(ViewerProtocol::encodeMessage(ViewerProtocol::MessageType::HistoryQuery, streamId,
+                                                 0, payload));
+}
+
+void ViewerConnection::processHistoryQuery(const ViewerProtocol::Header &header,
+                                           const QByteArray &payload)
+{
+    QJsonParseError parseError;
+    const QJsonDocument document = QJsonDocument::fromJson(payload, &parseError);
+    if (parseError.error != QJsonParseError::NoError || !document.isObject()) {
+        return;
+    }
+    const QJsonObject object = document.object();
+    if (object.contains(QStringLiteral("error"))) {
+        emit historyError(header.streamId, object.value(QStringLiteral("error")).toString());
+        return;
+    }
+    const QString action = object.value(QStringLiteral("action")).toString();
+    if (action == QStringLiteral("listDays")) {
+        QStringList days;
+        for (const QJsonValue &value : object.value(QStringLiteral("days")).toArray()) {
+            days.append(value.toString());
+        }
+        emit historyDaysReceived(header.streamId, days);
+    } else if (action == QStringLiteral("listFrames")) {
+        QList<qint64> timestamps;
+        for (const QJsonValue &value : object.value(QStringLiteral("timestamps")).toArray()) {
+            timestamps.append(static_cast<qint64>(value.toDouble()));
+        }
+        emit historyFramesReceived(header.streamId, object.value(QStringLiteral("day")).toString(),
+                                   timestamps);
+    } else if (action == QStringLiteral("listActivity")) {
+        QList<HistoryActivitySample> samples;
+        for (const QJsonValue &value : object.value(QStringLiteral("samples")).toArray()) {
+            const QJsonObject entry = value.toObject();
+            samples.append(HistoryActivitySample{
+                static_cast<qint64>(entry.value(QStringLiteral("timestampMs")).toDouble()),
+                entry.value(QStringLiteral("inputEvents")).toInt()});
+        }
+        emit historyActivityReceived(header.streamId, object.value(QStringLiteral("day")).toString(),
+                                     samples);
+    } else if (action == QStringLiteral("listAppSegments")) {
+        QList<HistoryAppSegment> segments;
+        for (const QJsonValue &value : object.value(QStringLiteral("segments")).toArray()) {
+            const QJsonObject entry = value.toObject();
+            segments.append(HistoryAppSegment{
+                entry.value(QStringLiteral("application")).toString(),
+                static_cast<qint64>(entry.value(QStringLiteral("startMs")).toDouble()),
+                static_cast<qint64>(entry.value(QStringLiteral("endMs")).toDouble())});
+        }
+        emit historyAppSegmentsReceived(header.streamId, object.value(QStringLiteral("day")).toString(),
+                                        segments);
+    } else if (action == QStringLiteral("listRunningApplications")) {
+        QList<HistoryAppUsage> applications;
+        for (const QJsonValue &value : object.value(QStringLiteral("applications")).toArray()) {
+            const QJsonObject entry = value.toObject();
+            applications.append(HistoryAppUsage{
+                entry.value(QStringLiteral("application")).toString(),
+                static_cast<qint64>(entry.value(QStringLiteral("totalMs")).toDouble()),
+                entry.value(QStringLiteral("category")).toString()});
+        }
+        emit historyRunningApplicationsReceived(
+            header.streamId, object.value(QStringLiteral("day")).toString(), applications);
+    } else if (action == QStringLiteral("listCategories")) {
+        QHash<QString, QString> categories;
+        for (const QJsonValue &value : object.value(QStringLiteral("categories")).toArray()) {
+            const QJsonObject entry = value.toObject();
+            categories.insert(entry.value(QStringLiteral("application")).toString(),
+                              entry.value(QStringLiteral("category")).toString());
+        }
+        emit historyCategoriesReceived(header.streamId, categories);
+    } else if (action == QStringLiteral("setCategory")) {
+        // Ack-only; the Running Applications panel already updated itself
+        // optimistically, nothing further to do here.
+    } else if (action == QStringLiteral("listKeystrokes")) {
+        QList<HistoryKeystrokeEntry> entries;
+        for (const QJsonValue &value : object.value(QStringLiteral("entries")).toArray()) {
+            const QJsonObject entry = value.toObject();
+            entries.append(HistoryKeystrokeEntry{
+                static_cast<qint64>(entry.value(QStringLiteral("timestampMs")).toDouble()),
+                entry.value(QStringLiteral("windowTitle")).toString(),
+                entry.value(QStringLiteral("text")).toString()});
+        }
+        emit historyKeystrokesReceived(header.streamId, object.value(QStringLiteral("day")).toString(),
+                                       entries);
+    }
+}
+
+void ViewerConnection::processHistoryFrame(const ViewerProtocol::Header &header,
+                                           const QByteArray &payload)
+{
+    QImage image;
+    if (!image.loadFromData(payload) || image.isNull()) {
+        emit historyError(header.streamId, QStringLiteral("Cadru de istoric invalid."));
+        return;
+    }
+    emit historyFrameReceived(header.streamId, header.timestampMs, image);
+}
+
 void ViewerConnection::failProtocol(const QString &message)
 {
     emit protocolError(message);
     emit statusChanged(QStringLiteral("Eroare de protocol"), false);
     m_socket.abort();
-    m_receiveBuffer.clear();
+    m_frameReader.clear();
 }
 
 bool ViewerConnection::isSafePlainTextTarget() const

@@ -121,9 +121,9 @@ void AgentConnection::setMonitors(const QList<MonitorInfo> &monitors)
 
 void AgentConnection::onReadyRead()
 {
-    m_receiveBuffer.append(m_socket->readAll());
-    if (m_receiveBuffer.size() > static_cast<qsizetype>(ViewerProtocol::MaxPayloadSize)
-                                    + ViewerProtocol::HeaderSize) {
+    m_frameReader.append(m_socket->readAll());
+    if (m_frameReader.bufferedSize() > static_cast<qsizetype>(ViewerProtocol::MaxPayloadSize)
+                                          + ViewerProtocol::HeaderSize) {
         fail(QStringLiteral("Bufferul de intrare a depasit limita admisa."));
         return;
     }
@@ -132,21 +132,19 @@ void AgentConnection::onReadyRead()
 
 void AgentConnection::parseAvailableMessages()
 {
-    while (m_receiveBuffer.size() >= ViewerProtocol::HeaderSize) {
+    using ViewerProtocol::PsvFrameReader;
+    while (true) {
         ViewerProtocol::Header header;
+        QByteArray payload;
         QString error;
-        if (!ViewerProtocol::decodeHeader(m_receiveBuffer, &header, &error)) {
+        const PsvFrameReader::Result result = m_frameReader.next(&header, &payload, &error);
+        if (result == PsvFrameReader::Result::NeedMoreData) {
+            return;
+        }
+        if (result == PsvFrameReader::Result::Error) {
             fail(error);
             return;
         }
-        const qsizetype totalSize = ViewerProtocol::HeaderSize
-            + static_cast<qsizetype>(header.payloadSize);
-        if (m_receiveBuffer.size() < totalSize) {
-            return;
-        }
-        const QByteArray payload = m_receiveBuffer.mid(ViewerProtocol::HeaderSize,
-                                                       header.payloadSize);
-        m_receiveBuffer.remove(0, totalSize);
         processMessage(header, payload);
     }
 }

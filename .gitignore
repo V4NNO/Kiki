@@ -6,3 +6,6 @@ ghidra-work/
 
 # Executabile generate local
 *.exe
+
+# Istoric local PersonalHost (Faza 2) - capturi si baza SQLite, nu se comite
+GrabberHistory/
