@@ -1,0 +1,9 @@
+C:/Users/IonSacaliuc/OneDrive - Utilities One Inc/Desktop/SCRIPTS/KickDecompile/Release/PersonalScreenAgent/build-current/CMakeFiles/PersonalScreenAgent.dir
+C:/Users/IonSacaliuc/OneDrive - Utilities One Inc/Desktop/SCRIPTS/KickDecompile/Release/PersonalScreenAgent/build-current/CMakeFiles/edit_cache.dir
+C:/Users/IonSacaliuc/OneDrive - Utilities One Inc/Desktop/SCRIPTS/KickDecompile/Release/PersonalScreenAgent/build-current/CMakeFiles/rebuild_cache.dir
+C:/Users/IonSacaliuc/OneDrive - Utilities One Inc/Desktop/SCRIPTS/KickDecompile/Release/PersonalScreenAgent/build-current/CMakeFiles/list_install_components.dir
+C:/Users/IonSacaliuc/OneDrive - Utilities One Inc/Desktop/SCRIPTS/KickDecompile/Release/PersonalScreenAgent/build-current/CMakeFiles/install.dir
+C:/Users/IonSacaliuc/OneDrive - Utilities One Inc/Desktop/SCRIPTS/KickDecompile/Release/PersonalScreenAgent/build-current/CMakeFiles/install/local.dir
+C:/Users/IonSacaliuc/OneDrive - Utilities One Inc/Desktop/SCRIPTS/KickDecompile/Release/PersonalScreenAgent/build-current/CMakeFiles/install/strip.dir
+C:/Users/IonSacaliuc/OneDrive - Utilities One Inc/Desktop/SCRIPTS/KickDecompile/Release/PersonalScreenAgent/build-current/CMakeFiles/PersonalScreenAgent_autogen_timestamp_deps.dir
+C:/Users/IonSacaliuc/OneDrive - Utilities One Inc/Desktop/SCRIPTS/KickDecompile/Release/PersonalScreenAgent/build-current/CMakeFiles/PersonalScreenAgent_autogen.dir
