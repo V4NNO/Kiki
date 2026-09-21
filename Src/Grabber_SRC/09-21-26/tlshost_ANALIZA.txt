@@ -1,0 +1,203 @@
+ANALIZA STATICA GHIDRA MCP - tlshost.exe / Kickidler Grabber
+Data: 2026-09-21
+
+1. IDENTIFICAREA PROGRAMULUI
+
+Analiza a fost efectuata asupra programului activ din Ghidra MCP.
+
+Indicatori directi din baza Ghidra:
+- 0x140354D98: "tlshost.exe"
+- 0x140354DA8: "tlsservice.exe"
+- 0x140354DC0: "tlssubservice.exe"
+- 0x1403546E8: "KickidlerGrabber"
+- 0x1403467F0: "grabber::Service"
+- 0x140355A00:
+  R:\bbuild-7\KICK-EVPROD-WIN64\components\app-grabber\service.cpp
+- 0x140354ED0:
+  R:\bbuild-7\KICK-EVPROD-WIN64\components\app-grabber\networkProxyCollector.cpp
+
+Concluzie: programul activ este componenta principala tlshost.exe a Grabber-ului
+Kickidler. Ea gazduieste serviciul, coordoneaza procesele agent/subagent si
+conecteaza colectoarele de sesiune, informatie, audio si video.
+
+2. FORMAT, LIMBAJ SI TOOLCHAIN
+
+- Executabil PE 64-bit, image base 0x140000000.
+- Limbaj principal: C++.
+- Runtime/toolchain: Microsoft Visual C++ v14 (CRT, RTTI, STL,
+  __security_init_cookie si VCRUNTIME140).
+- Framework: Qt 5.6.2, demonstrat de caile de build si de importurile Qt.
+- Sunt prezente QtCore, QtNetwork, QtGui, SSL, log4cplus si cod de compresie/audio.
+- Sectiunea .gfids si apelurile indirecte verificate indica Control Flow Guard.
+
+Segmente:
+- Headers: 0x140000000 - 0x1400003FF
+- .text:   0x140001000 - 0x1403431FF
+- .rdata:  0x140344000 - 0x140515FFF
+- .data:   0x140516000 - 0x14055F310
+- .pdata:  0x140560000 - 0x14058FBFF
+- .idata:  0x140590000 - 0x1405A23FF
+- .gfids:  0x1405A3000 - 0x1405A31FF
+- .tls:    0x1405A4000 - 0x1405A45FF
+- _RDATA:  0x1405A5000 - 0x1405A89FF
+- .00cfg:  0x1405A9000 - 0x1405A91FF
+- .rsrc:   0x1405AA000 - 0x1405AA7FF
+- .reloc:  0x1405AB000 - 0x1405B39FF
+
+Exporturi:
+- entry          -> 0x14000E83B
+- tls_callback_0 -> 0x1400134FD
+- tls_callback_1 -> 0x1402E00B4
+
+Ghidra recunoaste:
+- 29.461 functii;
+- 1.140 simboluri importate;
+- 739 namespace-uri/clase raportate de interogarea MCP.
+
+3. PORNIREA APLICATIEI
+
+- entry @ 0x14000E83B initializeaza security cookie-ul si intra in startup-ul
+  CRT FUN_14029D744.
+- run_tlshost_application @ 0x140085840 este functia principala identificata
+  prin referinta la "KickidlerGrabber".
+- Aplicatia seteaza numele Qt "KickidlerGrabber", initializeaza caile si
+  logging-ul, apoi selecteaza modul dupa argumentele liniei de comanda.
+- Moduri observate direct:
+  - "-utilize-invite": porneste fluxul de utilizare a invitatiei si event loop-ul;
+  - "-encrypt <valoare>": transforma valoarea si o scrie la stdout;
+  - "report ...": construieste modul de raportare/telemetrie;
+  - fara aceste moduri: porneste profilul normal al serviciului Grabber.
+- Profilul normal ajunge in infrastructura QtService si in QCoreApplication::exec().
+
+4. SERVICIUL WINDOWS SI CICLUL DE VIATA
+
+Functiile relevante din pseudocod:
+- FUN_140076D90: constructia obiectului principal grabber::Service;
+- configure_termservice_dependency @ 0x14008EE70;
+- restart_after_update @ 0x14008F680;
+- perform_active_or_passive_work @ 0x140090090;
+- start_grabber_service @ 0x140091A90;
+- stop_grabber_service @ 0x140092820.
+
+Comportament observat:
+- serviciul poate adauga "TermService" ca dependenta prin
+  OpenSCManagerW/OpenServiceW/ChangeServiceConfigW;
+- exista cai distincte pentru lucru activ si pasiv, inclusiv un motiv de mod
+  pasiv in logging;
+- dupa update, executabilul curent poate fi repornit;
+- pornirea construieste si leaga managerii/sink-urile, apoi deschide traseele
+  de comunicatie;
+- oprirea asteapta finalizarea initializarii folosind QMutex, proceseaza
+  evenimente Qt cat timp asteapta si elibereaza controlat obiectele detinute;
+- mesajele "await startInitialization to be completed",
+  "startInitialization completed, do real stop now" si "stopped" confirma
+  ordinea de shutdown.
+
+5. SESIUNI WINDOWS SI PROCESE UTILIZATOR
+
+Importurile si pseudocodul folosesc:
+- WTSEnumerateSessionsW;
+- WTSQuerySessionInformationW;
+- WTSQueryUserToken;
+- DuplicateTokenEx / SetTokenInformation;
+- CreateProcessAsUserW;
+- API-uri SID, ACL si privilegii.
+
+Colectorul enumera sesiunile Terminal Services si citeste identificatorul,
+utilizatorul, domeniul si alte proprietati WTS. Logica SessionImpl trateaza
+pornirea/oprirea sesiunilor, chei de business duplicate, sesiuni devenite
+inactive si evenimente venite tarziu. Arhitectura separa serviciul privilegiat
+de agentii executati in contextul utilizatorilor conectati.
+
+6. RETEA, PROXY SI TRANSPORT
+
+- networkProxyCollector.cpp extrage configuratia proxy asociata sesiunilor.
+- Sunt suportate proxy implicit, HTTP, SOCKS5 si reguli bypass.
+- Transportul foloseste sesiuni Qt, QSslSocket, certificate/chei SSL si
+  verificarea peer-ului.
+- Mesajele sunt organizate pe protocoale billing, node central, telemetry,
+  info, audio si video.
+- Exista buffering/amortizare prin StorageClient si Proxy pentru a decupla
+  colectarea de disponibilitatea conexiunii.
+
+7. SUBSISTEMUL AUDIO
+
+Dovezi:
+- "audioRouter4Grabber";
+- clasele grabber::AudioSink si grabber::AudioSequencer;
+- mesajele Post/RespAudioStreamsInfo si Post/RespAudioStreamFrames;
+- logica pentru sesiuni audio duplicate si shutdown pentru un sequencer
+  necunoscut.
+
+AudioSink mentine cate un sequencer pe sesiune, primeste raspunsurile de la nod,
+trimite metadate si cadre audio si sincronizeaza fluxurile cu starea sesiunii.
+Prezenta codului LAME indica encodare MP3 pentru anumite trasee audio.
+
+8. SUBSISTEMUL INFO
+
+InfoSink centralizeaza si transmite:
+- programele sesiunii si programul activ;
+- display-urile si display-ul activ;
+- starea sesiunii si activitatea/input idle;
+- evenimente de tastatura, volum de intrare si sesiuni audio;
+- lista computer/utilizator si marcatori de sesiune.
+
+Mesajele PostSession* si RespSession* sunt incapsulate in protocolul
+node::protocol::info. Codul include tratarea sesiunilor duplicate si a
+raspunsurilor asociate unei sesiuni care nu mai exista.
+
+9. SUBSISTEMUL VIDEO
+
+- initialize_video_router @ 0x140286F70 construieste grabber::VideoSink cu
+  ruta "videoRouter4Grabber".
+- VideoSink gestioneaza deschiderea/inchiderea conexiunii si cererile de cadre.
+- build_video_delta_packets @ 0x140293BA0 consuma cadre dintr-un buffer circular.
+- Imaginile sunt verificate ca QImage::Format_RGB555.
+- Pentru un cadru nou, codul compara cu imaginea precedenta, calculeaza
+  dreptunghiurile modificate si decide intre:
+  - cadru complet;
+  - pachete delta pe regiuni;
+  - eveniment fara imagine / stare speciala.
+- Daca volumul regiunilor schimbate depaseste pragul intern, se transmite
+  cadrul complet. Aceasta reduce traficul pentru desktop-uri cu modificari mici.
+
+10. CONFIGURARE, BILLING SI TELEMETRIE
+
+Stringurile si tipurile arata configurari precum grabberActive,
+grabberEnableKeylogger, videoHistorySec si optiuni audio/video. Billing-ul
+gestioneaza identitatea Grabber-ului, invitatia si reconectarea. Clientul de
+telemetrie contine mesaje InstallationReport si UninstallationReport, iar
+crash sender-ul poate transmite dump-uri de proces.
+
+11. FISIERUL "FULL CODE.cpp"
+
+Fisierul FULL CODE.cpp contine pseudocodul returnat de Ghidra pentru 42 de
+functii relevante, grupate astfel:
+- startup si moduri;
+- serviciu Windows si ciclu de viata;
+- audio;
+- sesiuni;
+- info;
+- video.
+
+Sunt pastrate adresele functiilor, numele FUN_/DAT_/LAB_, tipurile incomplete
+si avertismentele decompilatorului. Nu au fost inventate implementari.
+
+Limitare importanta:
+- binarul contine 29.461 functii, incluzand Qt, CRT, STL, codecuri si mii de
+  instante template; o reproducere literala a fiecarei functii nu ar reprezenta
+  codul-sursa original si ar avea milioane de linii;
+- FUN_140249410 nu a putut fi decompilata de endpoint-ul MCP deoarece a depasit
+  timeout-ul intern de 5 secunde; fisierul marcheaza explicit aceasta limita;
+- pseudocodul nu este garantat compilabil si nu recupereaza numele variabilelor,
+  comentariile, macro-urile sau structura originala a proiectului.
+
+12. CONCLUZIE
+
+tlshost.exe este orchestratorul privilegiat al Grabber-ului. El ruleaza ca
+serviciu Windows, descopera sesiunile utilizatorilor, lanseaza/coordoneaza
+agentii corespunzatori si agrega informatia, audio si video pentru transport
+catre infrastructura node. Designul foloseste Qt pentru event loop, obiecte,
+retea si imagini, API-uri Windows pentru servicii/sesiuni/tokenuri si protocoale
+C++ proprii pentru comunicatie, buffering, billing si telemetrie.
+
