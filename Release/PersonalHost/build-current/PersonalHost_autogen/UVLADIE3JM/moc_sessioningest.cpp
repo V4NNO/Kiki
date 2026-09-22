@@ -46,6 +46,7 @@ template <> constexpr inline auto SessionIngest::qt_create_metaobjectdata<qt_met
         "name",
         "QSize",
         "size",
+        "isWindow",
         "frameReady",
         "QImage",
         "image",
@@ -53,6 +54,7 @@ template <> constexpr inline auto SessionIngest::qt_create_metaobjectdata<qt_met
         "application",
         "idleText",
         "inputEvents",
+        "url",
         "keystrokeReceived",
         "windowTitle",
         "text",
@@ -69,44 +71,45 @@ template <> constexpr inline auto SessionIngest::qt_create_metaobjectdata<qt_met
 
     QtMocHelpers::UintData qt_methods {
         // Signal 'monitorDiscovered'
-        QtMocHelpers::SignalData<void(quint32, quint32, const QString &, const QSize &)>(1, 2, QMC::AccessPublic, QMetaType::Void, {{
+        QtMocHelpers::SignalData<void(quint32, quint32, const QString &, const QSize &, bool)>(1, 2, QMC::AccessPublic, QMetaType::Void, {{
             { QMetaType::UInt, 3 }, { QMetaType::UInt, 4 }, { QMetaType::QString, 5 }, { 0x80000000 | 6, 7 },
+            { QMetaType::Bool, 8 },
         }}),
         // Signal 'frameReady'
-        QtMocHelpers::SignalData<void(quint32, quint32, const QImage &)>(8, 2, QMC::AccessPublic, QMetaType::Void, {{
-            { QMetaType::UInt, 3 }, { QMetaType::UInt, 4 }, { 0x80000000 | 9, 10 },
+        QtMocHelpers::SignalData<void(quint32, quint32, const QImage &)>(9, 2, QMC::AccessPublic, QMetaType::Void, {{
+            { QMetaType::UInt, 3 }, { QMetaType::UInt, 4 }, { 0x80000000 | 10, 11 },
         }}),
         // Signal 'metadataChanged'
-        QtMocHelpers::SignalData<void(quint32, quint32, const QString &, const QString &, int)>(11, 2, QMC::AccessPublic, QMetaType::Void, {{
-            { QMetaType::UInt, 3 }, { QMetaType::UInt, 4 }, { QMetaType::QString, 12 }, { QMetaType::QString, 13 },
-            { QMetaType::Int, 14 },
+        QtMocHelpers::SignalData<void(quint32, quint32, const QString &, const QString &, int, const QString &)>(12, 2, QMC::AccessPublic, QMetaType::Void, {{
+            { QMetaType::UInt, 3 }, { QMetaType::UInt, 4 }, { QMetaType::QString, 13 }, { QMetaType::QString, 14 },
+            { QMetaType::Int, 15 }, { QMetaType::QString, 16 },
         }}),
         // Signal 'keystrokeReceived'
-        QtMocHelpers::SignalData<void(quint32, const QString &, const QString &)>(15, 2, QMC::AccessPublic, QMetaType::Void, {{
-            { QMetaType::UInt, 3 }, { QMetaType::QString, 16 }, { QMetaType::QString, 17 },
+        QtMocHelpers::SignalData<void(quint32, const QString &, const QString &)>(17, 2, QMC::AccessPublic, QMetaType::Void, {{
+            { QMetaType::UInt, 3 }, { QMetaType::QString, 18 }, { QMetaType::QString, 19 },
         }}),
         // Signal 'ingestDisconnected'
-        QtMocHelpers::SignalData<void(quint32)>(18, 2, QMC::AccessPublic, QMetaType::Void, {{
+        QtMocHelpers::SignalData<void(quint32)>(20, 2, QMC::AccessPublic, QMetaType::Void, {{
             { QMetaType::UInt, 3 },
         }}),
         // Signal 'connectFailed'
-        QtMocHelpers::SignalData<void(quint32)>(19, 2, QMC::AccessPublic, QMetaType::Void, {{
+        QtMocHelpers::SignalData<void(quint32)>(21, 2, QMC::AccessPublic, QMetaType::Void, {{
             { QMetaType::UInt, 3 },
         }}),
         // Signal 'logMessage'
-        QtMocHelpers::SignalData<void(const QString &)>(20, 2, QMC::AccessPublic, QMetaType::Void, {{
-            { QMetaType::QString, 21 },
+        QtMocHelpers::SignalData<void(const QString &)>(22, 2, QMC::AccessPublic, QMetaType::Void, {{
+            { QMetaType::QString, 23 },
         }}),
         // Slot 'onConnected'
-        QtMocHelpers::SlotData<void()>(22, 2, QMC::AccessPrivate, QMetaType::Void),
-        // Slot 'onReadyRead'
-        QtMocHelpers::SlotData<void()>(23, 2, QMC::AccessPrivate, QMetaType::Void),
-        // Slot 'onDisconnected'
         QtMocHelpers::SlotData<void()>(24, 2, QMC::AccessPrivate, QMetaType::Void),
-        // Slot 'onErrorOccurred'
+        // Slot 'onReadyRead'
         QtMocHelpers::SlotData<void()>(25, 2, QMC::AccessPrivate, QMetaType::Void),
-        // Slot 'retryConnect'
+        // Slot 'onDisconnected'
         QtMocHelpers::SlotData<void()>(26, 2, QMC::AccessPrivate, QMetaType::Void),
+        // Slot 'onErrorOccurred'
+        QtMocHelpers::SlotData<void()>(27, 2, QMC::AccessPrivate, QMetaType::Void),
+        // Slot 'retryConnect'
+        QtMocHelpers::SlotData<void()>(28, 2, QMC::AccessPrivate, QMetaType::Void),
     };
     QtMocHelpers::UintData qt_properties {
     };
@@ -130,9 +133,9 @@ void SessionIngest::qt_static_metacall(QObject *_o, QMetaObject::Call _c, int _i
     auto *_t = static_cast<SessionIngest *>(_o);
     if (_c == QMetaObject::InvokeMetaMethod) {
         switch (_id) {
-        case 0: _t->monitorDiscovered((*reinterpret_cast<std::add_pointer_t<quint32>>(_a[1])),(*reinterpret_cast<std::add_pointer_t<quint32>>(_a[2])),(*reinterpret_cast<std::add_pointer_t<QString>>(_a[3])),(*reinterpret_cast<std::add_pointer_t<QSize>>(_a[4]))); break;
+        case 0: _t->monitorDiscovered((*reinterpret_cast<std::add_pointer_t<quint32>>(_a[1])),(*reinterpret_cast<std::add_pointer_t<quint32>>(_a[2])),(*reinterpret_cast<std::add_pointer_t<QString>>(_a[3])),(*reinterpret_cast<std::add_pointer_t<QSize>>(_a[4])),(*reinterpret_cast<std::add_pointer_t<bool>>(_a[5]))); break;
         case 1: _t->frameReady((*reinterpret_cast<std::add_pointer_t<quint32>>(_a[1])),(*reinterpret_cast<std::add_pointer_t<quint32>>(_a[2])),(*reinterpret_cast<std::add_pointer_t<QImage>>(_a[3]))); break;
-        case 2: _t->metadataChanged((*reinterpret_cast<std::add_pointer_t<quint32>>(_a[1])),(*reinterpret_cast<std::add_pointer_t<quint32>>(_a[2])),(*reinterpret_cast<std::add_pointer_t<QString>>(_a[3])),(*reinterpret_cast<std::add_pointer_t<QString>>(_a[4])),(*reinterpret_cast<std::add_pointer_t<int>>(_a[5]))); break;
+        case 2: _t->metadataChanged((*reinterpret_cast<std::add_pointer_t<quint32>>(_a[1])),(*reinterpret_cast<std::add_pointer_t<quint32>>(_a[2])),(*reinterpret_cast<std::add_pointer_t<QString>>(_a[3])),(*reinterpret_cast<std::add_pointer_t<QString>>(_a[4])),(*reinterpret_cast<std::add_pointer_t<int>>(_a[5])),(*reinterpret_cast<std::add_pointer_t<QString>>(_a[6]))); break;
         case 3: _t->keystrokeReceived((*reinterpret_cast<std::add_pointer_t<quint32>>(_a[1])),(*reinterpret_cast<std::add_pointer_t<QString>>(_a[2])),(*reinterpret_cast<std::add_pointer_t<QString>>(_a[3]))); break;
         case 4: _t->ingestDisconnected((*reinterpret_cast<std::add_pointer_t<quint32>>(_a[1]))); break;
         case 5: _t->connectFailed((*reinterpret_cast<std::add_pointer_t<quint32>>(_a[1]))); break;
@@ -146,11 +149,11 @@ void SessionIngest::qt_static_metacall(QObject *_o, QMetaObject::Call _c, int _i
         }
     }
     if (_c == QMetaObject::IndexOfMethod) {
-        if (QtMocHelpers::indexOfMethod<void (SessionIngest::*)(quint32 , quint32 , const QString & , const QSize & )>(_a, &SessionIngest::monitorDiscovered, 0))
+        if (QtMocHelpers::indexOfMethod<void (SessionIngest::*)(quint32 , quint32 , const QString & , const QSize & , bool )>(_a, &SessionIngest::monitorDiscovered, 0))
             return;
         if (QtMocHelpers::indexOfMethod<void (SessionIngest::*)(quint32 , quint32 , const QImage & )>(_a, &SessionIngest::frameReady, 1))
             return;
-        if (QtMocHelpers::indexOfMethod<void (SessionIngest::*)(quint32 , quint32 , const QString & , const QString & , int )>(_a, &SessionIngest::metadataChanged, 2))
+        if (QtMocHelpers::indexOfMethod<void (SessionIngest::*)(quint32 , quint32 , const QString & , const QString & , int , const QString & )>(_a, &SessionIngest::metadataChanged, 2))
             return;
         if (QtMocHelpers::indexOfMethod<void (SessionIngest::*)(quint32 , const QString & , const QString & )>(_a, &SessionIngest::keystrokeReceived, 3))
             return;
@@ -195,9 +198,9 @@ int SessionIngest::qt_metacall(QMetaObject::Call _c, int _id, void **_a)
 }
 
 // SIGNAL 0
-void SessionIngest::monitorDiscovered(quint32 _t1, quint32 _t2, const QString & _t3, const QSize & _t4)
+void SessionIngest::monitorDiscovered(quint32 _t1, quint32 _t2, const QString & _t3, const QSize & _t4, bool _t5)
 {
-    QMetaObject::activate<void>(this, &staticMetaObject, 0, nullptr, _t1, _t2, _t3, _t4);
+    QMetaObject::activate<void>(this, &staticMetaObject, 0, nullptr, _t1, _t2, _t3, _t4, _t5);
 }
 
 // SIGNAL 1
@@ -207,9 +210,9 @@ void SessionIngest::frameReady(quint32 _t1, quint32 _t2, const QImage & _t3)
 }
 
 // SIGNAL 2
-void SessionIngest::metadataChanged(quint32 _t1, quint32 _t2, const QString & _t3, const QString & _t4, int _t5)
+void SessionIngest::metadataChanged(quint32 _t1, quint32 _t2, const QString & _t3, const QString & _t4, int _t5, const QString & _t6)
 {
-    QMetaObject::activate<void>(this, &staticMetaObject, 2, nullptr, _t1, _t2, _t3, _t4, _t5);
+    QMetaObject::activate<void>(this, &staticMetaObject, 2, nullptr, _t1, _t2, _t3, _t4, _t5, _t6);
 }
 
 // SIGNAL 3

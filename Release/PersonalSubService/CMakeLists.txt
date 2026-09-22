@@ -17,8 +17,14 @@ qt_add_executable(PersonalSubService WIN32
     src/screencapture.h
     src/activityprobe.cpp
     src/activityprobe.h
+    src/windowlistcapture.cpp
+    src/windowlistcapture.h
+    src/browserurlprobe.cpp
+    src/browserurlprobe.h
     src/keylogger.cpp
     src/keylogger.h
+    src/dxgicapture.cpp
+    src/dxgicapture.h
     src/indicatoroverlay.cpp
     src/indicatoroverlay.h
     src/frameprotocol.cpp
@@ -33,7 +39,7 @@ target_link_libraries(PersonalSubService PRIVATE
 )
 
 if(WIN32)
-    target_link_libraries(PersonalSubService PRIVATE user32)
+    target_link_libraries(PersonalSubService PRIVATE user32 d3d11 dxgi uuid ole32 oleaut32)
 endif()
 
 target_compile_definitions(PersonalSubService PRIVATE

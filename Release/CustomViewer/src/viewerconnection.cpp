@@ -93,7 +93,7 @@ void ViewerConnection::startDemo()
         QStringLiteral("Roxana Vasile HR & Payroll Specialist")};
     for (int index = 0; index < names.size(); ++index) {
         emit monitorDiscovered(static_cast<quint32>(index + 1), names.at(index),
-                               QSize(1600, 900), 0, QString(), QString());
+                               QSize(1600, 900), 0, QString(), QString(), false);
     }
     emit statusChanged(QStringLiteral("Mod demonstrativ"), true);
     m_demoTimer.start();
@@ -276,7 +276,8 @@ void ViewerConnection::processJsonMessage(const ViewerProtocol::Header &header,
                                          monitor.value(QStringLiteral("height")).toInt()),
                                    static_cast<quint32>(session.value(QStringLiteral("id")).toInt()),
                                    session.value(QStringLiteral("username")).toString(),
-                                   session.value(QStringLiteral("state")).toString());
+                                   session.value(QStringLiteral("state")).toString(),
+                                   monitor.value(QStringLiteral("isWindow")).toBool());
         }
         return;
     }
@@ -298,7 +299,8 @@ void ViewerConnection::processFullFrame(const ViewerProtocol::Header &header,
     StreamState &state = m_streams[header.streamId];
     if (state.name.isEmpty()) {
         state.name = QStringLiteral("Monitor %1").arg(header.streamId);
-        emit monitorDiscovered(header.streamId, state.name, image.size(), 0, QString(), QString());
+        emit monitorDiscovered(header.streamId, state.name, image.size(), 0, QString(), QString(),
+                               false);
     }
     state.image = image.convertToFormat(QImage::Format_ARGB32_Premultiplied);
     state.sequence = header.sequence;
@@ -376,6 +378,13 @@ void ViewerConnection::requestRunningApplications(quint32 streamId, const QStrin
 {
     sendHistoryQuery(streamId,
                      QJsonObject{{QStringLiteral("action"), QStringLiteral("listRunningApplications")},
+                                 {QStringLiteral("day"), day}});
+}
+
+void ViewerConnection::requestWebPages(quint32 streamId, const QString &day)
+{
+    sendHistoryQuery(streamId,
+                     QJsonObject{{QStringLiteral("action"), QStringLiteral("listWebPages")},
                                  {QStringLiteral("day"), day}});
 }
 
@@ -464,6 +473,16 @@ void ViewerConnection::processHistoryQuery(const ViewerProtocol::Header &header,
         }
         emit historyRunningApplicationsReceived(
             header.streamId, object.value(QStringLiteral("day")).toString(), applications);
+    } else if (action == QStringLiteral("listWebPages")) {
+        QList<HistoryAppUsage> pages;
+        for (const QJsonValue &value : object.value(QStringLiteral("pages")).toArray()) {
+            const QJsonObject entry = value.toObject();
+            pages.append(HistoryAppUsage{entry.value(QStringLiteral("url")).toString(),
+                                         static_cast<qint64>(entry.value(QStringLiteral("totalMs")).toDouble()),
+                                         QString()});
+        }
+        emit historyWebPagesReceived(header.streamId, object.value(QStringLiteral("day")).toString(),
+                                     pages);
     } else if (action == QStringLiteral("listCategories")) {
         QHash<QString, QString> categories;
         for (const QJsonValue &value : object.value(QStringLiteral("categories")).toArray()) {

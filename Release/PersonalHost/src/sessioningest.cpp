@@ -1,7 +1,9 @@
 #include "sessioningest.h"
 
+#include <QDataStream>
 #include <QJsonDocument>
 #include <QJsonObject>
+#include <QPainter>
 
 SessionIngest::SessionIngest(QString pipeName, QString expectedSecret, quint32 sessionId,
                              QObject *parent)
@@ -48,6 +50,16 @@ void SessionIngest::requestShutdown()
                                                       QByteArray()));
         m_socket.flush();
     }
+}
+
+void SessionIngest::sendViewerCount(int count)
+{
+    if (m_socket.state() != QLocalSocket::ConnectedState) {
+        return;
+    }
+    const QByteArray payload =
+        QJsonDocument(QJsonObject{{QStringLiteral("count"), count}}).toJson(QJsonDocument::Compact);
+    m_socket.write(ViewerProtocol::encodeMessage(ViewerProtocol::MessageType::ViewerCount, 0, 0, payload));
 }
 
 void SessionIngest::onConnected()
@@ -107,7 +119,8 @@ void SessionIngest::processMessage(const ViewerProtocol::Header &header, const Q
         emit monitorDiscovered(m_sessionId, header.streamId,
                                monitor.value(QStringLiteral("name")).toString(),
                                QSize(monitor.value(QStringLiteral("width")).toInt(),
-                                     monitor.value(QStringLiteral("height")).toInt()));
+                                     monitor.value(QStringLiteral("height")).toInt()),
+                               monitor.value(QStringLiteral("isWindow")).toBool());
         break;
     }
     case MessageType::FullFrame: {
@@ -116,8 +129,48 @@ void SessionIngest::processMessage(const ViewerProtocol::Header &header, const Q
         }
         QImage image;
         if (image.loadFromData(payload) && !image.isNull()) {
+            // ARGB32_Premultiplied so DeltaFrame below can paint into it
+            // directly (matches ViewerConnection::processFullFrame()).
+            image = image.convertToFormat(QImage::Format_ARGB32_Premultiplied);
+            m_lastImages[header.streamId] = image;
+            m_lastSequences[header.streamId] = header.sequence;
             emit frameReady(m_sessionId, header.streamId, image);
         }
+        break;
+    }
+    case MessageType::DeltaFrame: {
+        if (!m_secretVerified) {
+            return;
+        }
+        auto it = m_lastImages.find(header.streamId);
+        if (it == m_lastImages.end() || it.value().isNull() || payload.size() < 16
+            || header.sequence != m_lastSequences.value(header.streamId) + 1) {
+            // No base frame to patch, or we missed one -- the sub-service
+            // will still be sending FullFrame periodically on its own
+            // full/delta decision, so just wait for the next one.
+            return;
+        }
+        QByteArray coordinates = payload.first(16);
+        QDataStream coordStream(&coordinates, QIODevice::ReadOnly);
+        coordStream.setByteOrder(QDataStream::BigEndian);
+        qint32 x = 0, y = 0, w = 0, h = 0;
+        coordStream >> x >> y >> w >> h;
+        const QRect target(x, y, w, h);
+        if (coordStream.status() != QDataStream::Ok || w <= 0 || h <= 0
+            || !it.value().rect().contains(target)) {
+            return;
+        }
+        QImage patch;
+        if (!patch.loadFromData(payload.mid(16)) || patch.size() != target.size()) {
+            return;
+        }
+        QImage &image = it.value();
+        QPainter painter(&image);
+        painter.setCompositionMode(QPainter::CompositionMode_Source);
+        painter.drawImage(target.topLeft(), patch);
+        painter.end();
+        m_lastSequences[header.streamId] = header.sequence;
+        emit frameReady(m_sessionId, header.streamId, image);
         break;
     }
     case MessageType::Metadata: {
@@ -131,7 +184,8 @@ void SessionIngest::processMessage(const ViewerProtocol::Header &header, const Q
             emit metadataChanged(m_sessionId, header.streamId,
                                  object.value(QStringLiteral("application")).toString(),
                                  object.value(QStringLiteral("idle")).toString(),
-                                 object.value(QStringLiteral("inputEvents")).toInt());
+                                 object.value(QStringLiteral("inputEvents")).toInt(),
+                                 object.value(QStringLiteral("url")).toString());
         }
         break;
     }

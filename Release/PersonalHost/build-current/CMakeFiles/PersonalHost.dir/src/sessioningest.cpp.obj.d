@@ -349,6 +349,7 @@ CMakeFiles/PersonalHost.dir/src/sessioningest.cpp.obj: \
  C:/Qt/6.11.2/mingw_64/include/QtCore/qobject_impl.h \
  C:/Qt/6.11.2/mingw_64/include/QtCore/qbindingstorage.h \
  C:/Qt/6.11.2/mingw_64/include/QtCore/QString \
+ C:/Qt/6.11.2/mingw_64/include/QtCore/QHash \
  C:/Qt/6.11.2/mingw_64/include/QtGui/QImage \
  C:/Qt/6.11.2/mingw_64/include/QtGui/qimage.h \
  C:/Qt/6.11.2/mingw_64/include/QtGui/qtguiglobal.h \
@@ -387,6 +388,7 @@ CMakeFiles/PersonalHost.dir/src/sessioningest.cpp.obj: \
  C:/Qt/6.11.2/mingw_64/include/QtCore/qabstracteventdispatcher.h \
  C:/Qt/6.11.2/mingw_64/include/QtCore/qeventloop.h \
  C:/Qt/6.11.2/mingw_64/include/QtCore/qdeadlinetimer.h \
+ C:/Qt/6.11.2/mingw_64/include/QtCore/QDataStream \
  C:/Qt/6.11.2/mingw_64/include/QtCore/QJsonDocument \
  C:/Qt/6.11.2/mingw_64/include/QtCore/qjsondocument.h \
  C:/Qt/6.11.2/mingw_64/include/QtCore/qjsonparseerror.h \
@@ -398,4 +400,14 @@ CMakeFiles/PersonalHost.dir/src/sessioningest.cpp.obj: \
  C:/Qt/6.11.2/mingw_64/include/QtCore/qregularexpression.h \
  C:/Qt/6.11.2/mingw_64/include/QtCore/qurl.h \
  C:/Qt/6.11.2/mingw_64/include/QtCore/quuid.h \
- C:/Qt/6.11.2/mingw_64/include/QtCore/qendian.h
+ C:/Qt/6.11.2/mingw_64/include/QtCore/qendian.h \
+ C:/Qt/6.11.2/mingw_64/include/QtGui/QPainter \
+ C:/Qt/6.11.2/mingw_64/include/QtGui/qpainter.h \
+ C:/Qt/6.11.2/mingw_64/include/QtGui/qpixmap.h \
+ C:/Qt/6.11.2/mingw_64/include/QtGui/qtextoption.h \
+ C:/Qt/6.11.2/mingw_64/include/QtGui/qpen.h \
+ C:/Qt/6.11.2/mingw_64/include/QtGui/qbrush.h \
+ C:/Qt/6.11.2/mingw_64/include/QtGui/qfontinfo.h \
+ C:/Qt/6.11.2/mingw_64/include/QtGui/qfont.h \
+ C:/Qt/6.11.2/mingw_64/include/QtGui/qfontvariableaxis.h \
+ C:/Qt/6.11.2/mingw_64/include/QtGui/qfontmetrics.h

@@ -30,7 +30,13 @@ enum class MessageType : quint16 {
     // the wire directly -- history is served to viewers on demand via
     // HistoryQuery's "listKeystrokes" action instead). JSON:
     // {"windowTitle":..,"text":..}.
-    Keystroke = 11
+    Keystroke = 11,
+    // Host -> sub-service internal IPC only. JSON: {"count":N}. Tells the
+    // sub-service how many authenticated viewers are currently connected
+    // (anywhere, not per-monitor) so it can capture at a low idle FPS when
+    // nobody is actually watching live and only spend full FPS while
+    // someone is -- see screencapture.cpp/setFps().
+    ViewerCount = 12
 };
 
 struct Header {

@@ -44,6 +44,10 @@ SessionManager::SessionManager(AgentServer *server, QString subServicePath, QObj
 {
     m_pollTimer.setInterval(5000);
     connect(&m_pollTimer, &QTimer::timeout, this, &SessionManager::pollSessions);
+    if (m_server) {
+        connect(m_server, &AgentServer::connectionCountChanged, this,
+                &SessionManager::onViewerCountChanged);
+    }
 }
 
 SessionManager::~SessionManager()
@@ -263,7 +267,7 @@ quint32 SessionManager::allocateGlobalStreamId()
 }
 
 void SessionManager::onMonitorDiscovered(quint32 sessionId, quint32 localStreamId,
-                                         const QString &name, const QSize &size)
+                                         const QString &name, const QSize &size, bool isWindow)
 {
     auto it = m_sessions.find(sessionId);
     if (it == m_sessions.end()) {
@@ -274,6 +278,12 @@ void SessionManager::onMonitorDiscovered(quint32 sessionId, quint32 localStreamI
     if (globalId == 0) {
         globalId = allocateGlobalStreamId();
         entry.localToGlobal.insert(localStreamId, globalId);
+        // First monitor discovered for this session means its pipe just
+        // came up; bring it up to speed on the current viewer count right
+        // away instead of leaving it at idle FPS until the count next
+        // changes (which might be never, if viewers connected before this
+        // session started).
+        entry.ingest->sendViewerCount(m_viewerCount);
     }
 
     MonitorInfo info;
@@ -283,6 +293,7 @@ void SessionManager::onMonitorDiscovered(quint32 sessionId, quint32 localStreamI
     info.sessionId = sessionId;
     info.sessionUsername = entry.username;
     info.sessionState = entry.state;
+    info.isWindow = isWindow;
     m_globalMonitors.insert(globalId, info);
     rebuildAndBroadcastMonitors();
 }
@@ -300,15 +311,19 @@ void SessionManager::onFrameReady(quint32 sessionId, quint32 localStreamId, cons
     if (m_server) {
         m_server->broadcastFrame(globalId, image);
     }
-    if (m_historyRecorder) {
-        const MonitorInfo info = m_globalMonitors.value(globalId);
+    const MonitorInfo info = m_globalMonitors.value(globalId);
+    // The ActiveWindowCapture live-preview stream isn't a monitor and
+    // updates at its own 1fps regardless of viewer activity -- recording it
+    // into history would just fill the timeline with window screenshots
+    // nobody asked to keep.
+    if (m_historyRecorder && !info.isWindow) {
         m_historyRecorder->recordFrame(sessionId, info.sessionUsername, globalId, info.name, image);
     }
 }
 
 void SessionManager::onMetadataChanged(quint32 sessionId, quint32 localStreamId,
                                        const QString &application, const QString &idleText,
-                                       int inputEvents)
+                                       int inputEvents, const QString &url)
 {
     auto it = m_sessions.constFind(sessionId);
     if (it == m_sessions.constEnd()) {
@@ -323,6 +338,7 @@ void SessionManager::onMetadataChanged(quint32 sessionId, quint32 localStreamId,
     }
     if (m_historyRecorder) {
         m_historyRecorder->noteApplication(sessionId, globalId, application);
+        m_historyRecorder->noteUrl(sessionId, globalId, url);
         // inputEvents is only meaningful on the periodic 10s sample tick
         // (see PersonalSubService main.cpp); app-change-triggered metadata
         // pushes always carry 0, so this naturally only records real
@@ -350,6 +366,16 @@ void SessionManager::onIngestDisconnected(quint32 sessionId)
     SessionEntry entry = m_sessions.take(sessionId);
     terminateSession(sessionId, entry);
     rebuildAndBroadcastMonitors();
+}
+
+void SessionManager::onViewerCountChanged(int count)
+{
+    m_viewerCount = count;
+    for (SessionEntry &entry : m_sessions) {
+        if (entry.ingest) {
+            entry.ingest->sendViewerCount(count);
+        }
+    }
 }
 
 void SessionManager::rebuildAndBroadcastMonitors()

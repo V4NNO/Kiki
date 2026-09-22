@@ -247,6 +247,54 @@ src/activityprobe.cpp.s:
 	$(MAKE) $(MAKESILENT) -f CMakeFiles\PersonalSubService.dir\build.make CMakeFiles/PersonalSubService.dir/src/activityprobe.cpp.s
 .PHONY : src/activityprobe.cpp.s
 
+src/browserurlprobe.obj: src/browserurlprobe.cpp.obj
+.PHONY : src/browserurlprobe.obj
+
+# target to build an object file
+src/browserurlprobe.cpp.obj:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles\PersonalSubService.dir\build.make CMakeFiles/PersonalSubService.dir/src/browserurlprobe.cpp.obj
+.PHONY : src/browserurlprobe.cpp.obj
+
+src/browserurlprobe.i: src/browserurlprobe.cpp.i
+.PHONY : src/browserurlprobe.i
+
+# target to preprocess a source file
+src/browserurlprobe.cpp.i:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles\PersonalSubService.dir\build.make CMakeFiles/PersonalSubService.dir/src/browserurlprobe.cpp.i
+.PHONY : src/browserurlprobe.cpp.i
+
+src/browserurlprobe.s: src/browserurlprobe.cpp.s
+.PHONY : src/browserurlprobe.s
+
+# target to generate assembly for a file
+src/browserurlprobe.cpp.s:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles\PersonalSubService.dir\build.make CMakeFiles/PersonalSubService.dir/src/browserurlprobe.cpp.s
+.PHONY : src/browserurlprobe.cpp.s
+
+src/dxgicapture.obj: src/dxgicapture.cpp.obj
+.PHONY : src/dxgicapture.obj
+
+# target to build an object file
+src/dxgicapture.cpp.obj:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles\PersonalSubService.dir\build.make CMakeFiles/PersonalSubService.dir/src/dxgicapture.cpp.obj
+.PHONY : src/dxgicapture.cpp.obj
+
+src/dxgicapture.i: src/dxgicapture.cpp.i
+.PHONY : src/dxgicapture.i
+
+# target to preprocess a source file
+src/dxgicapture.cpp.i:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles\PersonalSubService.dir\build.make CMakeFiles/PersonalSubService.dir/src/dxgicapture.cpp.i
+.PHONY : src/dxgicapture.cpp.i
+
+src/dxgicapture.s: src/dxgicapture.cpp.s
+.PHONY : src/dxgicapture.s
+
+# target to generate assembly for a file
+src/dxgicapture.cpp.s:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles\PersonalSubService.dir\build.make CMakeFiles/PersonalSubService.dir/src/dxgicapture.cpp.s
+.PHONY : src/dxgicapture.cpp.s
+
 src/frameprotocol.obj: src/frameprotocol.cpp.obj
 .PHONY : src/frameprotocol.obj
 
@@ -391,6 +439,30 @@ src/subservicehost.cpp.s:
 	$(MAKE) $(MAKESILENT) -f CMakeFiles\PersonalSubService.dir\build.make CMakeFiles/PersonalSubService.dir/src/subservicehost.cpp.s
 .PHONY : src/subservicehost.cpp.s
 
+src/windowlistcapture.obj: src/windowlistcapture.cpp.obj
+.PHONY : src/windowlistcapture.obj
+
+# target to build an object file
+src/windowlistcapture.cpp.obj:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles\PersonalSubService.dir\build.make CMakeFiles/PersonalSubService.dir/src/windowlistcapture.cpp.obj
+.PHONY : src/windowlistcapture.cpp.obj
+
+src/windowlistcapture.i: src/windowlistcapture.cpp.i
+.PHONY : src/windowlistcapture.i
+
+# target to preprocess a source file
+src/windowlistcapture.cpp.i:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles\PersonalSubService.dir\build.make CMakeFiles/PersonalSubService.dir/src/windowlistcapture.cpp.i
+.PHONY : src/windowlistcapture.cpp.i
+
+src/windowlistcapture.s: src/windowlistcapture.cpp.s
+.PHONY : src/windowlistcapture.s
+
+# target to generate assembly for a file
+src/windowlistcapture.cpp.s:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles\PersonalSubService.dir\build.make CMakeFiles/PersonalSubService.dir/src/windowlistcapture.cpp.s
+.PHONY : src/windowlistcapture.cpp.s
+
 # Help Target
 help:
 	@echo The following are some of the valid targets for this Makefile:
@@ -412,6 +484,12 @@ help:
 	@echo ... src/activityprobe.obj
 	@echo ... src/activityprobe.i
 	@echo ... src/activityprobe.s
+	@echo ... src/browserurlprobe.obj
+	@echo ... src/browserurlprobe.i
+	@echo ... src/browserurlprobe.s
+	@echo ... src/dxgicapture.obj
+	@echo ... src/dxgicapture.i
+	@echo ... src/dxgicapture.s
 	@echo ... src/frameprotocol.obj
 	@echo ... src/frameprotocol.i
 	@echo ... src/frameprotocol.s
@@ -430,6 +508,9 @@ help:
 	@echo ... src/subservicehost.obj
 	@echo ... src/subservicehost.i
 	@echo ... src/subservicehost.s
+	@echo ... src/windowlistcapture.obj
+	@echo ... src/windowlistcapture.i
+	@echo ... src/windowlistcapture.s
 .PHONY : help
 
 

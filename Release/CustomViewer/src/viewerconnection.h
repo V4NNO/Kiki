@@ -58,6 +58,7 @@ public:
     void requestHistoryActivity(quint32 streamId, const QString &day);
     void requestHistoryAppSegments(quint32 streamId, const QString &day);
     void requestRunningApplications(quint32 streamId, const QString &day);
+    void requestWebPages(quint32 streamId, const QString &day);
     void requestCategories(quint32 streamId);
     void setAppCategory(quint32 streamId, const QString &application, const QString &category);
     void requestKeystrokes(quint32 streamId, const QString &day);
@@ -69,9 +70,12 @@ signals:
     // notion of Windows sessions (single-process PersonalScreenAgent, demo
     // mode); PersonalHost fills them in so the viewer can group monitors
     // by the session/user they belong to.
+    // isWindow: true for a PersonalSubService's ActiveWindowCapture live
+    // preview stream, not a real monitor -- see
+    // SubServiceHost::kActiveWindowStreamId.
     void monitorDiscovered(quint32 streamId, const QString &name, const QSize &size,
                            quint32 sessionId, const QString &sessionUsername,
-                           const QString &sessionState);
+                           const QString &sessionState, bool isWindow);
     void frameReady(quint32 streamId, const QImage &image, quint64 sequence,
                     qint64 latencyMs);
     void metadataChanged(quint32 streamId, const QString &application,
@@ -88,6 +92,10 @@ signals:
                                     const QList<HistoryAppSegment> &segments);
     void historyRunningApplicationsReceived(quint32 streamId, const QString &day,
                                             const QList<HistoryAppUsage> &applications);
+    // Reuses HistoryAppUsage -- application field holds the url, category
+    // is unused (empty) here since web pages aren't categorized.
+    void historyWebPagesReceived(quint32 streamId, const QString &day,
+                                 const QList<HistoryAppUsage> &pages);
     void historyCategoriesReceived(quint32 streamId, const QHash<QString, QString> &categories);
     void historyKeystrokesReceived(quint32 streamId, const QString &day,
                                    const QList<HistoryKeystrokeEntry> &entries);

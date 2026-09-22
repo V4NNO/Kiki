@@ -1868,6 +1868,7 @@ C:/Users/IonSacaliuc/OneDrive - Utilities One Inc/Desktop/SCRIPTS/KickDecompile/
  mmc:Q_OBJECT
  mdp:C:/Qt/6.11.2/mingw_64/include/QtCore/QByteArray
  mdp:C:/Qt/6.11.2/mingw_64/include/QtCore/QDateTime
+ mdp:C:/Qt/6.11.2/mingw_64/include/QtCore/QHash
  mdp:C:/Qt/6.11.2/mingw_64/include/QtCore/QObject
  mdp:C:/Qt/6.11.2/mingw_64/include/QtCore/QString
  mdp:C:/Qt/6.11.2/mingw_64/include/QtCore/QTimer

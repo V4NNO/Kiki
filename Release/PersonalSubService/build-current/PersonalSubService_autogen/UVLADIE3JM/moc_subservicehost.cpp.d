@@ -5,6 +5,8 @@ C:/Users/IonSacaliuc/OneDrive\ -\ Utilities\ One\ Inc/Desktop/SCRIPTS/KickDecomp
   C:/Qt/6.11.2/mingw_64/include/QtCore/QHash \
   C:/Qt/6.11.2/mingw_64/include/QtCore/QJsonObject \
   C:/Qt/6.11.2/mingw_64/include/QtCore/QObject \
+  C:/Qt/6.11.2/mingw_64/include/QtCore/QRect \
+  C:/Qt/6.11.2/mingw_64/include/QtCore/QSet \
   C:/Qt/6.11.2/mingw_64/include/QtCore/QString \
   C:/Qt/6.11.2/mingw_64/include/QtCore/QTimer \
   C:/Qt/6.11.2/mingw_64/include/QtCore/q17memory.h \
@@ -392,5 +394,6 @@ C:/Users/IonSacaliuc/OneDrive\ -\ Utilities\ One\ Inc/Desktop/SCRIPTS/KickDecomp
   C:/Qt/Tools/mingw1310_64/x86_64-w64-mingw32/include/time.h \
   C:/Qt/Tools/mingw1310_64/x86_64-w64-mingw32/include/vadefs.h \
   C:/Qt/Tools/mingw1310_64/x86_64-w64-mingw32/include/wchar.h \
+  C:/Users/IonSacaliuc/OneDrive\ -\ Utilities\ One\ Inc/Desktop/SCRIPTS/KickDecompile/Release/PersonalSubService/src/dxgicapture.h \
   C:/Users/IonSacaliuc/OneDrive\ -\ Utilities\ One\ Inc/Desktop/SCRIPTS/KickDecompile/Release/PersonalSubService/src/frameprotocol.h \
   C:/Users/IonSacaliuc/OneDrive\ -\ Utilities\ One\ Inc/Desktop/SCRIPTS/KickDecompile/Release/PersonalSubService/src/screencapture.h

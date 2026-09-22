@@ -350,7 +350,7 @@ CMakeFiles/PersonalSubService.dir/src/subservicehost.cpp.obj: \
  C:/Qt/6.11.2/mingw_64/include/QtCore/qbindingstorage.h \
  C:/Qt/6.11.2/mingw_64/include/QtCore/QString \
  C:\Users\IonSacaliuc\OneDrive\ -\ Utilities\ One\ Inc\Desktop\SCRIPTS\KickDecompile\Release\PersonalSubService\src\screencapture.h \
- C:/Qt/6.11.2/mingw_64/include/QtCore/QHash \
+ C:\Users\IonSacaliuc\OneDrive\ -\ Utilities\ One\ Inc\Desktop\SCRIPTS\KickDecompile\Release\PersonalSubService\src\dxgicapture.h \
  C:/Qt/6.11.2/mingw_64/include/QtGui/QImage \
  C:/Qt/6.11.2/mingw_64/include/QtGui/qimage.h \
  C:/Qt/6.11.2/mingw_64/include/QtGui/qtguiglobal.h \
@@ -375,7 +375,9 @@ CMakeFiles/PersonalSubService.dir/src/subservicehost.cpp.obj: \
  C:/Qt/Tools/mingw1310_64/lib/gcc/x86_64-w64-mingw32/13.1.0/include/c++/cassert \
  C:/Qt/6.11.2/mingw_64/include/QtCore/q20iterator.h \
  C:/Qt/6.11.2/mingw_64/include/QtCore/qline.h \
+ C:/Qt/6.11.2/mingw_64/include/QtCore/QHash \
  C:/Qt/6.11.2/mingw_64/include/QtCore/QObject \
+ C:/Qt/6.11.2/mingw_64/include/QtCore/QSet \
  C:/Qt/6.11.2/mingw_64/include/QtCore/QTimer \
  C:/Qt/6.11.2/mingw_64/include/QtCore/qtimer.h \
  C:/Qt/6.11.2/mingw_64/include/QtCore/qbasictimer.h \
@@ -405,6 +407,26 @@ CMakeFiles/PersonalSubService.dir/src/subservicehost.cpp.obj: \
  C:/Qt/Tools/mingw1310_64/lib/gcc/x86_64-w64-mingw32/13.1.0/include/c++/experimental/source_location \
  C:/Qt/6.11.2/mingw_64/include/QtNetwork/QLocalSocket \
  C:/Qt/6.11.2/mingw_64/include/QtNetwork/qlocalsocket.h \
+ C:/Qt/6.11.2/mingw_64/include/QtCore/QRect \
  C:/Qt/6.11.2/mingw_64/include/QtCore/QBuffer \
  C:/Qt/6.11.2/mingw_64/include/QtCore/qbuffer.h \
- C:/Qt/6.11.2/mingw_64/include/QtCore/QJsonDocument
+ C:/Qt/6.11.2/mingw_64/include/QtCore/QCoreApplication \
+ C:/Qt/6.11.2/mingw_64/include/QtCore/qcoreapplication.h \
+ C:/Qt/6.11.2/mingw_64/include/QtCore/qcoreevent.h \
+ C:/Qt/6.11.2/mingw_64/include/QtCore/qnativeinterface.h \
+ C:/Qt/6.11.2/mingw_64/include/QtCore/qcoreapplication_platform.h \
+ C:/Qt/6.11.2/mingw_64/include/QtCore/QDataStream \
+ C:/Qt/6.11.2/mingw_64/include/QtCore/QJsonDocument \
+ C:/Qt/6.11.2/mingw_64/include/QtCore/QPointer \
+ C:/Qt/6.11.2/mingw_64/include/QtCore/qpointer.h \
+ C:/Qt/6.11.2/mingw_64/include/QtCore/QThreadPool \
+ C:/Qt/6.11.2/mingw_64/include/QtCore/qthreadpool.h \
+ C:/Qt/6.11.2/mingw_64/include/QtCore/qthread.h \
+ C:/Qt/Tools/mingw1310_64/lib/gcc/x86_64-w64-mingw32/13.1.0/include/c++/future \
+ C:/Qt/Tools/mingw1310_64/lib/gcc/x86_64-w64-mingw32/13.1.0/include/c++/mutex \
+ C:/Qt/Tools/mingw1310_64/lib/gcc/x86_64-w64-mingw32/13.1.0/include/c++/bits/std_mutex.h \
+ C:/Qt/Tools/mingw1310_64/lib/gcc/x86_64-w64-mingw32/13.1.0/include/c++/bits/unique_lock.h \
+ C:/Qt/Tools/mingw1310_64/lib/gcc/x86_64-w64-mingw32/13.1.0/include/c++/condition_variable \
+ C:/Qt/Tools/mingw1310_64/lib/gcc/x86_64-w64-mingw32/13.1.0/include/c++/bits/atomic_futex.h \
+ C:/Qt/Tools/mingw1310_64/lib/gcc/x86_64-w64-mingw32/13.1.0/include/c++/bits/std_thread.h \
+ C:/Qt/6.11.2/mingw_64/include/QtCore/qrunnable.h

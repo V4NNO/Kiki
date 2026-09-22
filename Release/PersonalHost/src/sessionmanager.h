@@ -44,12 +44,13 @@ signals:
 private slots:
     void pollSessions();
     void onMonitorDiscovered(quint32 sessionId, quint32 localStreamId, const QString &name,
-                             const QSize &size);
+                             const QSize &size, bool isWindow);
     void onFrameReady(quint32 sessionId, quint32 localStreamId, const QImage &image);
     void onMetadataChanged(quint32 sessionId, quint32 localStreamId, const QString &application,
-                           const QString &idleText, int inputEvents);
+                           const QString &idleText, int inputEvents, const QString &url);
     void onKeystrokeReceived(quint32 sessionId, const QString &windowTitle, const QString &text);
     void onIngestDisconnected(quint32 sessionId);
+    void onViewerCountChanged(int count);
 
 private:
     struct SessionEntry {
@@ -75,4 +76,8 @@ private:
     QHash<quint32, SessionEntry> m_sessions; // key: Windows session id
     QHash<quint32, MonitorInfo> m_globalMonitors; // key: global streamId
     quint32 m_nextGlobalStreamId = 1;
+    // Last count broadcast by AgentServer; re-sent to a session's
+    // sub-service as soon as it's discovered so a session that starts up
+    // after viewers are already connected doesn't sit at idle FPS.
+    int m_viewerCount = 0;
 };

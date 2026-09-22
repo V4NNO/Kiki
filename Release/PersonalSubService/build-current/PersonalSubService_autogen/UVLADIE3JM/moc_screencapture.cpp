@@ -48,6 +48,10 @@ template <> constexpr inline auto ScreenCaptureManager::qt_create_metaobjectdata
         "monitorListChanged",
         "QList<MonitorInfo>",
         "monitors",
+        "captureBackendReady",
+        "screenName",
+        "usingDxgi",
+        "detail",
         "captureTick",
         "refreshMonitorList"
     };
@@ -61,10 +65,14 @@ template <> constexpr inline auto ScreenCaptureManager::qt_create_metaobjectdata
         QtMocHelpers::SignalData<void(const QList<MonitorInfo> &)>(6, 2, QMC::AccessPublic, QMetaType::Void, {{
             { 0x80000000 | 7, 8 },
         }}),
+        // Signal 'captureBackendReady'
+        QtMocHelpers::SignalData<void(const QString &, bool, const QString &)>(9, 2, QMC::AccessPublic, QMetaType::Void, {{
+            { QMetaType::QString, 10 }, { QMetaType::Bool, 11 }, { QMetaType::QString, 12 },
+        }}),
         // Slot 'captureTick'
-        QtMocHelpers::SlotData<void()>(9, 2, QMC::AccessPrivate, QMetaType::Void),
+        QtMocHelpers::SlotData<void()>(13, 2, QMC::AccessPrivate, QMetaType::Void),
         // Slot 'refreshMonitorList'
-        QtMocHelpers::SlotData<void()>(10, 2, QMC::AccessPrivate, QMetaType::Void),
+        QtMocHelpers::SlotData<void()>(14, 2, QMC::AccessPrivate, QMetaType::Void),
     };
     QtMocHelpers::UintData qt_properties {
     };
@@ -90,8 +98,9 @@ void ScreenCaptureManager::qt_static_metacall(QObject *_o, QMetaObject::Call _c,
         switch (_id) {
         case 0: _t->frameCaptured((*reinterpret_cast<std::add_pointer_t<quint32>>(_a[1])),(*reinterpret_cast<std::add_pointer_t<QImage>>(_a[2]))); break;
         case 1: _t->monitorListChanged((*reinterpret_cast<std::add_pointer_t<QList<MonitorInfo>>>(_a[1]))); break;
-        case 2: _t->captureTick(); break;
-        case 3: _t->refreshMonitorList(); break;
+        case 2: _t->captureBackendReady((*reinterpret_cast<std::add_pointer_t<QString>>(_a[1])),(*reinterpret_cast<std::add_pointer_t<bool>>(_a[2])),(*reinterpret_cast<std::add_pointer_t<QString>>(_a[3]))); break;
+        case 3: _t->captureTick(); break;
+        case 4: _t->refreshMonitorList(); break;
         default: ;
         }
     }
@@ -99,6 +108,8 @@ void ScreenCaptureManager::qt_static_metacall(QObject *_o, QMetaObject::Call _c,
         if (QtMocHelpers::indexOfMethod<void (ScreenCaptureManager::*)(quint32 , const QImage & )>(_a, &ScreenCaptureManager::frameCaptured, 0))
             return;
         if (QtMocHelpers::indexOfMethod<void (ScreenCaptureManager::*)(const QList<MonitorInfo> & )>(_a, &ScreenCaptureManager::monitorListChanged, 1))
+            return;
+        if (QtMocHelpers::indexOfMethod<void (ScreenCaptureManager::*)(const QString & , bool , const QString & )>(_a, &ScreenCaptureManager::captureBackendReady, 2))
             return;
     }
 }
@@ -122,14 +133,14 @@ int ScreenCaptureManager::qt_metacall(QMetaObject::Call _c, int _id, void **_a)
     if (_id < 0)
         return _id;
     if (_c == QMetaObject::InvokeMetaMethod) {
-        if (_id < 4)
+        if (_id < 5)
             qt_static_metacall(this, _c, _id, _a);
-        _id -= 4;
+        _id -= 5;
     }
     if (_c == QMetaObject::RegisterMethodArgumentMetaType) {
-        if (_id < 4)
+        if (_id < 5)
             *reinterpret_cast<QMetaType *>(_a[0]) = QMetaType();
-        _id -= 4;
+        _id -= 5;
     }
     return _id;
 }
@@ -144,5 +155,11 @@ void ScreenCaptureManager::frameCaptured(quint32 _t1, const QImage & _t2)
 void ScreenCaptureManager::monitorListChanged(const QList<MonitorInfo> & _t1)
 {
     QMetaObject::activate<void>(this, &staticMetaObject, 1, nullptr, _t1);
+}
+
+// SIGNAL 2
+void ScreenCaptureManager::captureBackendReady(const QString & _t1, bool _t2, const QString & _t3)
+{
+    QMetaObject::activate<void>(this, &staticMetaObject, 2, nullptr, _t1, _t2, _t3);
 }
 QT_WARNING_POP

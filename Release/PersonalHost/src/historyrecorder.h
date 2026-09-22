@@ -22,6 +22,17 @@ struct AppUsage {
     QString category; // "productive" | "neutral" | "unproductive"
 };
 
+struct WebVisit {
+    QString url;
+    qint64 startMs = 0;
+    qint64 endMs = 0;
+};
+
+struct WebUsage {
+    QString url;
+    qint64 totalMs = 0;
+};
+
 struct ActivitySample {
     qint64 timestampMs = 0;
     int inputEvents = 0;
@@ -69,6 +80,13 @@ public:
     // Safe to call as often as metadata arrives.
     void noteApplication(quint32 sessionId, quint32 monitorStreamId, const QString &application);
 
+    // Same idea as noteApplication(), but url is normally empty (foreground
+    // app isn't a browser, or extraction failed) -- unlike application,
+    // that's an expected, frequent state, not a "no data" edge case: an
+    // empty url just closes whatever segment was open, without opening a
+    // blank one.
+    void noteUrl(quint32 sessionId, quint32 monitorStreamId, const QString &url);
+
     void recordKeystroke(quint32 sessionId, const QString &windowTitle, const QString &text);
 
     void setCategory(const QString &application, const QString &category);
@@ -82,6 +100,8 @@ public:
     QList<ActivitySample> listActivity(quint32 monitorStreamId, const QString &day) const;
     QList<AppSegment> listAppSegments(quint32 monitorStreamId, const QString &day) const;
     QList<AppUsage> listRunningApplications(quint32 monitorStreamId, const QString &day) const;
+    QList<WebVisit> listWebVisits(quint32 monitorStreamId, const QString &day) const;
+    QList<WebUsage> listWebPages(quint32 monitorStreamId, const QString &day) const;
     QList<QPair<QString, QString>> listCategories() const;
     QList<KeystrokeEntry> listKeystrokes(quint32 sessionId, const QString &day) const;
 
@@ -94,6 +114,11 @@ private:
         qint64 rowId = -1;
     };
 
+    struct OpenWebSegment {
+        QString url;
+        qint64 rowId = -1;
+    };
+
     QString category(const QString &application) const;
 
     QString m_historyDir;
@@ -101,4 +126,5 @@ private:
     QHash<quint32, qint64> m_lastRecordedMs;
     int m_minIntervalMs = 10000;
     QHash<quint64, OpenSegment> m_openSegments; // key: (sessionId << 32) | monitorStreamId
+    QHash<quint64, OpenWebSegment> m_openWebSegments; // key: (sessionId << 32) | monitorStreamId
 };

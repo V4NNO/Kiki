@@ -1,5 +1,7 @@
 #include "mainwindow.h"
 
+#include "devicedetailview.h"
+#include "devicetilewidget.h"
 #include "historyview.h"
 #include "monitorwidget.h"
 
@@ -16,6 +18,7 @@
 #include <QKeyEvent>
 #include <QLabel>
 #include <QLineEdit>
+#include <QListWidget>
 #include <QMessageBox>
 #include <QMenu>
 #include <QMouseEvent>
@@ -30,6 +33,7 @@
 #include <QStatusBar>
 #include <QStyle>
 #include <QTabBar>
+#include <QTimer>
 #include <QToolButton>
 #include <QVBoxLayout>
 
@@ -83,6 +87,8 @@ private:
 MainWindow::MainWindow(QWidget *parent)
     : QMainWindow(parent)
 {
+    m_tabs.append(TrackerTab{QStringLiteral("New tab_1"), {}});
+
     buildInterface();
     applyStyle();
     loadSettings();
@@ -163,30 +169,64 @@ void MainWindow::setAgentIdentity(const QString &agentName, const QString &sessi
         ? agentName : QStringLiteral("%1  /  %2").arg(agentName, sessionName));
 }
 
+QString MainWindow::deviceDisplayName(quint32 sessionKey) const
+{
+    const QString username = m_deviceUsernames.value(sessionKey);
+    if (!username.isEmpty()) {
+        return username;
+    }
+    const quint32 primary = m_devicePrimaryStream.value(sessionKey, sessionKey);
+    return m_monitorNames.value(primary, QStringLiteral("Device %1").arg(sessionKey));
+}
+
 void MainWindow::addMonitor(quint32 streamId, const QString &name, const QSize &size,
                             quint32 sessionId, const QString &sessionUsername,
-                            const QString &sessionState)
+                            const QString &sessionState, bool isWindow)
 {
     Q_UNUSED(size)
     Q_UNUSED(sessionState)
     if (m_monitors.contains(streamId)) {
         return;
     }
+    const quint32 deviceKey = sessionId != 0 ? sessionId : streamId;
     const QString displayName = sessionUsername.isEmpty()
         ? name : QStringLiteral("%1 — %2").arg(sessionUsername, name);
-    auto *monitor = new MonitorWidget(streamId, displayName, m_monitorContainer);
+
+    auto *monitor = new MonitorWidget(streamId, displayName, this);
     connect(monitor, &MonitorWidget::selected, this, &MainWindow::selectMonitor);
     connect(monitor, &MonitorWidget::fullScreenRequested,
             this, &MainWindow::showMonitorFullScreen);
+    monitor->hide();
     m_monitors.insert(streamId, monitor);
+
+    if (!sessionUsername.isEmpty()) {
+        m_deviceUsernames.insert(deviceKey, sessionUsername);
+    }
+
+    if (isWindow) {
+        // WindowListCapture's live preview for one open window -- not one
+        // of the device's monitors (doesn't count for tile
+        // thumbnail/primary-stream selection, doesn't get stacked on the
+        // Monitors sub-tab); remembered separately for DeviceDetailView's
+        // Programs sub-tab, pruned by m_windowStreamPruneTimer once its
+        // window closes.
+        m_deviceWindowStreams[deviceKey].append(streamId);
+        m_windowStreamIds.insert(streamId);
+        m_windowStreamLastFrameMs.insert(streamId, QDateTime::currentMSecsSinceEpoch());
+        return;
+    }
+
     m_monitorNames.insert(streamId, displayName);
-    // Group monitors from the same session together in the grid: everything
-    // sorts by this key, which is the session id when the agent reports
-    // one (PersonalHost), or just the streamId when it doesn't (demo mode,
-    // single-session PersonalScreenAgent).
-    m_monitorSessionOrder.insert(streamId, sessionId != 0 ? sessionId : streamId);
-    m_emptyLabel->hide();
-    relayoutMonitors();
+    const bool isNewDevice = !m_devicePrimaryStream.contains(deviceKey);
+    if (isNewDevice) {
+        m_devicePrimaryStream.insert(deviceKey, streamId);
+    }
+    m_deviceMonitorStreams[deviceKey].append(streamId);
+
+    if (DeviceTileWidget *tile = m_deviceTiles.value(deviceKey, nullptr)) {
+        tile->setDisplayName(deviceDisplayName(deviceKey));
+    }
+
     m_historyView->setMonitors(m_monitorNames);
     if (m_selectedStream == 0) {
         selectMonitor(streamId);
@@ -198,9 +238,25 @@ void MainWindow::updateFrame(quint32 streamId, const QImage &image,
 {
     if (!m_monitors.contains(streamId)) {
         addMonitor(streamId, QStringLiteral("Monitor %1").arg(streamId), image.size(), 0,
-                  QString(), QString());
+                  QString(), QString(), false);
     }
     m_monitors.value(streamId)->setFrame(image, sequence, latencyMs);
+
+    if (m_windowStreamIds.contains(streamId)) {
+        m_windowStreamLastFrameMs.insert(streamId, QDateTime::currentMSecsSinceEpoch());
+    }
+
+    // Feed the device tile's live thumbnail only from that device's primary
+    // (first-discovered) monitor -- a tile shows one representative image,
+    // not every monitor.
+    for (auto it = m_devicePrimaryStream.cbegin(); it != m_devicePrimaryStream.cend(); ++it) {
+        if (it.value() == streamId) {
+            if (DeviceTileWidget *tile = m_deviceTiles.value(it.key(), nullptr)) {
+                tile->updateThumbnail(image);
+            }
+            break;
+        }
+    }
 }
 
 void MainWindow::updateMetadata(quint32 streamId, const QString &application,
@@ -263,6 +319,7 @@ void MainWindow::showTrackerPage()
     style()->polish(m_trackerNavButton);
     style()->unpolish(m_historyNavButton);
     style()->polish(m_historyNavButton);
+    m_deviceDetailView->deactivate();
     m_contentStack->setCurrentWidget(m_trackerPage);
 }
 
@@ -274,8 +331,162 @@ void MainWindow::showHistoryPage()
     style()->polish(m_historyNavButton);
     style()->unpolish(m_trackerNavButton);
     style()->polish(m_trackerNavButton);
+    m_deviceDetailView->deactivate();
     m_contentStack->setCurrentWidget(m_historyView);
     m_historyView->activate();
+}
+
+void MainWindow::switchTab(int index)
+{
+    if (index < 0 || index >= m_tabs.size()) {
+        return;
+    }
+    m_currentTabIndex = index;
+    relayoutCurrentTab();
+}
+
+void MainWindow::addNewTab()
+{
+    const int number = m_tabs.size() + 1;
+    m_tabs.append(TrackerTab{QStringLiteral("New tab_%1").arg(number), {}});
+    m_tabBar->addTab(QStringLiteral("• New tab_%1").arg(number));
+    m_tabBar->setCurrentIndex(m_tabs.size() - 1);
+}
+
+void MainWindow::closeTab(int index)
+{
+    if (m_tabs.size() <= 1 || index < 0 || index >= m_tabs.size()) {
+        return; // always keep at least one tab
+    }
+    m_tabs.removeAt(index);
+    m_tabBar->removeTab(index);
+    if (m_currentTabIndex >= m_tabs.size()) {
+        m_currentTabIndex = m_tabs.size() - 1;
+    }
+    relayoutCurrentTab();
+}
+
+void MainWindow::openAddDeviceDialog()
+{
+    TrackerTab &tab = m_tabs[m_currentTabIndex];
+    auto *dialog = new QDialog(this);
+    dialog->setAttribute(Qt::WA_DeleteOnClose);
+    dialog->setWindowTitle(QStringLiteral("Adauga device"));
+    dialog->setModal(false);
+    dialog->setMinimumWidth(360);
+    auto *layout = new QVBoxLayout(dialog);
+
+    QStringList availableKeys;
+    auto *list = new QListWidget(dialog);
+    for (auto it = m_devicePrimaryStream.cbegin(); it != m_devicePrimaryStream.cend(); ++it) {
+        const quint32 deviceKey = it.key();
+        if (tab.deviceKeys.contains(deviceKey)) {
+            continue;
+        }
+        list->addItem(deviceDisplayName(deviceKey));
+        availableKeys.append(QString::number(deviceKey));
+    }
+    if (availableKeys.isEmpty()) {
+        auto *empty = new QLabel(
+            QStringLiteral("Niciun device disponibil -- doar cele conectate acum pot fi adaugate."),
+            dialog);
+        empty->setWordWrap(true);
+        layout->addWidget(empty);
+    } else {
+        layout->addWidget(list);
+    }
+    auto *buttons = new QDialogButtonBox(QDialogButtonBox::Close, dialog);
+    connect(buttons, &QDialogButtonBox::rejected, dialog, &QDialog::close);
+    layout->addWidget(buttons);
+
+    connect(list, &QListWidget::itemClicked, this,
+            [this, dialog, availableKeys](QListWidgetItem *item) {
+                const int row = item->listWidget()->row(item);
+                if (row < 0 || row >= availableKeys.size()) {
+                    return;
+                }
+                const quint32 deviceKey = availableKeys.at(row).toUInt();
+                TrackerTab &currentTab = m_tabs[m_currentTabIndex];
+                if (!currentTab.deviceKeys.contains(deviceKey)) {
+                    currentTab.deviceKeys.append(deviceKey);
+                }
+                relayoutCurrentTab();
+                dialog->close();
+            });
+
+    dialog->show();
+}
+
+void MainWindow::openDeviceDetail(quint32 sessionKey)
+{
+    const quint32 primaryStream = m_devicePrimaryStream.value(sessionKey, 0);
+    if (primaryStream == 0) {
+        return;
+    }
+    QList<MonitorWidget *> monitors;
+    for (quint32 streamId : m_deviceMonitorStreams.value(sessionKey)) {
+        if (MonitorWidget *monitor = m_monitors.value(streamId, nullptr)) {
+            monitors.append(monitor);
+        }
+    }
+    QList<MonitorWidget *> windowPreviews;
+    for (quint32 streamId : m_deviceWindowStreams.value(sessionKey)) {
+        if (MonitorWidget *monitor = m_monitors.value(streamId, nullptr)) {
+            windowPreviews.append(monitor);
+        }
+    }
+    m_openDeviceKey = sessionKey;
+    m_deviceDetailView->showDevice(sessionKey, deviceDisplayName(sessionKey), primaryStream, monitors,
+                                   windowPreviews);
+    m_contentStack->setCurrentWidget(m_deviceDetailView);
+    m_deviceDetailView->activate();
+}
+
+void MainWindow::closeDeviceDetail()
+{
+    m_deviceDetailView->deactivate();
+    m_contentStack->setCurrentWidget(m_trackerPage);
+    m_openDeviceKey = 0;
+}
+
+void MainWindow::pruneStaleWindowStreams()
+{
+    // WindowListCapture only captures the foreground window every tick;
+    // background windows are refreshed on a much slower ~10s cadence to
+    // keep resource use down (see windowlistcapture.cpp), so "no frame in a
+    // while" needs a longer grace period here than a literal one-tick
+    // timeout, or backgrounded-but-still-open windows would get pruned as
+    // if they'd closed.
+    constexpr qint64 StaleAfterMs = 15000;
+    const qint64 now = QDateTime::currentMSecsSinceEpoch();
+    QList<quint32> stale;
+    for (auto it = m_windowStreamLastFrameMs.cbegin(); it != m_windowStreamLastFrameMs.cend(); ++it) {
+        if (now - it.value() > StaleAfterMs) {
+            stale.append(it.key());
+        }
+    }
+    if (stale.isEmpty()) {
+        return;
+    }
+    for (auto deviceIt = m_deviceWindowStreams.begin(); deviceIt != m_deviceWindowStreams.end();
+        ++deviceIt) {
+        if (deviceIt.key() == m_openDeviceKey) {
+            // DeviceDetailView is showing this device's window list right
+            // now and holds raw MonitorWidget pointers for it -- defer
+            // pruning until the user navigates away, to avoid deleting a
+            // widget out from under it.
+            continue;
+        }
+        for (quint32 streamId : stale) {
+            if (deviceIt.value().removeOne(streamId)) {
+                m_windowStreamIds.remove(streamId);
+                m_windowStreamLastFrameMs.remove(streamId);
+                if (MonitorWidget *monitor = m_monitors.take(streamId)) {
+                    monitor->deleteLater();
+                }
+            }
+        }
+    }
 }
 
 void MainWindow::buildInterface()
@@ -374,18 +585,19 @@ void MainWindow::buildInterface()
     subLayout->addWidget(demoButton);
     subLayout->addWidget(m_snapshotButton);
     subLayout->addStretch();
-    auto *plus = new QLabel(QStringLiteral("+"), subbar);
-    plus->setObjectName(QStringLiteral("plus"));
-    subLayout->addWidget(plus);
-    auto *tabs = new QTabBar(subbar);
-    tabs->setObjectName(QStringLiteral("tabs"));
-    tabs->setExpanding(false);
-    tabs->setTabsClosable(true);
-    tabs->addTab(QStringLiteral("• New tab_1"));
-    tabs->addTab(QStringLiteral("• New tab"));
-    tabs->addTab(QStringLiteral("Dashboard"));
-    tabs->setCurrentIndex(2);
-    subLayout->addWidget(tabs);
+    auto *plusButton = new QToolButton(subbar);
+    plusButton->setObjectName(QStringLiteral("plus"));
+    plusButton->setText(QStringLiteral("+"));
+    connect(plusButton, &QToolButton::clicked, this, &MainWindow::addNewTab);
+    subLayout->addWidget(plusButton);
+    m_tabBar = new QTabBar(subbar);
+    m_tabBar->setObjectName(QStringLiteral("tabs"));
+    m_tabBar->setExpanding(false);
+    m_tabBar->setTabsClosable(true);
+    m_tabBar->addTab(QStringLiteral("• %1").arg(m_tabs.first().title));
+    connect(m_tabBar, &QTabBar::currentChanged, this, &MainWindow::switchTab);
+    connect(m_tabBar, &QTabBar::tabCloseRequested, this, &MainWindow::closeTab);
+    subLayout->addWidget(m_tabBar);
     rootLayout->addWidget(subbar);
 
     m_trackerPage = new QWidget(root);
@@ -403,23 +615,27 @@ void MainWindow::buildInterface()
     m_monitorGrid->setContentsMargins(0, 0, 0, 0);
     m_monitorGrid->setHorizontalSpacing(3);
     m_monitorGrid->setVerticalSpacing(3);
-    m_emptyLabel = new QLabel(QStringLiteral(
-        "Apasa Demo pentru previzualizarea grilei\nsau conecteaza un agent din Settings."),
-        m_monitorContainer);
-    m_emptyLabel->setAlignment(Qt::AlignCenter);
-    m_emptyLabel->setObjectName(QStringLiteral("empty"));
-    m_monitorGrid->addWidget(m_emptyLabel, 0, 0);
     scroll->setWidget(m_monitorContainer);
     contentLayout->addWidget(scroll, 1);
 
     m_historyView = new HistoryView(m_connection, root);
+    m_deviceDetailView = new DeviceDetailView(m_connection, root);
+    connect(m_deviceDetailView, &DeviceDetailView::backRequested, this, &MainWindow::closeDeviceDetail);
+
+    m_windowStreamPruneTimer = new QTimer(this);
+    m_windowStreamPruneTimer->setInterval(2000);
+    connect(m_windowStreamPruneTimer, &QTimer::timeout, this, &MainWindow::pruneStaleWindowStreams);
+    m_windowStreamPruneTimer->start();
 
     m_contentStack = new QStackedWidget(root);
     m_contentStack->addWidget(m_trackerPage);
     m_contentStack->addWidget(m_historyView);
+    m_contentStack->addWidget(m_deviceDetailView);
     rootLayout->addWidget(m_contentStack, 1);
     setCentralWidget(root);
     statusBar()->setSizeGripEnabled(false);
+
+    relayoutCurrentTab();
 
     m_settingsDialog = new QDialog(this);
     m_settingsDialog->setWindowTitle(QStringLiteral("Connection settings"));
@@ -475,17 +691,20 @@ void MainWindow::applyStyle()
         QPushButton#navActive { color: white; }
         QPushButton#navButton { color: #126648; }
         QPushButton#navButton:hover { color: white; }
+        QPushButton#navButton:disabled { color: #6f747d; }
         QPushButton#headerButton, QToolButton#headerIcon { background: rgba(0,0,0,0.10); color: white; border: 1px solid rgba(255,255,255,0.22); padding: 5px 9px; }
         QLabel#status { color: #d9fff1; padding: 0 10px; }
         QLabel#status[connected="true"] { color: white; }
         QPushButton#flatButton { color: #b8bdc5; background: transparent; border: none; padding: 6px; }
         QPushButton#flatButton:hover { color: white; }
-        QLabel#plus { color: #d7dadd; font-size: 15pt; padding: 0 5px; }
+        QToolButton#plus { color: #d7dadd; background: transparent; border: none; font-size: 15pt; padding: 0 5px; }
+        QToolButton#plus:hover { color: white; }
         QTabBar#tabs::tab { background: #383b43; color: #9fa5ae; padding: 8px 36px; border: 1px solid #292b32; }
         QTabBar#tabs::tab:selected { color: white; border-bottom: 2px solid #1da06f; }
         QWidget#monitorArea { background: #3e4048; }
         QLabel#privacy { color: #aab0b8; padding: 10px; background: #343740; }
-        QLabel#empty { color: #858b95; font-size: 12pt; border: 1px solid #4b4e57; }
+        QWidget#detailHeader { background: #383b43; border-bottom: 1px solid #17191e; }
+        QWidget#statsPanel { background: #34363e; border-left: 1px solid #17191e; }
         QLineEdit, QSpinBox { background: #262930; border: 1px solid #4d515b; padding: 7px; selection-background-color: #1da06f; }
         QLineEdit:focus, QSpinBox:focus { border-color: #21b780; }
         QPushButton { background: #3c4048; border: 1px solid #50545e; padding: 7px 12px; }
@@ -507,49 +726,86 @@ void MainWindow::clearMonitors()
 {
     const auto monitors = m_monitors;
     m_monitors.clear();
-    m_monitorSessionOrder.clear();
     m_monitorNames.clear();
+    m_deviceUsernames.clear();
+    m_devicePrimaryStream.clear();
+    m_deviceMonitorStreams.clear();
+    m_deviceWindowStreams.clear();
+    m_windowStreamIds.clear();
+    m_windowStreamLastFrameMs.clear();
+    qDeleteAll(m_deviceTiles);
+    m_deviceTiles.clear();
     for (MonitorWidget *monitor : monitors) {
-        m_monitorGrid->removeWidget(monitor);
         monitor->deleteLater();
+    }
+    for (TrackerTab &tab : m_tabs) {
+        tab.deviceKeys.clear();
     }
     m_selectedStream = 0;
     m_snapshotButton->setEnabled(false);
     m_agentLabel->setText(QStringLiteral("Niciun agent selectat"));
-    m_emptyLabel->show();
-    relayoutMonitors();
+    if (m_contentStack->currentWidget() == m_deviceDetailView) {
+        closeDeviceDetail();
+    }
+    relayoutCurrentTab();
     m_historyView->setMonitors(m_monitorNames);
 }
 
-void MainWindow::relayoutMonitors()
+void MainWindow::relayoutCurrentTab()
 {
-    int index = 0;
+    // Full rebuild each time -- tab switches and device add/remove are rare
+    // interactive events, not a hot path, so simplicity wins over
+    // incremental diffing here.
+    QLayoutItem *item = nullptr;
+    while ((item = m_monitorGrid->takeAt(0)) != nullptr) {
+        if (QWidget *widget = item->widget()) {
+            widget->hide();
+            widget->setParent(nullptr);
+        }
+        delete item;
+    }
+
+    if (m_tabs.isEmpty()) {
+        return;
+    }
+    const TrackerTab &tab = m_tabs[m_currentTabIndex];
     const int availableWidth = qMax(300, m_monitorContainer ? m_monitorContainer->width() : width());
     const int columns = qMax(1, availableWidth / 315);
-    QList<quint32> ids = m_monitors.keys();
-    std::sort(ids.begin(), ids.end(), [this](quint32 a, quint32 b) {
-        const quint32 sessionA = m_monitorSessionOrder.value(a, a);
-        const quint32 sessionB = m_monitorSessionOrder.value(b, b);
-        if (sessionA != sessionB) {
-            return sessionA < sessionB;
+
+    int index = 0;
+    for (quint32 deviceKey : tab.deviceKeys) {
+        DeviceTileWidget *tile = m_deviceTiles.value(deviceKey, nullptr);
+        if (!tile) {
+            tile = new DeviceTileWidget(deviceKey, deviceDisplayName(deviceKey), m_monitorContainer);
+            connect(tile, &DeviceTileWidget::opened, this, &MainWindow::openDeviceDetail);
+            m_deviceTiles.insert(deviceKey, tile);
+            const quint32 primary = m_devicePrimaryStream.value(deviceKey, 0);
+            if (MonitorWidget *primaryMonitor = m_monitors.value(primary, nullptr)) {
+                tile->updateThumbnail(primaryMonitor->currentFrame());
+            }
         }
-        return a < b;
-    });
-    for (quint32 id : ids) {
-        MonitorWidget *monitor = m_monitors.value(id);
-        m_monitorGrid->removeWidget(monitor);
-        m_monitorGrid->addWidget(monitor, index / columns, index % columns);
+        tile->setParent(m_monitorContainer);
+        tile->show();
+        m_monitorGrid->addWidget(tile, index / columns, index % columns);
         ++index;
     }
-    if (m_monitors.isEmpty()) {
-        m_monitorGrid->addWidget(m_emptyLabel, 0, 0);
+
+    // Trailing "+" tile(s): a full placeholder grid when the tab is empty
+    // (matches the reference UI's empty-tab state), otherwise just one
+    // trailing add-tile after the real devices.
+    const int addTileCount = tab.deviceKeys.isEmpty() ? qMax(4, columns * 2) : 1;
+    for (int i = 0; i < addTileCount; ++i) {
+        auto *addTile = new AddDeviceTileWidget(m_monitorContainer);
+        connect(addTile, &AddDeviceTileWidget::addRequested, this, &MainWindow::openAddDeviceDialog);
+        m_monitorGrid->addWidget(addTile, index / columns, index % columns);
+        ++index;
     }
 }
 
 void MainWindow::resizeEvent(QResizeEvent *event)
 {
     QMainWindow::resizeEvent(event);
-    relayoutMonitors();
+    relayoutCurrentTab();
 }
 
 void MainWindow::loadSettings()

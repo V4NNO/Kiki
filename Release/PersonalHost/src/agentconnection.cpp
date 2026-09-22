@@ -234,7 +234,8 @@ void AgentConnection::sendAgentHellos()
                             {QStringLiteral("monitor"),
                              QJsonObject{{QStringLiteral("name"), monitor.name},
                                          {QStringLiteral("width"), monitor.size.width()},
-                                         {QStringLiteral("height"), monitor.size.height()}}},
+                                         {QStringLiteral("height"), monitor.size.height()},
+                                         {QStringLiteral("isWindow"), monitor.isWindow}}},
                             {QStringLiteral("session"),
                              QJsonObject{{QStringLiteral("id"),
                                           static_cast<qint64>(monitor.sessionId)},
@@ -393,6 +394,17 @@ void AgentConnection::handleHistoryQuery(const ViewerProtocol::Header &header, c
                 QJsonObject{{QStringLiteral("action"), action},
                             {QStringLiteral("day"), day},
                             {QStringLiteral("applications"), array}});
+    } else if (action == QStringLiteral("listWebPages")) {
+        const QString day = request.value(QStringLiteral("day")).toString();
+        QJsonArray array;
+        for (const WebUsage &usage : m_historyRecorder->listWebPages(monitorStreamId, day)) {
+            array.append(QJsonObject{{QStringLiteral("url"), usage.url},
+                                     {QStringLiteral("totalMs"), usage.totalMs}});
+        }
+        sendJson(ViewerProtocol::MessageType::HistoryQuery, monitorStreamId,
+                QJsonObject{{QStringLiteral("action"), action},
+                            {QStringLiteral("day"), day},
+                            {QStringLiteral("pages"), array}});
     } else if (action == QStringLiteral("listCategories")) {
         QJsonArray array;
         const auto categories = m_historyRecorder->listCategories();

@@ -324,15 +324,21 @@ CMakeFiles/PersonalSubService.dir/PersonalSubService_autogen/mocs_compilation.cp
  C:/Qt/Tools/mingw1310_64/lib/gcc/x86_64-w64-mingw32/13.1.0/include/c++/ratio \
  C:/Qt/Tools/mingw1310_64/lib/gcc/x86_64-w64-mingw32/13.1.0/include/c++/ctime \
  C:/Qt/6.11.2/mingw_64/include/QtCore/QString \
- C:/Qt/6.11.2/mingw_64/include/QtCore/QTimer \
- C:/Qt/6.11.2/mingw_64/include/QtCore/qtimer.h \
- C:/Qt/6.11.2/mingw_64/include/QtCore/qbasictimer.h \
- C:/Qt/6.11.2/mingw_64/include/QtCore/qabstracteventdispatcher.h \
- C:/Qt/6.11.2/mingw_64/include/QtCore/qeventloop.h \
+ C:/Qt/6.11.2/mingw_64/include/QtCore/QThread \
+ C:/Qt/6.11.2/mingw_64/include/QtCore/qthread.h \
  C:/Qt/6.11.2/mingw_64/include/QtCore/qdeadlinetimer.h \
+ C:/Qt/Tools/mingw1310_64/lib/gcc/x86_64-w64-mingw32/13.1.0/include/c++/future \
+ C:/Qt/Tools/mingw1310_64/lib/gcc/x86_64-w64-mingw32/13.1.0/include/c++/mutex \
+ C:/Qt/Tools/mingw1310_64/lib/gcc/x86_64-w64-mingw32/13.1.0/include/c++/bits/std_mutex.h \
+ C:/Qt/Tools/mingw1310_64/lib/gcc/x86_64-w64-mingw32/13.1.0/include/c++/bits/unique_lock.h \
+ C:/Qt/Tools/mingw1310_64/lib/gcc/x86_64-w64-mingw32/13.1.0/include/c++/condition_variable \
+ C:/Qt/Tools/mingw1310_64/lib/gcc/x86_64-w64-mingw32/13.1.0/include/c++/bits/atomic_futex.h \
+ C:/Qt/Tools/mingw1310_64/lib/gcc/x86_64-w64-mingw32/13.1.0/include/c++/bits/std_thread.h \
  C:/Qt/6.11.2/mingw_64/include/QtCore/qtmochelpers.h \
  C:/Qt/6.11.2/mingw_64/include/QtCore/qtmocconstants.h \
  C:/Qt/6.11.2/mingw_64/include/QtCore/q20algorithm.h \
+ C:\Users\IonSacaliuc\OneDrive\ -\ Utilities\ One\ Inc\Desktop\SCRIPTS\KickDecompile\Release\PersonalSubService\build-current\PersonalSubService_autogen\UVLADIE3JM/moc_browserurlprobe.cpp \
+ C:/Users/IonSacaliuc/OneDrive\ -\ Utilities\ One\ Inc/Desktop/SCRIPTS/KickDecompile/Release/PersonalSubService/src/browserurlprobe.h \
  C:\Users\IonSacaliuc\OneDrive\ -\ Utilities\ One\ Inc\Desktop\SCRIPTS\KickDecompile\Release\PersonalSubService\build-current\PersonalSubService_autogen\UVLADIE3JM/moc_indicatoroverlay.cpp \
  C:/Users/IonSacaliuc/OneDrive\ -\ Utilities\ One\ Inc/Desktop/SCRIPTS/KickDecompile/Release/PersonalSubService/src/indicatoroverlay.h \
  C:/Qt/6.11.2/mingw_64/include/QtWidgets/QLabel \
@@ -404,6 +410,11 @@ CMakeFiles/PersonalSubService.dir/PersonalSubService_autogen/mocs_compilation.cp
  C:/Qt/6.11.2/mingw_64/include/QtCore/qiodevice.h \
  C:/Qt/6.11.2/mingw_64/include/QtGui/qtextdocument.h \
  C:/Qt/6.11.2/mingw_64/include/QtCore/qurl.h \
+ C:/Qt/6.11.2/mingw_64/include/QtCore/QTimer \
+ C:/Qt/6.11.2/mingw_64/include/QtCore/qtimer.h \
+ C:/Qt/6.11.2/mingw_64/include/QtCore/qbasictimer.h \
+ C:/Qt/6.11.2/mingw_64/include/QtCore/qabstracteventdispatcher.h \
+ C:/Qt/6.11.2/mingw_64/include/QtCore/qeventloop.h \
  C:/Qt/6.11.2/mingw_64/include/QtWidgets/QWidget \
  C:/Qt/6.11.2/mingw_64/include/QtGui/qtextcursor.h \
  C:/Qt/6.11.2/mingw_64/include/QtGui/qtextformat.h \
@@ -654,8 +665,10 @@ CMakeFiles/PersonalSubService.dir/PersonalSubService_autogen/mocs_compilation.cp
  C:/Qt/Tools/mingw1310_64/x86_64-w64-mingw32/include/imm.h \
  C:\Users\IonSacaliuc\OneDrive\ -\ Utilities\ One\ Inc\Desktop\SCRIPTS\KickDecompile\Release\PersonalSubService\build-current\PersonalSubService_autogen\UVLADIE3JM/moc_screencapture.cpp \
  C:/Users/IonSacaliuc/OneDrive\ -\ Utilities\ One\ Inc/Desktop/SCRIPTS/KickDecompile/Release/PersonalSubService/src/screencapture.h \
- C:/Qt/6.11.2/mingw_64/include/QtCore/QHash \
+ C:/Users/IonSacaliuc/OneDrive\ -\ Utilities\ One\ Inc/Desktop/SCRIPTS/KickDecompile/Release/PersonalSubService/src/dxgicapture.h \
  C:/Qt/6.11.2/mingw_64/include/QtGui/QImage \
+ C:/Qt/6.11.2/mingw_64/include/QtCore/QHash \
+ C:/Qt/6.11.2/mingw_64/include/QtCore/QSet \
  C:/Qt/6.11.2/mingw_64/include/QtCore/QList \
  C:\Users\IonSacaliuc\OneDrive\ -\ Utilities\ One\ Inc\Desktop\SCRIPTS\KickDecompile\Release\PersonalSubService\build-current\PersonalSubService_autogen\UVLADIE3JM/moc_subservicehost.cpp \
  C:/Users/IonSacaliuc/OneDrive\ -\ Utilities\ One\ Inc/Desktop/SCRIPTS/KickDecompile/Release/PersonalSubService/src/subservicehost.h \
@@ -684,4 +697,7 @@ CMakeFiles/PersonalSubService.dir/PersonalSubService_autogen/mocs_compilation.cp
  C:/Qt/6.11.2/mingw_64/include/QtCore/qpropertyprivate.h \
  C:/Qt/Tools/mingw1310_64/lib/gcc/x86_64-w64-mingw32/13.1.0/include/c++/experimental/source_location \
  C:/Qt/6.11.2/mingw_64/include/QtNetwork/QLocalSocket \
- C:/Qt/6.11.2/mingw_64/include/QtNetwork/qlocalsocket.h
+ C:/Qt/6.11.2/mingw_64/include/QtNetwork/qlocalsocket.h \
+ C:/Qt/6.11.2/mingw_64/include/QtCore/QRect \
+ C:\Users\IonSacaliuc\OneDrive\ -\ Utilities\ One\ Inc\Desktop\SCRIPTS\KickDecompile\Release\PersonalSubService\build-current\PersonalSubService_autogen\UVLADIE3JM/moc_windowlistcapture.cpp \
+ C:/Users/IonSacaliuc/OneDrive\ -\ Utilities\ One\ Inc/Desktop/SCRIPTS/KickDecompile/Release/PersonalSubService/src/windowlistcapture.h

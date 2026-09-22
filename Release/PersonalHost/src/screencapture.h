@@ -18,6 +18,11 @@ struct MonitorInfo {
     quint32 sessionId = 0;
     QString sessionUsername;
     QString sessionState;
+    // True for a PersonalSubService's ActiveWindowCapture live preview
+    // stream (see SubServiceHost::kActiveWindowStreamId) -- not a real
+    // monitor: excluded from history recording and from "this device's
+    // monitors" grouping on the viewer side.
+    bool isWindow = false;
 };
 
 // Grabs every connected screen on a timer and republishes the raw images.

@@ -49,6 +49,7 @@ template <> constexpr inline auto SessionManager::qt_create_metaobjectdata<qt_me
         "name",
         "QSize",
         "size",
+        "isWindow",
         "onFrameReady",
         "QImage",
         "image",
@@ -56,10 +57,13 @@ template <> constexpr inline auto SessionManager::qt_create_metaobjectdata<qt_me
         "application",
         "idleText",
         "inputEvents",
+        "url",
         "onKeystrokeReceived",
         "windowTitle",
         "text",
-        "onIngestDisconnected"
+        "onIngestDisconnected",
+        "onViewerCountChanged",
+        "count"
     };
 
     QtMocHelpers::UintData qt_methods {
@@ -70,25 +74,30 @@ template <> constexpr inline auto SessionManager::qt_create_metaobjectdata<qt_me
         // Slot 'pollSessions'
         QtMocHelpers::SlotData<void()>(4, 2, QMC::AccessPrivate, QMetaType::Void),
         // Slot 'onMonitorDiscovered'
-        QtMocHelpers::SlotData<void(quint32, quint32, const QString &, const QSize &)>(5, 2, QMC::AccessPrivate, QMetaType::Void, {{
+        QtMocHelpers::SlotData<void(quint32, quint32, const QString &, const QSize &, bool)>(5, 2, QMC::AccessPrivate, QMetaType::Void, {{
             { QMetaType::UInt, 6 }, { QMetaType::UInt, 7 }, { QMetaType::QString, 8 }, { 0x80000000 | 9, 10 },
+            { QMetaType::Bool, 11 },
         }}),
         // Slot 'onFrameReady'
-        QtMocHelpers::SlotData<void(quint32, quint32, const QImage &)>(11, 2, QMC::AccessPrivate, QMetaType::Void, {{
-            { QMetaType::UInt, 6 }, { QMetaType::UInt, 7 }, { 0x80000000 | 12, 13 },
+        QtMocHelpers::SlotData<void(quint32, quint32, const QImage &)>(12, 2, QMC::AccessPrivate, QMetaType::Void, {{
+            { QMetaType::UInt, 6 }, { QMetaType::UInt, 7 }, { 0x80000000 | 13, 14 },
         }}),
         // Slot 'onMetadataChanged'
-        QtMocHelpers::SlotData<void(quint32, quint32, const QString &, const QString &, int)>(14, 2, QMC::AccessPrivate, QMetaType::Void, {{
-            { QMetaType::UInt, 6 }, { QMetaType::UInt, 7 }, { QMetaType::QString, 15 }, { QMetaType::QString, 16 },
-            { QMetaType::Int, 17 },
+        QtMocHelpers::SlotData<void(quint32, quint32, const QString &, const QString &, int, const QString &)>(15, 2, QMC::AccessPrivate, QMetaType::Void, {{
+            { QMetaType::UInt, 6 }, { QMetaType::UInt, 7 }, { QMetaType::QString, 16 }, { QMetaType::QString, 17 },
+            { QMetaType::Int, 18 }, { QMetaType::QString, 19 },
         }}),
         // Slot 'onKeystrokeReceived'
-        QtMocHelpers::SlotData<void(quint32, const QString &, const QString &)>(18, 2, QMC::AccessPrivate, QMetaType::Void, {{
-            { QMetaType::UInt, 6 }, { QMetaType::QString, 19 }, { QMetaType::QString, 20 },
+        QtMocHelpers::SlotData<void(quint32, const QString &, const QString &)>(20, 2, QMC::AccessPrivate, QMetaType::Void, {{
+            { QMetaType::UInt, 6 }, { QMetaType::QString, 21 }, { QMetaType::QString, 22 },
         }}),
         // Slot 'onIngestDisconnected'
-        QtMocHelpers::SlotData<void(quint32)>(21, 2, QMC::AccessPrivate, QMetaType::Void, {{
+        QtMocHelpers::SlotData<void(quint32)>(23, 2, QMC::AccessPrivate, QMetaType::Void, {{
             { QMetaType::UInt, 6 },
+        }}),
+        // Slot 'onViewerCountChanged'
+        QtMocHelpers::SlotData<void(int)>(24, 2, QMC::AccessPrivate, QMetaType::Void, {{
+            { QMetaType::Int, 25 },
         }}),
     };
     QtMocHelpers::UintData qt_properties {
@@ -115,11 +124,12 @@ void SessionManager::qt_static_metacall(QObject *_o, QMetaObject::Call _c, int _
         switch (_id) {
         case 0: _t->logMessage((*reinterpret_cast<std::add_pointer_t<QString>>(_a[1]))); break;
         case 1: _t->pollSessions(); break;
-        case 2: _t->onMonitorDiscovered((*reinterpret_cast<std::add_pointer_t<quint32>>(_a[1])),(*reinterpret_cast<std::add_pointer_t<quint32>>(_a[2])),(*reinterpret_cast<std::add_pointer_t<QString>>(_a[3])),(*reinterpret_cast<std::add_pointer_t<QSize>>(_a[4]))); break;
+        case 2: _t->onMonitorDiscovered((*reinterpret_cast<std::add_pointer_t<quint32>>(_a[1])),(*reinterpret_cast<std::add_pointer_t<quint32>>(_a[2])),(*reinterpret_cast<std::add_pointer_t<QString>>(_a[3])),(*reinterpret_cast<std::add_pointer_t<QSize>>(_a[4])),(*reinterpret_cast<std::add_pointer_t<bool>>(_a[5]))); break;
         case 3: _t->onFrameReady((*reinterpret_cast<std::add_pointer_t<quint32>>(_a[1])),(*reinterpret_cast<std::add_pointer_t<quint32>>(_a[2])),(*reinterpret_cast<std::add_pointer_t<QImage>>(_a[3]))); break;
-        case 4: _t->onMetadataChanged((*reinterpret_cast<std::add_pointer_t<quint32>>(_a[1])),(*reinterpret_cast<std::add_pointer_t<quint32>>(_a[2])),(*reinterpret_cast<std::add_pointer_t<QString>>(_a[3])),(*reinterpret_cast<std::add_pointer_t<QString>>(_a[4])),(*reinterpret_cast<std::add_pointer_t<int>>(_a[5]))); break;
+        case 4: _t->onMetadataChanged((*reinterpret_cast<std::add_pointer_t<quint32>>(_a[1])),(*reinterpret_cast<std::add_pointer_t<quint32>>(_a[2])),(*reinterpret_cast<std::add_pointer_t<QString>>(_a[3])),(*reinterpret_cast<std::add_pointer_t<QString>>(_a[4])),(*reinterpret_cast<std::add_pointer_t<int>>(_a[5])),(*reinterpret_cast<std::add_pointer_t<QString>>(_a[6]))); break;
         case 5: _t->onKeystrokeReceived((*reinterpret_cast<std::add_pointer_t<quint32>>(_a[1])),(*reinterpret_cast<std::add_pointer_t<QString>>(_a[2])),(*reinterpret_cast<std::add_pointer_t<QString>>(_a[3]))); break;
         case 6: _t->onIngestDisconnected((*reinterpret_cast<std::add_pointer_t<quint32>>(_a[1]))); break;
+        case 7: _t->onViewerCountChanged((*reinterpret_cast<std::add_pointer_t<int>>(_a[1]))); break;
         default: ;
         }
     }
@@ -148,14 +158,14 @@ int SessionManager::qt_metacall(QMetaObject::Call _c, int _id, void **_a)
     if (_id < 0)
         return _id;
     if (_c == QMetaObject::InvokeMetaMethod) {
-        if (_id < 7)
+        if (_id < 8)
             qt_static_metacall(this, _c, _id, _a);
-        _id -= 7;
+        _id -= 8;
     }
     if (_c == QMetaObject::RegisterMethodArgumentMetaType) {
-        if (_id < 7)
+        if (_id < 8)
             *reinterpret_cast<QMetaType *>(_a[0]) = QMetaType();
-        _id -= 7;
+        _id -= 8;
     }
     return _id;
 }

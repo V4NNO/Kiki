@@ -143,11 +143,41 @@ CMakeFiles/PersonalSubService.dir/src/activityprobe.cpp.s: cmake_force
 	@$(CMAKE_COMMAND) -E cmake_echo_color "--switch=$(COLOR)" --green "Compiling CXX source to assembly CMakeFiles/PersonalSubService.dir/src/activityprobe.cpp.s"
 	C:\Qt\Tools\mingw1310_64\bin\g++.exe $(CXX_DEFINES) $(CXX_INCLUDES) $(CXX_FLAGS) -S "C:\Users\IonSacaliuc\OneDrive - Utilities One Inc\Desktop\SCRIPTS\KickDecompile\Release\PersonalSubService\src\activityprobe.cpp" -o CMakeFiles\PersonalSubService.dir\src\activityprobe.cpp.s
 
+CMakeFiles/PersonalSubService.dir/src/windowlistcapture.cpp.obj: CMakeFiles/PersonalSubService.dir/flags.make
+CMakeFiles/PersonalSubService.dir/src/windowlistcapture.cpp.obj: CMakeFiles/PersonalSubService.dir/includes_CXX.rsp
+CMakeFiles/PersonalSubService.dir/src/windowlistcapture.cpp.obj: C:/Users/IonSacaliuc/OneDrive\ -\ Utilities\ One\ Inc/Desktop/SCRIPTS/KickDecompile/Release/PersonalSubService/src/windowlistcapture.cpp
+CMakeFiles/PersonalSubService.dir/src/windowlistcapture.cpp.obj: CMakeFiles/PersonalSubService.dir/compiler_depend.ts
+	@$(CMAKE_COMMAND) -E cmake_echo_color "--switch=$(COLOR)" --green --progress-dir="C:\Users\IonSacaliuc\OneDrive - Utilities One Inc\Desktop\SCRIPTS\KickDecompile\Release\PersonalSubService\build-current\CMakeFiles" --progress-num=$(CMAKE_PROGRESS_6) "Building CXX object CMakeFiles/PersonalSubService.dir/src/windowlistcapture.cpp.obj"
+	C:\Qt\Tools\mingw1310_64\bin\g++.exe $(CXX_DEFINES) $(CXX_INCLUDES) $(CXX_FLAGS) -MD -MT CMakeFiles/PersonalSubService.dir/src/windowlistcapture.cpp.obj -MF CMakeFiles\PersonalSubService.dir\src\windowlistcapture.cpp.obj.d -o CMakeFiles\PersonalSubService.dir\src\windowlistcapture.cpp.obj -c "C:\Users\IonSacaliuc\OneDrive - Utilities One Inc\Desktop\SCRIPTS\KickDecompile\Release\PersonalSubService\src\windowlistcapture.cpp"
+
+CMakeFiles/PersonalSubService.dir/src/windowlistcapture.cpp.i: cmake_force
+	@$(CMAKE_COMMAND) -E cmake_echo_color "--switch=$(COLOR)" --green "Preprocessing CXX source to CMakeFiles/PersonalSubService.dir/src/windowlistcapture.cpp.i"
+	C:\Qt\Tools\mingw1310_64\bin\g++.exe $(CXX_DEFINES) $(CXX_INCLUDES) $(CXX_FLAGS) -E "C:\Users\IonSacaliuc\OneDrive - Utilities One Inc\Desktop\SCRIPTS\KickDecompile\Release\PersonalSubService\src\windowlistcapture.cpp" > CMakeFiles\PersonalSubService.dir\src\windowlistcapture.cpp.i
+
+CMakeFiles/PersonalSubService.dir/src/windowlistcapture.cpp.s: cmake_force
+	@$(CMAKE_COMMAND) -E cmake_echo_color "--switch=$(COLOR)" --green "Compiling CXX source to assembly CMakeFiles/PersonalSubService.dir/src/windowlistcapture.cpp.s"
+	C:\Qt\Tools\mingw1310_64\bin\g++.exe $(CXX_DEFINES) $(CXX_INCLUDES) $(CXX_FLAGS) -S "C:\Users\IonSacaliuc\OneDrive - Utilities One Inc\Desktop\SCRIPTS\KickDecompile\Release\PersonalSubService\src\windowlistcapture.cpp" -o CMakeFiles\PersonalSubService.dir\src\windowlistcapture.cpp.s
+
+CMakeFiles/PersonalSubService.dir/src/browserurlprobe.cpp.obj: CMakeFiles/PersonalSubService.dir/flags.make
+CMakeFiles/PersonalSubService.dir/src/browserurlprobe.cpp.obj: CMakeFiles/PersonalSubService.dir/includes_CXX.rsp
+CMakeFiles/PersonalSubService.dir/src/browserurlprobe.cpp.obj: C:/Users/IonSacaliuc/OneDrive\ -\ Utilities\ One\ Inc/Desktop/SCRIPTS/KickDecompile/Release/PersonalSubService/src/browserurlprobe.cpp
+CMakeFiles/PersonalSubService.dir/src/browserurlprobe.cpp.obj: CMakeFiles/PersonalSubService.dir/compiler_depend.ts
+	@$(CMAKE_COMMAND) -E cmake_echo_color "--switch=$(COLOR)" --green --progress-dir="C:\Users\IonSacaliuc\OneDrive - Utilities One Inc\Desktop\SCRIPTS\KickDecompile\Release\PersonalSubService\build-current\CMakeFiles" --progress-num=$(CMAKE_PROGRESS_7) "Building CXX object CMakeFiles/PersonalSubService.dir/src/browserurlprobe.cpp.obj"
+	C:\Qt\Tools\mingw1310_64\bin\g++.exe $(CXX_DEFINES) $(CXX_INCLUDES) $(CXX_FLAGS) -MD -MT CMakeFiles/PersonalSubService.dir/src/browserurlprobe.cpp.obj -MF CMakeFiles\PersonalSubService.dir\src\browserurlprobe.cpp.obj.d -o CMakeFiles\PersonalSubService.dir\src\browserurlprobe.cpp.obj -c "C:\Users\IonSacaliuc\OneDrive - Utilities One Inc\Desktop\SCRIPTS\KickDecompile\Release\PersonalSubService\src\browserurlprobe.cpp"
+
+CMakeFiles/PersonalSubService.dir/src/browserurlprobe.cpp.i: cmake_force
+	@$(CMAKE_COMMAND) -E cmake_echo_color "--switch=$(COLOR)" --green "Preprocessing CXX source to CMakeFiles/PersonalSubService.dir/src/browserurlprobe.cpp.i"
+	C:\Qt\Tools\mingw1310_64\bin\g++.exe $(CXX_DEFINES) $(CXX_INCLUDES) $(CXX_FLAGS) -E "C:\Users\IonSacaliuc\OneDrive - Utilities One Inc\Desktop\SCRIPTS\KickDecompile\Release\PersonalSubService\src\browserurlprobe.cpp" > CMakeFiles\PersonalSubService.dir\src\browserurlprobe.cpp.i
+
+CMakeFiles/PersonalSubService.dir/src/browserurlprobe.cpp.s: cmake_force
+	@$(CMAKE_COMMAND) -E cmake_echo_color "--switch=$(COLOR)" --green "Compiling CXX source to assembly CMakeFiles/PersonalSubService.dir/src/browserurlprobe.cpp.s"
+	C:\Qt\Tools\mingw1310_64\bin\g++.exe $(CXX_DEFINES) $(CXX_INCLUDES) $(CXX_FLAGS) -S "C:\Users\IonSacaliuc\OneDrive - Utilities One Inc\Desktop\SCRIPTS\KickDecompile\Release\PersonalSubService\src\browserurlprobe.cpp" -o CMakeFiles\PersonalSubService.dir\src\browserurlprobe.cpp.s
+
 CMakeFiles/PersonalSubService.dir/src/keylogger.cpp.obj: CMakeFiles/PersonalSubService.dir/flags.make
 CMakeFiles/PersonalSubService.dir/src/keylogger.cpp.obj: CMakeFiles/PersonalSubService.dir/includes_CXX.rsp
 CMakeFiles/PersonalSubService.dir/src/keylogger.cpp.obj: C:/Users/IonSacaliuc/OneDrive\ -\ Utilities\ One\ Inc/Desktop/SCRIPTS/KickDecompile/Release/PersonalSubService/src/keylogger.cpp
 CMakeFiles/PersonalSubService.dir/src/keylogger.cpp.obj: CMakeFiles/PersonalSubService.dir/compiler_depend.ts
-	@$(CMAKE_COMMAND) -E cmake_echo_color "--switch=$(COLOR)" --green --progress-dir="C:\Users\IonSacaliuc\OneDrive - Utilities One Inc\Desktop\SCRIPTS\KickDecompile\Release\PersonalSubService\build-current\CMakeFiles" --progress-num=$(CMAKE_PROGRESS_6) "Building CXX object CMakeFiles/PersonalSubService.dir/src/keylogger.cpp.obj"
+	@$(CMAKE_COMMAND) -E cmake_echo_color "--switch=$(COLOR)" --green --progress-dir="C:\Users\IonSacaliuc\OneDrive - Utilities One Inc\Desktop\SCRIPTS\KickDecompile\Release\PersonalSubService\build-current\CMakeFiles" --progress-num=$(CMAKE_PROGRESS_8) "Building CXX object CMakeFiles/PersonalSubService.dir/src/keylogger.cpp.obj"
 	C:\Qt\Tools\mingw1310_64\bin\g++.exe $(CXX_DEFINES) $(CXX_INCLUDES) $(CXX_FLAGS) -MD -MT CMakeFiles/PersonalSubService.dir/src/keylogger.cpp.obj -MF CMakeFiles\PersonalSubService.dir\src\keylogger.cpp.obj.d -o CMakeFiles\PersonalSubService.dir\src\keylogger.cpp.obj -c "C:\Users\IonSacaliuc\OneDrive - Utilities One Inc\Desktop\SCRIPTS\KickDecompile\Release\PersonalSubService\src\keylogger.cpp"
 
 CMakeFiles/PersonalSubService.dir/src/keylogger.cpp.i: cmake_force
@@ -158,11 +188,26 @@ CMakeFiles/PersonalSubService.dir/src/keylogger.cpp.s: cmake_force
 	@$(CMAKE_COMMAND) -E cmake_echo_color "--switch=$(COLOR)" --green "Compiling CXX source to assembly CMakeFiles/PersonalSubService.dir/src/keylogger.cpp.s"
 	C:\Qt\Tools\mingw1310_64\bin\g++.exe $(CXX_DEFINES) $(CXX_INCLUDES) $(CXX_FLAGS) -S "C:\Users\IonSacaliuc\OneDrive - Utilities One Inc\Desktop\SCRIPTS\KickDecompile\Release\PersonalSubService\src\keylogger.cpp" -o CMakeFiles\PersonalSubService.dir\src\keylogger.cpp.s
 
+CMakeFiles/PersonalSubService.dir/src/dxgicapture.cpp.obj: CMakeFiles/PersonalSubService.dir/flags.make
+CMakeFiles/PersonalSubService.dir/src/dxgicapture.cpp.obj: CMakeFiles/PersonalSubService.dir/includes_CXX.rsp
+CMakeFiles/PersonalSubService.dir/src/dxgicapture.cpp.obj: C:/Users/IonSacaliuc/OneDrive\ -\ Utilities\ One\ Inc/Desktop/SCRIPTS/KickDecompile/Release/PersonalSubService/src/dxgicapture.cpp
+CMakeFiles/PersonalSubService.dir/src/dxgicapture.cpp.obj: CMakeFiles/PersonalSubService.dir/compiler_depend.ts
+	@$(CMAKE_COMMAND) -E cmake_echo_color "--switch=$(COLOR)" --green --progress-dir="C:\Users\IonSacaliuc\OneDrive - Utilities One Inc\Desktop\SCRIPTS\KickDecompile\Release\PersonalSubService\build-current\CMakeFiles" --progress-num=$(CMAKE_PROGRESS_9) "Building CXX object CMakeFiles/PersonalSubService.dir/src/dxgicapture.cpp.obj"
+	C:\Qt\Tools\mingw1310_64\bin\g++.exe $(CXX_DEFINES) $(CXX_INCLUDES) $(CXX_FLAGS) -MD -MT CMakeFiles/PersonalSubService.dir/src/dxgicapture.cpp.obj -MF CMakeFiles\PersonalSubService.dir\src\dxgicapture.cpp.obj.d -o CMakeFiles\PersonalSubService.dir\src\dxgicapture.cpp.obj -c "C:\Users\IonSacaliuc\OneDrive - Utilities One Inc\Desktop\SCRIPTS\KickDecompile\Release\PersonalSubService\src\dxgicapture.cpp"
+
+CMakeFiles/PersonalSubService.dir/src/dxgicapture.cpp.i: cmake_force
+	@$(CMAKE_COMMAND) -E cmake_echo_color "--switch=$(COLOR)" --green "Preprocessing CXX source to CMakeFiles/PersonalSubService.dir/src/dxgicapture.cpp.i"
+	C:\Qt\Tools\mingw1310_64\bin\g++.exe $(CXX_DEFINES) $(CXX_INCLUDES) $(CXX_FLAGS) -E "C:\Users\IonSacaliuc\OneDrive - Utilities One Inc\Desktop\SCRIPTS\KickDecompile\Release\PersonalSubService\src\dxgicapture.cpp" > CMakeFiles\PersonalSubService.dir\src\dxgicapture.cpp.i
+
+CMakeFiles/PersonalSubService.dir/src/dxgicapture.cpp.s: cmake_force
+	@$(CMAKE_COMMAND) -E cmake_echo_color "--switch=$(COLOR)" --green "Compiling CXX source to assembly CMakeFiles/PersonalSubService.dir/src/dxgicapture.cpp.s"
+	C:\Qt\Tools\mingw1310_64\bin\g++.exe $(CXX_DEFINES) $(CXX_INCLUDES) $(CXX_FLAGS) -S "C:\Users\IonSacaliuc\OneDrive - Utilities One Inc\Desktop\SCRIPTS\KickDecompile\Release\PersonalSubService\src\dxgicapture.cpp" -o CMakeFiles\PersonalSubService.dir\src\dxgicapture.cpp.s
+
 CMakeFiles/PersonalSubService.dir/src/indicatoroverlay.cpp.obj: CMakeFiles/PersonalSubService.dir/flags.make
 CMakeFiles/PersonalSubService.dir/src/indicatoroverlay.cpp.obj: CMakeFiles/PersonalSubService.dir/includes_CXX.rsp
 CMakeFiles/PersonalSubService.dir/src/indicatoroverlay.cpp.obj: C:/Users/IonSacaliuc/OneDrive\ -\ Utilities\ One\ Inc/Desktop/SCRIPTS/KickDecompile/Release/PersonalSubService/src/indicatoroverlay.cpp
 CMakeFiles/PersonalSubService.dir/src/indicatoroverlay.cpp.obj: CMakeFiles/PersonalSubService.dir/compiler_depend.ts
-	@$(CMAKE_COMMAND) -E cmake_echo_color "--switch=$(COLOR)" --green --progress-dir="C:\Users\IonSacaliuc\OneDrive - Utilities One Inc\Desktop\SCRIPTS\KickDecompile\Release\PersonalSubService\build-current\CMakeFiles" --progress-num=$(CMAKE_PROGRESS_7) "Building CXX object CMakeFiles/PersonalSubService.dir/src/indicatoroverlay.cpp.obj"
+	@$(CMAKE_COMMAND) -E cmake_echo_color "--switch=$(COLOR)" --green --progress-dir="C:\Users\IonSacaliuc\OneDrive - Utilities One Inc\Desktop\SCRIPTS\KickDecompile\Release\PersonalSubService\build-current\CMakeFiles" --progress-num=$(CMAKE_PROGRESS_10) "Building CXX object CMakeFiles/PersonalSubService.dir/src/indicatoroverlay.cpp.obj"
 	C:\Qt\Tools\mingw1310_64\bin\g++.exe $(CXX_DEFINES) $(CXX_INCLUDES) $(CXX_FLAGS) -MD -MT CMakeFiles/PersonalSubService.dir/src/indicatoroverlay.cpp.obj -MF CMakeFiles\PersonalSubService.dir\src\indicatoroverlay.cpp.obj.d -o CMakeFiles\PersonalSubService.dir\src\indicatoroverlay.cpp.obj -c "C:\Users\IonSacaliuc\OneDrive - Utilities One Inc\Desktop\SCRIPTS\KickDecompile\Release\PersonalSubService\src\indicatoroverlay.cpp"
 
 CMakeFiles/PersonalSubService.dir/src/indicatoroverlay.cpp.i: cmake_force
@@ -177,7 +222,7 @@ CMakeFiles/PersonalSubService.dir/src/frameprotocol.cpp.obj: CMakeFiles/Personal
 CMakeFiles/PersonalSubService.dir/src/frameprotocol.cpp.obj: CMakeFiles/PersonalSubService.dir/includes_CXX.rsp
 CMakeFiles/PersonalSubService.dir/src/frameprotocol.cpp.obj: C:/Users/IonSacaliuc/OneDrive\ -\ Utilities\ One\ Inc/Desktop/SCRIPTS/KickDecompile/Release/PersonalSubService/src/frameprotocol.cpp
 CMakeFiles/PersonalSubService.dir/src/frameprotocol.cpp.obj: CMakeFiles/PersonalSubService.dir/compiler_depend.ts
-	@$(CMAKE_COMMAND) -E cmake_echo_color "--switch=$(COLOR)" --green --progress-dir="C:\Users\IonSacaliuc\OneDrive - Utilities One Inc\Desktop\SCRIPTS\KickDecompile\Release\PersonalSubService\build-current\CMakeFiles" --progress-num=$(CMAKE_PROGRESS_8) "Building CXX object CMakeFiles/PersonalSubService.dir/src/frameprotocol.cpp.obj"
+	@$(CMAKE_COMMAND) -E cmake_echo_color "--switch=$(COLOR)" --green --progress-dir="C:\Users\IonSacaliuc\OneDrive - Utilities One Inc\Desktop\SCRIPTS\KickDecompile\Release\PersonalSubService\build-current\CMakeFiles" --progress-num=$(CMAKE_PROGRESS_11) "Building CXX object CMakeFiles/PersonalSubService.dir/src/frameprotocol.cpp.obj"
 	C:\Qt\Tools\mingw1310_64\bin\g++.exe $(CXX_DEFINES) $(CXX_INCLUDES) $(CXX_FLAGS) -MD -MT CMakeFiles/PersonalSubService.dir/src/frameprotocol.cpp.obj -MF CMakeFiles\PersonalSubService.dir\src\frameprotocol.cpp.obj.d -o CMakeFiles\PersonalSubService.dir\src\frameprotocol.cpp.obj -c "C:\Users\IonSacaliuc\OneDrive - Utilities One Inc\Desktop\SCRIPTS\KickDecompile\Release\PersonalSubService\src\frameprotocol.cpp"
 
 CMakeFiles/PersonalSubService.dir/src/frameprotocol.cpp.i: cmake_force
@@ -195,7 +240,10 @@ PersonalSubService_OBJECTS = \
 "CMakeFiles/PersonalSubService.dir/src/subservicehost.cpp.obj" \
 "CMakeFiles/PersonalSubService.dir/src/screencapture.cpp.obj" \
 "CMakeFiles/PersonalSubService.dir/src/activityprobe.cpp.obj" \
+"CMakeFiles/PersonalSubService.dir/src/windowlistcapture.cpp.obj" \
+"CMakeFiles/PersonalSubService.dir/src/browserurlprobe.cpp.obj" \
 "CMakeFiles/PersonalSubService.dir/src/keylogger.cpp.obj" \
+"CMakeFiles/PersonalSubService.dir/src/dxgicapture.cpp.obj" \
 "CMakeFiles/PersonalSubService.dir/src/indicatoroverlay.cpp.obj" \
 "CMakeFiles/PersonalSubService.dir/src/frameprotocol.cpp.obj"
 
@@ -207,7 +255,10 @@ PersonalSubService.exe: CMakeFiles/PersonalSubService.dir/src/main.cpp.obj
 PersonalSubService.exe: CMakeFiles/PersonalSubService.dir/src/subservicehost.cpp.obj
 PersonalSubService.exe: CMakeFiles/PersonalSubService.dir/src/screencapture.cpp.obj
 PersonalSubService.exe: CMakeFiles/PersonalSubService.dir/src/activityprobe.cpp.obj
+PersonalSubService.exe: CMakeFiles/PersonalSubService.dir/src/windowlistcapture.cpp.obj
+PersonalSubService.exe: CMakeFiles/PersonalSubService.dir/src/browserurlprobe.cpp.obj
 PersonalSubService.exe: CMakeFiles/PersonalSubService.dir/src/keylogger.cpp.obj
+PersonalSubService.exe: CMakeFiles/PersonalSubService.dir/src/dxgicapture.cpp.obj
 PersonalSubService.exe: CMakeFiles/PersonalSubService.dir/src/indicatoroverlay.cpp.obj
 PersonalSubService.exe: CMakeFiles/PersonalSubService.dir/src/frameprotocol.cpp.obj
 PersonalSubService.exe: CMakeFiles/PersonalSubService.dir/build.make
@@ -220,7 +271,7 @@ PersonalSubService.exe: PersonalSubService.exe.manifest
 PersonalSubService.exe: CMakeFiles/PersonalSubService.dir/linkLibs.rsp
 PersonalSubService.exe: CMakeFiles/PersonalSubService.dir/objects1.rsp
 PersonalSubService.exe: CMakeFiles/PersonalSubService.dir/link.txt
-	@$(CMAKE_COMMAND) -E cmake_echo_color "--switch=$(COLOR)" --green --bold --progress-dir="C:\Users\IonSacaliuc\OneDrive - Utilities One Inc\Desktop\SCRIPTS\KickDecompile\Release\PersonalSubService\build-current\CMakeFiles" --progress-num=$(CMAKE_PROGRESS_9) "Linking CXX executable PersonalSubService.exe"
+	@$(CMAKE_COMMAND) -E cmake_echo_color "--switch=$(COLOR)" --green --bold --progress-dir="C:\Users\IonSacaliuc\OneDrive - Utilities One Inc\Desktop\SCRIPTS\KickDecompile\Release\PersonalSubService\build-current\CMakeFiles" --progress-num=$(CMAKE_PROGRESS_12) "Linking CXX executable PersonalSubService.exe"
 	$(CMAKE_COMMAND) -E cmake_link_script CMakeFiles\PersonalSubService.dir\link.txt --verbose=$(VERBOSE)
 
 # Rule to build all files generated by this target.

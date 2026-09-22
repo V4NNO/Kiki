@@ -93,6 +93,19 @@ bool HistoryRecorder::start(QString *error)
         "ON app_segments(monitor_stream_id, start_ms)"));
 
     query.exec(QStringLiteral(
+        "CREATE TABLE IF NOT EXISTS web_visits ("
+        "  id INTEGER PRIMARY KEY AUTOINCREMENT,"
+        "  session_id INTEGER NOT NULL,"
+        "  monitor_stream_id INTEGER NOT NULL,"
+        "  url TEXT NOT NULL,"
+        "  start_ms INTEGER NOT NULL,"
+        "  end_ms INTEGER NOT NULL"
+        ")"));
+    query.exec(QStringLiteral(
+        "CREATE INDEX IF NOT EXISTS idx_web_visits_monitor_time "
+        "ON web_visits(monitor_stream_id, start_ms)"));
+
+    query.exec(QStringLiteral(
         "CREATE TABLE IF NOT EXISTS keystrokes ("
         "  id INTEGER PRIMARY KEY AUTOINCREMENT,"
         "  session_id INTEGER NOT NULL,"
@@ -284,6 +297,55 @@ void HistoryRecorder::noteApplication(quint32 sessionId, quint32 monitorStreamId
     m_openSegments[key] = OpenSegment{application, insert.lastInsertId().toLongLong()};
 }
 
+void HistoryRecorder::noteUrl(quint32 sessionId, quint32 monitorStreamId, const QString &url)
+{
+    if (!m_database.isOpen()) {
+        return;
+    }
+    const quint64 key = (static_cast<quint64>(sessionId) << 32) | monitorStreamId;
+    const qint64 now = QDateTime::currentMSecsSinceEpoch();
+    auto it = m_openWebSegments.find(key);
+
+    if (url.isEmpty()) {
+        // Not on a (recognized) browser right now -- just close whatever
+        // was open, if anything. No blank row for "not browsing".
+        if (it != m_openWebSegments.end()) {
+            QSqlQuery update(m_database);
+            update.prepare(QStringLiteral("UPDATE web_visits SET end_ms = ? WHERE id = ?"));
+            update.addBindValue(now);
+            update.addBindValue(it->rowId);
+            update.exec();
+            m_openWebSegments.erase(it);
+        }
+        return;
+    }
+
+    if (it != m_openWebSegments.end() && it->url == url) {
+        QSqlQuery update(m_database);
+        update.prepare(QStringLiteral("UPDATE web_visits SET end_ms = ? WHERE id = ?"));
+        update.addBindValue(now);
+        update.addBindValue(it->rowId);
+        update.exec();
+        return;
+    }
+
+    QSqlQuery insert(m_database);
+    insert.prepare(QStringLiteral(
+        "INSERT INTO web_visits (session_id, monitor_stream_id, url, start_ms, end_ms) "
+        "VALUES (?, ?, ?, ?, ?)"));
+    insert.addBindValue(sessionId);
+    insert.addBindValue(monitorStreamId);
+    insert.addBindValue(url);
+    insert.addBindValue(now);
+    insert.addBindValue(now);
+    if (!insert.exec()) {
+        emit logMessage(
+            QStringLiteral("Nu am putut scrie vizita web: %1").arg(insert.lastError().text()));
+        return;
+    }
+    m_openWebSegments[key] = OpenWebSegment{url, insert.lastInsertId().toLongLong()};
+}
+
 void HistoryRecorder::recordKeystroke(quint32 sessionId, const QString &windowTitle,
                                       const QString &text)
 {
@@ -387,6 +449,43 @@ QList<AppUsage> HistoryRecorder::listRunningApplications(quint32 monitorStreamId
     }
     std::sort(usage.begin(), usage.end(),
              [](const AppUsage &a, const AppUsage &b) { return a.totalMs > b.totalMs; });
+    return usage;
+}
+
+QList<WebVisit> HistoryRecorder::listWebVisits(quint32 monitorStreamId, const QString &day) const
+{
+    if (!m_database.isOpen()) {
+        return {};
+    }
+    QSqlQuery query(m_database);
+    query.prepare(QStringLiteral(
+        "SELECT url, start_ms, end_ms FROM web_visits WHERE monitor_stream_id = ? "
+        "AND strftime('%Y%m%d', start_ms / 1000, 'unixepoch', 'localtime') = ? "
+        "ORDER BY start_ms ASC"));
+    query.addBindValue(monitorStreamId);
+    query.addBindValue(day);
+    QList<WebVisit> visits;
+    if (query.exec()) {
+        while (query.next()) {
+            visits.append(WebVisit{query.value(0).toString(), query.value(1).toLongLong(),
+                                   query.value(2).toLongLong()});
+        }
+    }
+    return visits;
+}
+
+QList<WebUsage> HistoryRecorder::listWebPages(quint32 monitorStreamId, const QString &day) const
+{
+    QHash<QString, qint64> totals;
+    for (const WebVisit &visit : listWebVisits(monitorStreamId, day)) {
+        totals[visit.url] += qMax<qint64>(0, visit.endMs - visit.startMs);
+    }
+    QList<WebUsage> usage;
+    for (auto it = totals.cbegin(); it != totals.cend(); ++it) {
+        usage.append(WebUsage{it.key(), it.value()});
+    }
+    std::sort(usage.begin(), usage.end(),
+             [](const WebUsage &a, const WebUsage &b) { return a.totalMs > b.totalMs; });
     return usage;
 }
 
