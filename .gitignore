@@ -9,3 +9,9 @@ ghidra-work/
 
 # Istoric local PersonalHost (Faza 2) - capturi si baza SQLite, nu se comite
 GrabberHistory/
+
+# Unelte locale si fisiere extrase (prea multe iteme pentru repo)
+/tools/
+/EXE/InstalledGrabberFolder/
+/Src/Viewer_SRC/qml_real/
+/Src/Grabber_SRC/extracted_qml/

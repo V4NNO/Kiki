@@ -1,9 +1,11 @@
 #pragma once
 
+#include <QHash>
 #include <QWidget>
 
 #include <QList>
 
+struct HistoryAppUsage;
 class ViewerConnection;
 class MonitorWidget;
 class QLabel;
@@ -77,7 +79,11 @@ protected:
 
 private:
     void refreshStats();
-    void rebuildUsageSection(QVBoxLayout *sectionLayout, const QList<QPair<QString, qint64>> &entries,
+    // entries carry the category straight from the server (HistoryAppUsage)
+    // as a fallback, but m_categories (kept in sync with the SAME
+    // setAppCategory/requestCategories calls HistoryView uses) always wins
+    // once the user has changed something -- see EfficiencyCategoryButton.
+    void rebuildUsageSection(QVBoxLayout *sectionLayout, const QList<HistoryAppUsage> &entries,
                              const QString &emptyText, int maxRows);
     void resizeMonitorsToFit();
     void switchSubTab(QWidget *page, QPushButton *activeButton);
@@ -109,9 +115,20 @@ private:
     QList<MonitorWidget *> m_currentWindowPreviews;
 
     QTextEdit *m_keyloggerLog = nullptr;
+    // Compact live keylog line under the video on Monitors/Programs --
+    // matches the real viewer's Windows.qml, which has this same ticker
+    // (`keylogger` BorderImage) under both those tabs, separate from the
+    // full log on the Keylogger tab. Hidden while the Keylogger tab itself
+    // is open (see switchSubTab).
+    QLabel *m_keylogTicker = nullptr;
+    QWidget *m_keyloggerPage = nullptr;
 
     QLabel *m_idleBanner = nullptr;
     QVBoxLayout *m_webPagesLayout = nullptr;
     QVBoxLayout *m_programsLayout = nullptr;
     QTimer *m_refreshTimer = nullptr;
+    // Same category map HistoryView keeps (same server-side
+    // requestCategories/setAppCategory calls, keyed by streamId not day) --
+    // shared so category edits made here show up in History and vice versa.
+    QHash<QString, QString> m_categories;
 };

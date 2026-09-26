@@ -19,6 +19,8 @@ qt_add_executable(PersonalScreenViewer WIN32
     src/devicetilewidget.h
     src/devicedetailview.cpp
     src/devicedetailview.h
+    src/efficiencycategorybutton.cpp
+    src/efficiencycategorybutton.h
     src/historyview.cpp
     src/historyview.h
     src/viewerconnection.cpp

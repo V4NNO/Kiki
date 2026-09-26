@@ -9,6 +9,7 @@
 
 class QCheckBox;
 class QDialog;
+class QFrame;
 class QGridLayout;
 class QLabel;
 class QLineEdit;
@@ -39,6 +40,10 @@ private slots:
     void connectOrDisconnect();
     void startDemo();
     void showSettings();
+    // Real Settings dialog (matches the real viewer's Settings.qml:
+    // Language / Font scale / Tooltips) -- distinct from showSettings()
+    // above, which is actually our connection config.
+    void showPreferences();
     void showAbout();
     void updateStatus(const QString &text, bool connected);
     void setAgentIdentity(const QString &agentName, const QString &sessionName);
@@ -61,6 +66,13 @@ private slots:
     void addNewTab();
     void closeTab(int index);
     void openAddDeviceDialog();
+    // "Grids" subbar button -- matches the real Kickidler viewer's
+    // TrackerGridsPanel.qml (a slide-out panel of preset quadrator layouts,
+    // drag-and-drop of departments onto grid cells). We have no department/
+    // drag-drop model to draw from, so this is scoped down to what's
+    // actually useful here: picking a fixed column count for the current
+    // tab instead of the width-derived default (see TrackerTab::columnsOverride).
+    void openGridsPanel();
     void openDeviceDetail(quint32 sessionKey);
     void closeDeviceDetail();
     void pruneStaleWindowStreams();
@@ -70,14 +82,41 @@ private:
     void applyStyle();
     void clearMonitors();
     void relayoutCurrentTab();
+    // Column count for the current tracker grid width -- matches the real
+    // Kickidler viewer's TrackerGridsPanel (extracted QML: `property int
+    // columns: layoutIsVertical ? 3 : 4`, then grown via
+    // `Math.max(columns, quadrator.gridBestColumns)` to use extra width),
+    // floored at 4, no upper clamp.
+    int columnsForCurrentWidth() const;
+    // columnsForCurrentWidth(), unless the current tab has a fixed column
+    // count picked via the Grids panel (TrackerTab::columnsOverride).
+    int effectiveColumns() const;
     void loadSettings();
     void saveSettings() const;
     QString deviceDisplayName(quint32 sessionKey) const;
+    // Pushes the current device ("employee") grouping to HistoryView -- see
+    // HistoryView::setDevices.
+    void refreshHistoryDevices();
+    // Tells every tile (across all tabs) of this device which streams it
+    // can show via its video selector -- see DeviceTileWidget::setAvailableStreams.
+    void refreshTileStreamsForDevice(quint32 deviceKey);
 
 protected:
     void resizeEvent(QResizeEvent *event) override;
+    // Swallows QEvent::ToolTip application-wide when m_tooltipsEnabled is
+    // false -- the real, working effect behind the Preferences dialog's
+    // "Tooltips" checkbox (Settings.qml's Settings.Tooltips).
+    bool eventFilter(QObject *watched, QEvent *event) override;
 
     ViewerConnection m_connection;
+    // Preferences (Settings.qml equivalent): font scale multiplies the base
+    // 9pt stylesheet font size (see applyStyle()); language sets QLocale's
+    // default, which affects date/time formatting app-wide (we have no
+    // translation files, so it doesn't retranslate UI strings -- a full
+    // i18n setup is out of scope here); tooltips is enforced via eventFilter().
+    double m_fontScale = 1.0;
+    QString m_language = QStringLiteral("ro");
+    bool m_tooltipsEnabled = true;
     QLineEdit *m_hostEdit = nullptr;
     QSpinBox *m_portSpin = nullptr;
     QLineEdit *m_tokenEdit = nullptr;
@@ -105,7 +144,17 @@ protected:
     QHash<quint32, QString> m_deviceUsernames; // key: deviceKey
     QHash<quint32, quint32> m_devicePrimaryStream; // key: deviceKey -> first-seen streamId
     QHash<quint32, QList<quint32>> m_deviceMonitorStreams; // key: deviceKey
-    QHash<quint32, DeviceTileWidget *> m_deviceTiles; // key: deviceKey, only for devices in the current tab
+    // Reverse lookup for updateFrame() to find which device (and so which
+    // tiles) a given streamId belongs to, for the tile video selector --
+    // covers both monitor and window streams.
+    QHash<quint32, quint32> m_streamDeviceKey; // key: streamId -> deviceKey
+    // Keyed by tileId (NOT deviceKey) -- the same device can now be added to
+    // a tab more than once (each add gets its own tile instance), so a
+    // device-keyed cache can't tell two occurrences of the same device
+    // apart. Tiles for every tab are kept here (hidden/unparented while
+    // their tab isn't current), same lazy-reuse behavior as before.
+    QHash<quint32, DeviceTileWidget *> m_deviceTiles; // key: tileId
+    quint32 m_nextTileId = 1;
     // A device's WindowListCapture live-preview streams, one per open
     // window on that machine -- not counted among its "monitors"
     // (m_deviceMonitorStreams), just their own MonitorWidgets (still owned
@@ -123,8 +172,14 @@ protected:
     quint32 m_openDeviceKey = 0;
 
     struct TrackerTab {
+        struct TileEntry {
+            quint32 tileId;
+            quint32 deviceKey;
+        };
         QString title;
-        QList<quint32> deviceKeys;
+        QList<TileEntry> tiles;
+        // 0 = auto (columnsForCurrentWidth()); set via the Grids panel.
+        int columnsOverride = 0;
     };
     QList<TrackerTab> m_tabs;
     int m_currentTabIndex = 0;
@@ -133,6 +188,12 @@ protected:
 
     QStackedWidget *m_contentStack = nullptr;
     QWidget *m_trackerPage = nullptr;
+    // The Grids/Filters/Demo/Snapshot + tab bar row -- Tracker-only (the
+    // real Kickidler History/DeviceDetail pages don't have it at all), but
+    // it used to be a MainWindow-level widget shown regardless of which
+    // page was active. Now toggled in showTrackerPage/showHistoryPage/
+    // openDeviceDetail/closeDeviceDetail.
+    QFrame *m_subbar = nullptr;
     HistoryView *m_historyView = nullptr;
     DeviceDetailView *m_deviceDetailView = nullptr;
     QPushButton *m_trackerNavButton = nullptr;

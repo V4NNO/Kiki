@@ -5,8 +5,12 @@
 #include "historyview.h"
 #include "monitorwidget.h"
 
+#include <QApplication>
 #include <QCheckBox>
+#include <QComboBox>
+#include <QCursor>
 #include <QDateTime>
+#include <QEvent>
 #include <QDialog>
 #include <QDialogButtonBox>
 #include <QDir>
@@ -19,6 +23,7 @@
 #include <QLabel>
 #include <QLineEdit>
 #include <QListWidget>
+#include <QLocale>
 #include <QMessageBox>
 #include <QMenu>
 #include <QMouseEvent>
@@ -38,6 +43,15 @@
 #include <QVBoxLayout>
 
 #include <algorithm>
+
+namespace {
+// The real Kickidler viewer's own limit, confirmed from its extracted QML
+// (ConstJs.qml): `var maxEmployeeCellsPerTrackerTab = 25;` -- a flat count,
+// not columns*rows. Past this, the "+" tile just shows a "limit reached"
+// tooltip and does nothing (see AddDeviceTileWidget::setLimitReached) --
+// it does not auto-open a new tab.
+constexpr int kMaxTilesPerTab = 25;
+}
 
 namespace {
 class FullScreenFrame final : public QWidget
@@ -92,6 +106,8 @@ MainWindow::MainWindow(QWidget *parent)
     buildInterface();
     applyStyle();
     loadSettings();
+    applyStyle(); // re-apply now that loadSettings() may have set m_fontScale
+    qApp->installEventFilter(this);
 
     connect(&m_connection, &ViewerConnection::statusChanged,
             this, &MainWindow::updateStatus);
@@ -144,6 +160,58 @@ void MainWindow::showSettings()
     m_settingsDialog->show();
     m_settingsDialog->raise();
     m_settingsDialog->activateWindow();
+}
+
+void MainWindow::showPreferences()
+{
+    auto *dialog = new QDialog(this);
+    dialog->setWindowTitle(QStringLiteral("Settings"));
+    dialog->setAttribute(Qt::WA_DeleteOnClose);
+    dialog->setMinimumWidth(360);
+    auto *layout = new QVBoxLayout(dialog);
+    auto *form = new QFormLayout;
+
+    auto *languageCombo = new QComboBox(dialog);
+    languageCombo->addItem(QStringLiteral("Romana"), QStringLiteral("ro"));
+    languageCombo->addItem(QStringLiteral("English"), QStringLiteral("en"));
+    languageCombo->setCurrentIndex(languageCombo->findData(m_language));
+    form->addRow(QStringLiteral("Language:"), languageCombo);
+
+    auto *fontScaleSpin = new QSpinBox(dialog);
+    fontScaleSpin->setRange(75, 150);
+    fontScaleSpin->setSuffix(QStringLiteral("%"));
+    fontScaleSpin->setSingleStep(5);
+    fontScaleSpin->setValue(qRound(m_fontScale * 100.0));
+    form->addRow(QStringLiteral("Font scale:"), fontScaleSpin);
+
+    auto *tooltipsCheck = new QCheckBox(QStringLiteral("Afiseaza tooltip-uri"), dialog);
+    tooltipsCheck->setChecked(m_tooltipsEnabled);
+    form->addRow(QString(), tooltipsCheck);
+
+    layout->addLayout(form);
+    auto *buttons = new QDialogButtonBox(QDialogButtonBox::Ok | QDialogButtonBox::Cancel, dialog);
+    connect(buttons, &QDialogButtonBox::rejected, dialog, &QDialog::close);
+    connect(buttons, &QDialogButtonBox::accepted, this,
+            [this, dialog, languageCombo, fontScaleSpin, tooltipsCheck]() {
+                m_language = languageCombo->currentData().toString();
+                QLocale::setDefault(QLocale(m_language == QStringLiteral("en") ? QLocale::English
+                                                                                : QLocale::Romanian));
+                m_fontScale = fontScaleSpin->value() / 100.0;
+                m_tooltipsEnabled = tooltipsCheck->isChecked();
+                applyStyle();
+                saveSettings();
+                dialog->close();
+            });
+    layout->addWidget(buttons);
+    dialog->show();
+}
+
+bool MainWindow::eventFilter(QObject *watched, QEvent *event)
+{
+    if (!m_tooltipsEnabled && event->type() == QEvent::ToolTip) {
+        return true; // swallow -- matches Settings.qml's Tooltips toggle
+    }
+    return QMainWindow::eventFilter(watched, event);
 }
 
 void MainWindow::showAbout()
@@ -203,16 +271,20 @@ void MainWindow::addMonitor(quint32 streamId, const QString &name, const QSize &
         m_deviceUsernames.insert(deviceKey, sessionUsername);
     }
 
+    m_streamDeviceKey.insert(streamId, deviceKey);
+
     if (isWindow) {
         // WindowListCapture's live preview for one open window -- not one
         // of the device's monitors (doesn't count for tile
         // thumbnail/primary-stream selection, doesn't get stacked on the
         // Monitors sub-tab); remembered separately for DeviceDetailView's
         // Programs sub-tab, pruned by m_windowStreamPruneTimer once its
-        // window closes.
+        // window closes. Also offered as the tile video selector's "W"
+        // (active window) option -- see refreshTileStreamsForDevice().
         m_deviceWindowStreams[deviceKey].append(streamId);
         m_windowStreamIds.insert(streamId);
         m_windowStreamLastFrameMs.insert(streamId, QDateTime::currentMSecsSinceEpoch());
+        refreshTileStreamsForDevice(deviceKey);
         return;
     }
 
@@ -223,13 +295,27 @@ void MainWindow::addMonitor(quint32 streamId, const QString &name, const QSize &
     }
     m_deviceMonitorStreams[deviceKey].append(streamId);
 
-    if (DeviceTileWidget *tile = m_deviceTiles.value(deviceKey, nullptr)) {
-        tile->setDisplayName(deviceDisplayName(deviceKey));
+    for (DeviceTileWidget *tile : std::as_const(m_deviceTiles)) {
+        if (tile->sessionKey() == deviceKey) {
+            tile->setDisplayName(deviceDisplayName(deviceKey));
+        }
     }
+    refreshTileStreamsForDevice(deviceKey);
 
-    m_historyView->setMonitors(m_monitorNames);
+    refreshHistoryDevices();
     if (m_selectedStream == 0) {
         selectMonitor(streamId);
+    }
+}
+
+void MainWindow::refreshTileStreamsForDevice(quint32 deviceKey)
+{
+    const QList<quint32> monitorStreams = m_deviceMonitorStreams.value(deviceKey);
+    const quint32 windowStream = m_deviceWindowStreams.value(deviceKey).value(0, 0);
+    for (DeviceTileWidget *tile : std::as_const(m_deviceTiles)) {
+        if (tile->sessionKey() == deviceKey) {
+            tile->setAvailableStreams(monitorStreams, windowStream);
+        }
     }
 }
 
@@ -246,15 +332,16 @@ void MainWindow::updateFrame(quint32 streamId, const QImage &image,
         m_windowStreamLastFrameMs.insert(streamId, QDateTime::currentMSecsSinceEpoch());
     }
 
-    // Feed the device tile's live thumbnail only from that device's primary
-    // (first-discovered) monitor -- a tile shows one representative image,
-    // not every monitor.
-    for (auto it = m_devicePrimaryStream.cbegin(); it != m_devicePrimaryStream.cend(); ++it) {
-        if (it.value() == streamId) {
-            if (DeviceTileWidget *tile = m_deviceTiles.value(it.key(), nullptr)) {
-                tile->updateThumbnail(image);
+    // Feed every tile of this stream's device -- each tile caches every
+    // stream it could show (see DeviceTileWidget::updateThumbnail) and only
+    // repaints if the updated stream happens to be the one it's currently
+    // displaying via its video selector.
+    const quint32 deviceKey = m_streamDeviceKey.value(streamId, 0);
+    if (deviceKey != 0) {
+        for (DeviceTileWidget *tile : std::as_const(m_deviceTiles)) {
+            if (tile->sessionKey() == deviceKey) {
+                tile->updateThumbnail(streamId, image);
             }
-            break;
         }
     }
 }
@@ -321,10 +408,12 @@ void MainWindow::showTrackerPage()
     style()->polish(m_historyNavButton);
     m_deviceDetailView->deactivate();
     m_contentStack->setCurrentWidget(m_trackerPage);
+    m_subbar->show();
 }
 
 void MainWindow::showHistoryPage()
 {
+    m_subbar->hide();
     m_historyNavButton->setObjectName(QStringLiteral("navActive"));
     m_trackerNavButton->setObjectName(QStringLiteral("navButton"));
     style()->unpolish(m_historyNavButton);
@@ -366,9 +455,54 @@ void MainWindow::closeTab(int index)
     relayoutCurrentTab();
 }
 
+void MainWindow::openGridsPanel()
+{
+    auto *menu = new QMenu(this);
+    menu->setAttribute(Qt::WA_DeleteOnClose);
+    const int current = m_tabs.isEmpty() ? 0 : m_tabs[m_currentTabIndex].columnsOverride;
+
+    auto *autoAction = menu->addAction(QStringLiteral("Auto (dupa latimea ferestrei)"));
+    autoAction->setCheckable(true);
+    autoAction->setChecked(current == 0);
+    connect(autoAction, &QAction::triggered, this, [this]() {
+        if (!m_tabs.isEmpty()) {
+            m_tabs[m_currentTabIndex].columnsOverride = 0;
+            relayoutCurrentTab();
+        }
+    });
+    menu->addSeparator();
+
+    for (int columns = 2; columns <= 6; ++columns) {
+        QAction *action = menu->addAction(QStringLiteral("%1 coloane").arg(columns));
+        action->setCheckable(true);
+        action->setChecked(current == columns);
+        connect(action, &QAction::triggered, this, [this, columns]() {
+            if (!m_tabs.isEmpty()) {
+                m_tabs[m_currentTabIndex].columnsOverride = columns;
+                relayoutCurrentTab();
+            }
+        });
+    }
+
+    auto *sender = qobject_cast<QWidget *>(this->sender());
+    const QPoint popupPos = sender ? sender->mapToGlobal(QPoint(0, sender->height())) : QCursor::pos();
+    menu->popup(popupPos);
+}
+
 void MainWindow::openAddDeviceDialog()
 {
-    TrackerTab &tab = m_tabs[m_currentTabIndex];
+    // A device can be added to a tab more than once (e.g. to watch two of
+    // its monitors side by side), so the list below is never filtered by
+    // what's already in the tab. The tab's total tile count is capped at
+    // kMaxTilesPerTab (matches the real Kickidler viewer); relayoutCurrentTab
+    // already disables the "+" tile itself once that's hit, so this is just
+    // a defensive second guard (e.g. against a stray call).
+    if (!m_tabs.isEmpty() && m_tabs[m_currentTabIndex].tiles.size() >= kMaxTilesPerTab) {
+        statusBar()->showMessage(
+            QStringLiteral("Limita de device-uri pe acest tab a fost atinsa (25)."), 4000);
+        return;
+    }
+
     auto *dialog = new QDialog(this);
     dialog->setAttribute(Qt::WA_DeleteOnClose);
     dialog->setWindowTitle(QStringLiteral("Adauga device"));
@@ -380,9 +514,6 @@ void MainWindow::openAddDeviceDialog()
     auto *list = new QListWidget(dialog);
     for (auto it = m_devicePrimaryStream.cbegin(); it != m_devicePrimaryStream.cend(); ++it) {
         const quint32 deviceKey = it.key();
-        if (tab.deviceKeys.contains(deviceKey)) {
-            continue;
-        }
         list->addItem(deviceDisplayName(deviceKey));
         availableKeys.append(QString::number(deviceKey));
     }
@@ -407,9 +538,7 @@ void MainWindow::openAddDeviceDialog()
                 }
                 const quint32 deviceKey = availableKeys.at(row).toUInt();
                 TrackerTab &currentTab = m_tabs[m_currentTabIndex];
-                if (!currentTab.deviceKeys.contains(deviceKey)) {
-                    currentTab.deviceKeys.append(deviceKey);
-                }
+                currentTab.tiles.append({m_nextTileId++, deviceKey});
                 relayoutCurrentTab();
                 dialog->close();
             });
@@ -440,12 +569,14 @@ void MainWindow::openDeviceDetail(quint32 sessionKey)
                                    windowPreviews);
     m_contentStack->setCurrentWidget(m_deviceDetailView);
     m_deviceDetailView->activate();
+    m_subbar->hide();
 }
 
 void MainWindow::closeDeviceDetail()
 {
     m_deviceDetailView->deactivate();
     m_contentStack->setCurrentWidget(m_trackerPage);
+    m_subbar->show();
     m_openDeviceKey = 0;
 }
 
@@ -513,7 +644,13 @@ void MainWindow::buildInterface()
     menuButton->setFixedSize(44, 42);
     menuButton->setPopupMode(QToolButton::InstantPopup);
     auto *menu = new QMenu(menuButton);
-    QAction *settingsAction = menu->addAction(QStringLiteral("Settings"));
+    // Real Kickidler viewer's hamburger menu has "Settings" open a
+    // Language/Font scale/Tooltips dialog (Settings.qml) -- our app also
+    // needs a host/port/token to even connect, a concept the original
+    // (cloud-account based) doesn't have, so that gets its own clearly
+    // labeled "Connection..." entry instead of overloading "Settings".
+    QAction *preferencesAction = menu->addAction(QStringLiteral("Settings"));
+    QAction *connectionAction = menu->addAction(QStringLiteral("Connection..."));
     QAction *clearAction = menu->addAction(QStringLiteral("Delete local cache on Viewer restart"));
     menu->addSeparator();
     QAction *basicAction = menu->addAction(QStringLiteral("Basic version"));
@@ -522,7 +659,8 @@ void MainWindow::buildInterface()
     QAction *aboutAction = menu->addAction(QStringLiteral("About the program"));
     QAction *exitAction = menu->addAction(QStringLiteral("Exit"));
     menuButton->setMenu(menu);
-    connect(settingsAction, &QAction::triggered, this, &MainWindow::showSettings);
+    connect(preferencesAction, &QAction::triggered, this, &MainWindow::showPreferences);
+    connect(connectionAction, &QAction::triggered, this, &MainWindow::showSettings);
     connect(clearAction, &QAction::triggered, this, [] { QSettings().clear(); });
     connect(aboutAction, &QAction::triggered, this, &MainWindow::showAbout);
     connect(exitAction, &QAction::triggered, this, &QWidget::close);
@@ -563,7 +701,8 @@ void MainWindow::buildInterface()
     headerLayout->addWidget(fullScreenButton);
     rootLayout->addWidget(header);
 
-    auto *subbar = new QFrame(root);
+    m_subbar = new QFrame(root);
+    QFrame *subbar = m_subbar;
     subbar->setObjectName(QStringLiteral("subbar"));
     subbar->setFixedHeight(40);
     auto *subLayout = new QHBoxLayout(subbar);
@@ -571,6 +710,7 @@ void MainWindow::buildInterface()
     subLayout->setSpacing(8);
     auto *grids = new QPushButton(QStringLiteral("▦  Grids"), subbar);
     grids->setObjectName(QStringLiteral("flatButton"));
+    connect(grids, &QPushButton::clicked, this, &MainWindow::openGridsPanel);
     auto *filters = new QPushButton(QStringLiteral("ⓘ  Filters"), subbar);
     filters->setObjectName(QStringLiteral("flatButton"));
     auto *demoButton = new QPushButton(QStringLiteral("▶  Demo"), subbar);
@@ -680,8 +820,14 @@ void MainWindow::buildInterface()
 
 void MainWindow::applyStyle()
 {
+    // Font scale (Preferences dialog) multiplies just this base size --
+    // the various explicit pt sizes below (brand/nav/menu icons) stay fixed
+    // for visual consistency, a scoped simplification of Settings.qml's
+    // Fonts.scale (which scales a whole font-metrics system, not a single
+    // CSS rule).
+    const int baseFontPt = qMax(6, qRound(9 * m_fontScale));
     setStyleSheet(QStringLiteral(R"(
-        QMainWindow, QWidget { background: #30323a; color: #e7eaed; font-family: "Segoe UI"; font-size: 9pt; }
+        QMainWindow, QWidget { background: #30323a; color: #e7eaed; font-family: "Segoe UI"; font-size: %1pt; }
         QFrame#header { background: #1da06f; border: none; }
         QFrame#subbar { background: #292c33; border-bottom: 1px solid #17191e; }
         QLabel#brand { background: #199466; color: white; padding-left: 18px; font-size: 14pt; font-weight: 700; }
@@ -719,7 +865,7 @@ void MainWindow::applyStyle()
         QStatusBar { background: #272a30; color: #f2a4a4; min-height: 18px; }
         QLabel#historyPreview { background: #05080f; border: 1px solid #4b4e57; }
         QLabel#historyTime { font-weight: 700; padding: 0 8px; }
-    )"));
+    )").arg(baseFontPt));
 }
 
 void MainWindow::clearMonitors()
@@ -731,6 +877,7 @@ void MainWindow::clearMonitors()
     m_devicePrimaryStream.clear();
     m_deviceMonitorStreams.clear();
     m_deviceWindowStreams.clear();
+    m_streamDeviceKey.clear();
     m_windowStreamIds.clear();
     m_windowStreamLastFrameMs.clear();
     qDeleteAll(m_deviceTiles);
@@ -739,7 +886,7 @@ void MainWindow::clearMonitors()
         monitor->deleteLater();
     }
     for (TrackerTab &tab : m_tabs) {
-        tab.deviceKeys.clear();
+        tab.tiles.clear();
     }
     m_selectedStream = 0;
     m_snapshotButton->setEnabled(false);
@@ -748,7 +895,31 @@ void MainWindow::clearMonitors()
         closeDeviceDetail();
     }
     relayoutCurrentTab();
-    m_historyView->setMonitors(m_monitorNames);
+    refreshHistoryDevices();
+}
+
+void MainWindow::refreshHistoryDevices()
+{
+    QHash<quint32, QString> deviceNames;
+    for (auto it = m_devicePrimaryStream.cbegin(); it != m_devicePrimaryStream.cend(); ++it) {
+        deviceNames.insert(it.key(), deviceDisplayName(it.key()));
+    }
+    m_historyView->setDevices(deviceNames, m_deviceMonitorStreams, m_monitorNames);
+}
+
+int MainWindow::columnsForCurrentWidth() const
+{
+    const int availableWidth = qMax(300, m_monitorContainer ? m_monitorContainer->width() : width());
+    return qMax(4, availableWidth / 315);
+}
+
+int MainWindow::effectiveColumns() const
+{
+    if (m_tabs.isEmpty()) {
+        return columnsForCurrentWidth();
+    }
+    const int overrideColumns = m_tabs[m_currentTabIndex].columnsOverride;
+    return overrideColumns > 0 ? overrideColumns : columnsForCurrentWidth();
 }
 
 void MainWindow::relayoutCurrentTab()
@@ -769,19 +940,22 @@ void MainWindow::relayoutCurrentTab()
         return;
     }
     const TrackerTab &tab = m_tabs[m_currentTabIndex];
-    const int availableWidth = qMax(300, m_monitorContainer ? m_monitorContainer->width() : width());
-    const int columns = qMax(1, availableWidth / 315);
+    const int columns = effectiveColumns();
 
     int index = 0;
-    for (quint32 deviceKey : tab.deviceKeys) {
-        DeviceTileWidget *tile = m_deviceTiles.value(deviceKey, nullptr);
+    for (const TrackerTab::TileEntry &entry : tab.tiles) {
+        DeviceTileWidget *tile = m_deviceTiles.value(entry.tileId, nullptr);
         if (!tile) {
-            tile = new DeviceTileWidget(deviceKey, deviceDisplayName(deviceKey), m_monitorContainer);
+            tile = new DeviceTileWidget(entry.deviceKey, deviceDisplayName(entry.deviceKey),
+                                        m_monitorContainer);
             connect(tile, &DeviceTileWidget::opened, this, &MainWindow::openDeviceDetail);
-            m_deviceTiles.insert(deviceKey, tile);
-            const quint32 primary = m_devicePrimaryStream.value(deviceKey, 0);
-            if (MonitorWidget *primaryMonitor = m_monitors.value(primary, nullptr)) {
-                tile->updateThumbnail(primaryMonitor->currentFrame());
+            m_deviceTiles.insert(entry.tileId, tile);
+            tile->setAvailableStreams(m_deviceMonitorStreams.value(entry.deviceKey),
+                                      m_deviceWindowStreams.value(entry.deviceKey).value(0, 0));
+            for (quint32 monitorStream : m_deviceMonitorStreams.value(entry.deviceKey)) {
+                if (MonitorWidget *monitor = m_monitors.value(monitorStream, nullptr)) {
+                    tile->updateThumbnail(monitorStream, monitor->currentFrame());
+                }
             }
         }
         tile->setParent(m_monitorContainer);
@@ -792,10 +966,14 @@ void MainWindow::relayoutCurrentTab()
 
     // Trailing "+" tile(s): a full placeholder grid when the tab is empty
     // (matches the reference UI's empty-tab state), otherwise just one
-    // trailing add-tile after the real devices.
-    const int addTileCount = tab.deviceKeys.isEmpty() ? qMax(4, columns * 2) : 1;
+    // trailing add-tile after the real devices -- dimmed with a "limit
+    // reached" tooltip once the tab hits kMaxTilesPerTab (see
+    // AddDeviceTileWidget::setLimitReached).
+    const bool limitReached = tab.tiles.size() >= kMaxTilesPerTab;
+    const int addTileCount = tab.tiles.isEmpty() ? qMax(4, columns * 2) : 1;
     for (int i = 0; i < addTileCount; ++i) {
         auto *addTile = new AddDeviceTileWidget(m_monitorContainer);
+        addTile->setLimitReached(limitReached);
         connect(addTile, &AddDeviceTileWidget::addRequested, this, &MainWindow::openAddDeviceDialog);
         m_monitorGrid->addWidget(addTile, index / columns, index % columns);
         ++index;
@@ -816,6 +994,12 @@ void MainWindow::loadSettings()
     m_portSpin->setValue(settings.value(QStringLiteral("connection/port"), 45870).toInt());
     m_tlsCheck->setChecked(settings.value(QStringLiteral("connection/tls"), true).toBool());
     m_fingerprintEdit->setText(settings.value(QStringLiteral("connection/fingerprint")).toString());
+
+    m_language = settings.value(QStringLiteral("preferences/language"), QStringLiteral("ro")).toString();
+    QLocale::setDefault(
+        QLocale(m_language == QStringLiteral("en") ? QLocale::English : QLocale::Romanian));
+    m_fontScale = settings.value(QStringLiteral("preferences/fontScale"), 1.0).toDouble();
+    m_tooltipsEnabled = settings.value(QStringLiteral("preferences/tooltipsEnabled"), true).toBool();
 }
 
 void MainWindow::saveSettings() const
@@ -825,4 +1009,8 @@ void MainWindow::saveSettings() const
     settings.setValue(QStringLiteral("connection/port"), m_portSpin->value());
     settings.setValue(QStringLiteral("connection/tls"), m_tlsCheck->isChecked());
     settings.setValue(QStringLiteral("connection/fingerprint"), m_fingerprintEdit->text());
+
+    settings.setValue(QStringLiteral("preferences/language"), m_language);
+    settings.setValue(QStringLiteral("preferences/fontScale"), m_fontScale);
+    settings.setValue(QStringLiteral("preferences/tooltipsEnabled"), m_tooltipsEnabled);
 }

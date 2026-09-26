@@ -1,5 +1,6 @@
 #include "devicedetailview.h"
 
+#include "efficiencycategorybutton.h"
 #include "monitorwidget.h"
 #include "viewerconnection.h"
 
@@ -165,6 +166,7 @@ DeviceDetailView::DeviceDetailView(ViewerConnection &connection, QWidget *parent
     m_leftStack->addWidget(programsPage);
 
     auto *keyloggerPage = new QWidget(m_leftStack);
+    m_keyloggerPage = keyloggerPage;
     auto *keyloggerLayout = new QVBoxLayout(keyloggerPage);
     keyloggerLayout->setContentsMargins(10, 10, 10, 10);
     m_keyloggerLog = new QTextEdit(keyloggerPage);
@@ -199,7 +201,21 @@ DeviceDetailView::DeviceDetailView(ViewerConnection &connection, QWidget *parent
     auto *contentLayout = new QHBoxLayout(content);
     contentLayout->setContentsMargins(0, 0, 0, 0);
     contentLayout->setSpacing(0);
-    contentLayout->addWidget(m_leftStack, 1);
+
+    // Matches the real viewer's Windows.qml: a compact keylog ticker sits
+    // directly under the video on both Monitors and Programs (hidden for
+    // Keylogger, which already shows the full log) -- not just History.
+    auto *leftColumn = new QWidget(content);
+    auto *leftColumnLayout = new QVBoxLayout(leftColumn);
+    leftColumnLayout->setContentsMargins(0, 0, 0, 0);
+    leftColumnLayout->setSpacing(2);
+    leftColumnLayout->addWidget(m_leftStack, 1);
+    m_keylogTicker = new QLabel(leftColumn);
+    m_keylogTicker->setFixedHeight(24);
+    m_keylogTicker->setAlignment(Qt::AlignCenter);
+    m_keylogTicker->setStyleSheet(QStringLiteral("color: #9fa5ae; background: #24272e;"));
+    leftColumnLayout->addWidget(m_keylogTicker);
+    contentLayout->addWidget(leftColumn, 1);
 
     auto *statsPanel = new QWidget(content);
     statsPanel->setFixedWidth(300);
@@ -241,11 +257,7 @@ DeviceDetailView::DeviceDetailView(ViewerConnection &connection, QWidget *parent
                 if (streamId != m_primaryStreamId) {
                     return;
                 }
-                QList<QPair<QString, qint64>> entries;
-                for (const HistoryAppUsage &usage : applications) {
-                    entries.append({usage.application, usage.totalMs});
-                }
-                rebuildUsageSection(m_programsLayout, entries,
+                rebuildUsageSection(m_programsLayout, applications,
                                    QStringLiteral("Fara date inca astazi."), 8);
             });
     connect(&m_connection, &ViewerConnection::historyWebPagesReceived, this,
@@ -254,12 +266,15 @@ DeviceDetailView::DeviceDetailView(ViewerConnection &connection, QWidget *parent
                 if (streamId != m_primaryStreamId) {
                     return;
                 }
-                QList<QPair<QString, qint64>> entries;
-                for (const HistoryAppUsage &usage : pages) {
-                    entries.append({usage.application, usage.totalMs});
-                }
-                rebuildUsageSection(m_webPagesLayout, entries,
+                rebuildUsageSection(m_webPagesLayout, pages,
                                    QStringLiteral("Fara navigare inca astazi."), 8);
+            });
+    connect(&m_connection, &ViewerConnection::historyCategoriesReceived, this,
+            [this](quint32 streamId, const QHash<QString, QString> &categories) {
+                if (streamId != m_primaryStreamId) {
+                    return;
+                }
+                m_categories = categories;
             });
     connect(&m_connection, &ViewerConnection::historyKeystrokesReceived, this,
             [this](quint32 streamId, const QString &day, const QList<HistoryKeystrokeEntry> &entries) {
@@ -276,6 +291,8 @@ DeviceDetailView::DeviceDetailView(ViewerConnection &connection, QWidget *parent
                                      entry.windowTitle.toHtmlEscaped(), entry.text.toHtmlEscaped());
                 }
                 m_keyloggerLog->setHtml(html);
+                m_keylogTicker->setText(entries.isEmpty() ? QString()
+                                                          : entries.last().text.left(200));
             });
 
     m_refreshTimer = new QTimer(this);
@@ -286,6 +303,12 @@ DeviceDetailView::DeviceDetailView(ViewerConnection &connection, QWidget *parent
 void DeviceDetailView::switchSubTab(QWidget *page, QPushButton *activeButton)
 {
     m_leftStack->setCurrentWidget(page);
+    // m_keylogTicker doesn't exist yet the first time this runs (called
+    // from the constructor, before the content/stats-panel section below
+    // creates it) -- guard instead of reordering construction.
+    if (m_keylogTicker) {
+        m_keylogTicker->setVisible(page != m_keyloggerPage);
+    }
     // A hidden QStackedWidget page's children don't necessarily get a real
     // layout pass (container width can stay stale/zero) until the page is
     // actually made current -- same reasoning as the deferred call in
@@ -407,10 +430,11 @@ void DeviceDetailView::refreshStats()
     m_connection.requestRunningApplications(m_primaryStreamId, today);
     m_connection.requestWebPages(m_primaryStreamId, today);
     m_connection.requestKeystrokes(m_primaryStreamId, today);
+    m_connection.requestCategories(m_primaryStreamId);
 }
 
 void DeviceDetailView::rebuildUsageSection(QVBoxLayout *sectionLayout,
-                                           const QList<QPair<QString, qint64>> &entries,
+                                           const QList<HistoryAppUsage> &entries,
                                            const QString &emptyText, int maxRows)
 {
     QLayoutItem *item = nullptr;
@@ -425,17 +449,37 @@ void DeviceDetailView::rebuildUsageSection(QVBoxLayout *sectionLayout,
         return;
     }
     qint64 totalMs = 0;
-    for (const auto &entry : entries) {
-        totalMs += entry.second;
+    for (const HistoryAppUsage &entry : entries) {
+        totalMs += entry.totalMs;
     }
+    const quint32 streamId = m_primaryStreamId;
     int shown = 0;
-    for (const auto &entry : entries) {
+    for (const HistoryAppUsage &entry : entries) {
         if (shown++ >= maxRows) {
             break;
         }
-        const double fraction = totalMs > 0 ? static_cast<double>(entry.second) / totalMs : 0.0;
-        auto *row = new UsagePercentRow(entry.first, formatDuration(entry.second), fraction,
-                                        sectionLayout->parentWidget());
-        sectionLayout->addWidget(row);
+        const double fraction = totalMs > 0 ? static_cast<double>(entry.totalMs) / totalMs : 0.0;
+
+        auto *rowContainer = new QWidget(sectionLayout->parentWidget());
+        auto *rowLayout = new QHBoxLayout(rowContainer);
+        rowLayout->setContentsMargins(0, 0, 0, 0);
+        rowLayout->setSpacing(4);
+
+        auto *row = new UsagePercentRow(entry.application, formatDuration(entry.totalMs), fraction,
+                                        rowContainer);
+        rowLayout->addWidget(row, 1);
+
+        const QString initialCategory = m_categories.value(
+            entry.application, entry.category.isEmpty() ? QStringLiteral("none") : entry.category);
+        auto *categoryButton = new EfficiencyCategoryButton(initialCategory, rowContainer);
+        const QString application = entry.application;
+        connect(categoryButton, &EfficiencyCategoryButton::categoryChanged, this,
+                [this, streamId, application](const QString &newCategory) {
+                    m_categories[application] = newCategory;
+                    m_connection.setAppCategory(streamId, application, newCategory);
+                });
+        rowLayout->addWidget(categoryButton, 0, Qt::AlignTop);
+
+        sectionLayout->addWidget(rowContainer);
     }
 }
