@@ -9,15 +9,28 @@ IndicatorOverlay::IndicatorOverlay(QWidget *parent)
 {
     setAttribute(Qt::WA_ShowWithoutActivating);
     setAttribute(Qt::WA_TranslucentBackground, false);
-    setFixedHeight(30);
-    setStyleSheet(QStringLiteral("background-color: #b91c1c;"));
+    // Click-through: this banner is deliberately impossible to close or
+    // hide (see the class comment) so the monitored user always knows
+    // they're being recorded, but it used to also EAT every mouse click
+    // in its 30px strip along the very top of the screen -- exactly where
+    // a maximized window's own close/minimize buttons live, making them
+    // unclickable. Letting clicks fall through to whatever's underneath
+    // keeps the banner visible without blocking normal window management.
+    setAttribute(Qt::WA_TransparentForMouseEvents);
+    // A small pill sized to the text, not a full-width strip -- the full
+    // width used to sit across the top of every window underneath it,
+    // getting in the way even where there was no text, not just over the
+    // close/minimize buttons (the click-through fix above) but visually.
+    setFixedHeight(28);
+    setStyleSheet(QStringLiteral("background-color: #b91c1c; border-bottom-left-radius: 6px; "
+                                 "border-bottom-right-radius: 6px;"));
 
     m_label = new QLabel(this);
     m_label->setStyleSheet(QStringLiteral("color: white; font-weight: 600; font-size: 13px;"));
     m_label->setAlignment(Qt::AlignCenter);
 
     auto *layout = new QHBoxLayout(this);
-    layout->setContentsMargins(12, 0, 12, 0);
+    layout->setContentsMargins(14, 0, 14, 0);
     layout->addWidget(m_label);
 
     connect(&m_blinkTimer, &QTimer::timeout, this, [this] {
@@ -44,6 +57,10 @@ void IndicatorOverlay::updateText()
               .arg(dot)
               .arg(m_viewerCount)
         : QStringLiteral("%1 AGENT ACTIV — asteapta conexiuni").arg(dot));
+    // Text length changes (idle vs "N viewers"), so the pill's width has
+    // to be recomputed every time, not just once at startup.
+    adjustSize();
+    reposition();
 }
 
 void IndicatorOverlay::reposition()
@@ -53,7 +70,11 @@ void IndicatorOverlay::reposition()
         return;
     }
     const QRect geometry = screen->geometry();
-    setGeometry(geometry.x(), geometry.y(), geometry.width(), height());
+    // Centered pill flush against the top edge, sized to fit the text --
+    // not a strip spanning the full screen width (see the constructor).
+    const int pillWidth = qMax(width(), sizeHint().width());
+    const int x = geometry.x() + (geometry.width() - pillWidth) / 2;
+    setGeometry(x, geometry.y(), pillWidth, height());
 }
 
 void IndicatorOverlay::showEvent(QShowEvent *event)

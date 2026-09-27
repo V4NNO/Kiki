@@ -4,10 +4,18 @@
 #include "monitorwidget.h"
 #include "viewerconnection.h"
 
+#include <QAbstractItemView>
+#include <QCheckBox>
+#include <QComboBox>
 #include <QDate>
 #include <QDateTime>
+#include <QEvent>
 #include <QHBoxLayout>
+#include <QHeaderView>
+#include <QInputDialog>
 #include <QLabel>
+#include <QLineEdit>
+#include <QMouseEvent>
 #include <QPainter>
 #include <QPushButton>
 #include <QResizeEvent>
@@ -15,7 +23,7 @@
 #include <QSizePolicy>
 #include <QStackedWidget>
 #include <QStyle>
-#include <QTextEdit>
+#include <QTableWidget>
 #include <QTimer>
 #include <QVBoxLayout>
 
@@ -99,6 +107,68 @@ QSize UsagePercentRow::sizeHint() const
     return QSize(260, 44);
 }
 
+TriLineWidget::TriLineWidget(QWidget *parent) : QWidget(parent)
+{
+    setFixedHeight(28);
+}
+
+void TriLineWidget::setFractions(double productive, double neutral, double unproductive, double none)
+{
+    m_productive = qBound(0.0, productive, 1.0);
+    m_neutral = qBound(0.0, neutral, 1.0);
+    m_unproductive = qBound(0.0, unproductive, 1.0);
+    m_none = qBound(0.0, none, 1.0);
+    update();
+}
+
+void TriLineWidget::paintEvent(QPaintEvent *event)
+{
+    Q_UNUSED(event)
+    QPainter painter(this);
+    const QRect barRect(0, 16, width(), 8);
+    painter.setPen(Qt::NoPen);
+    painter.setBrush(QColor(0x3e, 0x40, 0x49));
+    painter.drawRoundedRect(barRect, 3, 3);
+
+    const double total = m_productive + m_neutral + m_unproductive + m_none;
+    if (total <= 0.0) {
+        painter.setPen(QColor(0x6f, 0x74, 0x7d));
+        painter.setFont(QFont(QStringLiteral("Segoe UI"), 8));
+        painter.drawText(rect(), Qt::AlignLeft | Qt::AlignTop, QStringLiteral("Fara date inca astazi."));
+        return;
+    }
+
+    int x = barRect.x();
+    const struct { double fraction; QColor color; } segments[] = {
+        {m_productive, EfficiencyCategoryButton::color(QStringLiteral("productive"))},
+        {m_neutral, EfficiencyCategoryButton::color(QStringLiteral("neutral"))},
+        {m_unproductive, EfficiencyCategoryButton::color(QStringLiteral("unproductive"))},
+        {m_none, EfficiencyCategoryButton::color(QStringLiteral("none"))},
+    };
+    for (const auto &segment : segments) {
+        if (segment.fraction <= 0.0) {
+            continue;
+        }
+        const int segmentWidth = qMax(1, static_cast<int>(barRect.width() * segment.fraction));
+        painter.setBrush(segment.color);
+        painter.drawRect(QRect(x, barRect.y(), segmentWidth, barRect.height()));
+        x += segmentWidth;
+    }
+
+    painter.setPen(QColor(0xc9, 0xcd, 0xd3));
+    painter.setFont(QFont(QStringLiteral("Segoe UI"), 8));
+    painter.drawText(QRect(0, 0, width(), 14), Qt::AlignLeft | Qt::AlignTop,
+                     QStringLiteral("Productiv %1%  ·  Neutru %2%  ·  Neproductiv %3%")
+                         .arg(m_productive * 100.0, 0, 'f', 0)
+                         .arg(m_neutral * 100.0, 0, 'f', 0)
+                         .arg(m_unproductive * 100.0, 0, 'f', 0));
+}
+
+QSize TriLineWidget::sizeHint() const
+{
+    return QSize(260, 28);
+}
+
 DeviceDetailView::DeviceDetailView(ViewerConnection &connection, QWidget *parent)
     : QWidget(parent), m_connection(connection)
 {
@@ -115,9 +185,43 @@ DeviceDetailView::DeviceDetailView(ViewerConnection &connection, QWidget *parent
     connect(backButton, &QPushButton::clicked, this, &DeviceDetailView::backRequested);
     m_nameLabel = new QLabel(headerRow);
     m_nameLabel->setStyleSheet(QStringLiteral("font-size: 12pt; font-weight: 700; padding-left: 10px;"));
+    m_nameLabel->setToolTip(QStringLiteral("Dublu-click pentru a redenumi (doar local, in Viewer)"));
+    m_nameLabel->installEventFilter(this); // catches the double-click, see eventFilter()
     headerLayout->addWidget(backButton);
     headerLayout->addWidget(m_nameLabel);
+
+    // SessionPicker.qml equivalent -- see the member comment in the header
+    // for why this is a single disabled entry rather than a real picker.
+    m_sessionPicker = new QComboBox(headerRow);
+    m_sessionPicker->setFixedWidth(160);
+    m_sessionPicker->addItem(QStringLiteral("Sesiune principala"));
+    m_sessionPicker->setEnabled(false);
+    m_sessionPicker->setToolTip(
+        QStringLiteral("O singura sesiune per device -- grabber-ul nu raporteaza inca "
+                       "mai multe sesiuni simultane ale aceluiasi angajat."));
+    headerLayout->addSpacing(10);
+    headerLayout->addWidget(m_sessionPicker);
     headerLayout->addStretch();
+
+    m_goToHistoryButton = new QPushButton(QStringLiteral("Go to History"), headerRow);
+    m_goToHistoryButton->setObjectName(QStringLiteral("flatButton"));
+    connect(m_goToHistoryButton, &QPushButton::clicked, this, [this]() {
+        emit goToHistoryRequested(m_sessionKey);
+    });
+    headerLayout->addWidget(m_goToHistoryButton);
+
+    // StatusUser.qml equivalent -- moved here from the stats panel (see the
+    // member comment). ViolationsTimer.qml equivalent sits right next to it
+    // in the real header too, hence the pairing here.
+    m_statusUserLabel = new QLabel(headerRow);
+    m_statusUserLabel->setStyleSheet(QStringLiteral("color: #f2a4a4; padding: 0 8px; font-weight: 600;"));
+    m_statusUserLabel->hide();
+    headerLayout->addWidget(m_statusUserLabel);
+    m_violationsTimerLabel = new QLabel(QStringLiteral("Violari: —"), headerRow);
+    m_violationsTimerLabel->setStyleSheet(QStringLiteral("color: #6f747d; padding: 0 8px;"));
+    m_violationsTimerLabel->setToolTip(
+        QStringLiteral("Nu exista un motor de violari/reguli in grabber inca."));
+    headerLayout->addWidget(m_violationsTimerLabel);
     root->addWidget(headerRow);
 
     // Left content area: Programs / Monitors / Keylogger each swap what's
@@ -165,13 +269,44 @@ DeviceDetailView::DeviceDetailView(ViewerConnection &connection, QWidget *parent
     programsPageLayout->addWidget(windowsScroll);
     m_leftStack->addWidget(programsPage);
 
+    // keylogger/Toolbar.qml + keylogger/Table.qml equivalent. The real
+    // toolbar also has Web pages/Programs/Both scope buttons and an
+    // export -- both already exist as-is in HistoryView (this page is the
+    // *live, today-only* keylogger, History's is the full historical one),
+    // so they're not duplicated here.
     auto *keyloggerPage = new QWidget(m_leftStack);
     m_keyloggerPage = keyloggerPage;
     auto *keyloggerLayout = new QVBoxLayout(keyloggerPage);
     keyloggerLayout->setContentsMargins(10, 10, 10, 10);
-    m_keyloggerLog = new QTextEdit(keyloggerPage);
-    m_keyloggerLog->setReadOnly(true);
-    keyloggerLayout->addWidget(m_keyloggerLog);
+    keyloggerLayout->setSpacing(6);
+
+    auto *keyloggerToolbar = new QWidget(keyloggerPage);
+    auto *keyloggerToolbarLayout = new QHBoxLayout(keyloggerToolbar);
+    keyloggerToolbarLayout->setContentsMargins(0, 0, 0, 0);
+    m_keyloggerSearch = new QLineEdit(keyloggerToolbar);
+    m_keyloggerSearch->setPlaceholderText(QStringLiteral("Cauta in fereastra sau text..."));
+    connect(m_keyloggerSearch, &QLineEdit::textChanged, this, &DeviceDetailView::filterKeyloggerTable);
+    keyloggerToolbarLayout->addWidget(m_keyloggerSearch, 1);
+    auto *hideSystemKeysCheck = new QCheckBox(QStringLiteral("Hide system keys"), keyloggerToolbar);
+    // Inert: PersonalHost's keylogger doesn't tag which characters are
+    // control/system keys vs. printable text (see keylogger.cpp) -- there's
+    // nothing to filter by yet, so this stays visible but has no effect
+    // until that tagging exists.
+    hideSystemKeysCheck->setEnabled(false);
+    hideSystemKeysCheck->setToolTip(
+        QStringLiteral("Grabber-ul nu marcheaza inca ce taste sunt \"de sistem\"."));
+    keyloggerToolbarLayout->addWidget(hideSystemKeysCheck);
+    keyloggerLayout->addWidget(keyloggerToolbar);
+
+    m_keyloggerTable = new QTableWidget(0, 4, keyloggerPage);
+    m_keyloggerTable->setHorizontalHeaderLabels(
+        {QStringLiteral("Date"), QStringLiteral("Pressing period"), QStringLiteral("Window"),
+         QStringLiteral("Keystrokes")});
+    m_keyloggerTable->horizontalHeader()->setStretchLastSection(true);
+    m_keyloggerTable->verticalHeader()->hide();
+    m_keyloggerTable->setEditTriggers(QAbstractItemView::NoEditTriggers);
+    m_keyloggerTable->setSelectionBehavior(QAbstractItemView::SelectRows);
+    keyloggerLayout->addWidget(m_keyloggerTable, 1);
     m_leftStack->addWidget(keyloggerPage);
 
     auto *subNav = new QWidget(this);
@@ -224,11 +359,10 @@ DeviceDetailView::DeviceDetailView(ViewerConnection &connection, QWidget *parent
     statsLayout->setContentsMargins(12, 12, 12, 12);
     statsLayout->setSpacing(14);
 
-    m_idleBanner = new QLabel(statsPanel);
-    m_idleBanner->setStyleSheet(QStringLiteral(
-        "background: #4a2020; color: #f2a4a4; padding: 8px; border-radius: 4px; font-weight: 600;"));
-    m_idleBanner->hide();
-    statsLayout->addWidget(m_idleBanner);
+    // SessionInfo.qml's TriLine equivalent -- aggregate today's Programs +
+    // Web pages split by efficiency category, above the two lists below.
+    m_triLine = new TriLineWidget(statsPanel);
+    statsLayout->addWidget(m_triLine);
 
     m_webPagesLayout = buildUsageSection(statsPanel, statsLayout, QStringLiteral("Web pages"));
     m_programsLayout = buildUsageSection(statsPanel, statsLayout, QStringLiteral("Programs"));
@@ -243,12 +377,12 @@ DeviceDetailView::DeviceDetailView(ViewerConnection &connection, QWidget *parent
                     return;
                 }
                 if (idleText.isEmpty()) {
-                    m_idleBanner->hide();
+                    m_statusUserLabel->hide();
                 } else {
                     const QString suffix = idleText.startsWith(QStringLiteral("Idle "))
                         ? idleText.mid(5) : idleText;
-                    m_idleBanner->setText(QStringLiteral("Not active: %1").arg(suffix));
-                    m_idleBanner->show();
+                    m_statusUserLabel->setText(QStringLiteral("● Not active: %1").arg(suffix));
+                    m_statusUserLabel->show();
                 }
             });
     connect(&m_connection, &ViewerConnection::historyRunningApplicationsReceived, this,
@@ -257,8 +391,10 @@ DeviceDetailView::DeviceDetailView(ViewerConnection &connection, QWidget *parent
                 if (streamId != m_primaryStreamId) {
                     return;
                 }
+                m_lastPrograms = applications;
                 rebuildUsageSection(m_programsLayout, applications,
                                    QStringLiteral("Fara date inca astazi."), 8);
+                refreshTriLine();
             });
     connect(&m_connection, &ViewerConnection::historyWebPagesReceived, this,
             [this](quint32 streamId, const QString &day, const QList<HistoryAppUsage> &pages) {
@@ -266,8 +402,10 @@ DeviceDetailView::DeviceDetailView(ViewerConnection &connection, QWidget *parent
                 if (streamId != m_primaryStreamId) {
                     return;
                 }
+                m_lastWebPages = pages;
                 rebuildUsageSection(m_webPagesLayout, pages,
                                    QStringLiteral("Fara navigare inca astazi."), 8);
+                refreshTriLine();
             });
     connect(&m_connection, &ViewerConnection::historyCategoriesReceived, this,
             [this](quint32 streamId, const QHash<QString, QString> &categories) {
@@ -275,6 +413,7 @@ DeviceDetailView::DeviceDetailView(ViewerConnection &connection, QWidget *parent
                     return;
                 }
                 m_categories = categories;
+                refreshTriLine();
             });
     connect(&m_connection, &ViewerConnection::historyKeystrokesReceived, this,
             [this](quint32 streamId, const QString &day, const QList<HistoryKeystrokeEntry> &entries) {
@@ -282,17 +421,17 @@ DeviceDetailView::DeviceDetailView(ViewerConnection &connection, QWidget *parent
                 if (streamId != m_primaryStreamId) {
                     return;
                 }
-                QString html;
-                for (const HistoryKeystrokeEntry &entry : entries) {
-                    html += QStringLiteral("<div><span style='color:#888'>%1</span> "
-                                           "<span style='color:#5b8def'>[%2]</span> %3</div>")
-                                .arg(QDateTime::fromMSecsSinceEpoch(entry.timestampMs)
-                                         .toString(QStringLiteral("HH:mm:ss")),
-                                     entry.windowTitle.toHtmlEscaped(), entry.text.toHtmlEscaped());
-                }
-                m_keyloggerLog->setHtml(html);
-                m_keylogTicker->setText(entries.isEmpty() ? QString()
-                                                          : entries.last().text.left(200));
+                m_keystrokeEntries = entries;
+                m_keystrokesLoaded = true;
+                rebuildKeyloggerTable();
+                // utils/Keystream.qml's two distinct messages: "disabled"
+                // isn't a state PersonalHost reports (there's no per-device
+                // keylogger on/off flag in the protocol -- it's always on),
+                // so the only real distinction left is "no data yet" vs.
+                // "server confirmed nothing today".
+                m_keylogTicker->setText(
+                    entries.isEmpty() ? QStringLiteral("Keylogger nu a inregistrat nimic azi.")
+                                      : entries.last().text.left(200));
             });
 
     m_refreshTimer = new QTimer(this);
@@ -355,9 +494,21 @@ void DeviceDetailView::showDevice(quint32 sessionKey, const QString &displayName
     // layout pass.
     QTimer::singleShot(0, this, &DeviceDetailView::resizeMonitorsToFit);
 
-    m_idleBanner->hide();
+    m_statusUserLabel->hide();
+    m_keystrokeEntries.clear();
+    m_keystrokesLoaded = false;
+    rebuildKeyloggerTable();
+    m_keylogTicker->setText(QStringLiteral("Se incarca..."));
+    m_lastPrograms.clear();
+    m_lastWebPages.clear();
+    m_triLine->setFractions(0, 0, 0, 0);
     switchSubTab(m_leftStack->widget(0), m_monitorsTabButton);
     refreshStats();
+}
+
+void DeviceDetailView::setDisplayName(const QString &displayName)
+{
+    m_nameLabel->setText(displayName);
 }
 
 void DeviceDetailView::resizeEvent(QResizeEvent *event)
@@ -482,4 +633,120 @@ void DeviceDetailView::rebuildUsageSection(QVBoxLayout *sectionLayout,
 
         sectionLayout->addWidget(rowContainer);
     }
+}
+
+void DeviceDetailView::refreshTriLine()
+{
+    qint64 productiveMs = 0;
+    qint64 neutralMs = 0;
+    qint64 unproductiveMs = 0;
+    qint64 noneMs = 0;
+    qint64 totalMs = 0;
+    for (const QList<HistoryAppUsage> *list : {&m_lastPrograms, &m_lastWebPages}) {
+        for (const HistoryAppUsage &entry : *list) {
+            const QString category = m_categories.value(
+                entry.application, entry.category.isEmpty() ? QStringLiteral("none") : entry.category);
+            totalMs += entry.totalMs;
+            if (category == QStringLiteral("productive")) {
+                productiveMs += entry.totalMs;
+            } else if (category == QStringLiteral("unproductive")) {
+                unproductiveMs += entry.totalMs;
+            } else if (category == QStringLiteral("neutral")) {
+                neutralMs += entry.totalMs;
+            } else {
+                noneMs += entry.totalMs;
+            }
+        }
+    }
+    if (totalMs <= 0) {
+        m_triLine->setFractions(0, 0, 0, 0);
+        return;
+    }
+    m_triLine->setFractions(static_cast<double>(productiveMs) / totalMs,
+                           static_cast<double>(neutralMs) / totalMs,
+                           static_cast<double>(unproductiveMs) / totalMs,
+                           static_cast<double>(noneMs) / totalMs);
+}
+
+void DeviceDetailView::rebuildKeyloggerTable()
+{
+    // Groups consecutive keystrokes in the same window into one row (same
+    // "Pressing period" grouping HistoryView's keylogger export table
+    // uses), a >2 minute gap starts a new row even for the same window.
+    m_keyloggerTable->setRowCount(0);
+    if (!m_keystrokesLoaded) {
+        m_keyloggerTable->setRowCount(1);
+        auto *loading = new QTableWidgetItem(QStringLiteral("Se incarca..."));
+        loading->setFlags(loading->flags() & ~Qt::ItemIsEditable);
+        m_keyloggerTable->setItem(0, 0, loading);
+        m_keyloggerTable->setSpan(0, 0, 1, 4);
+        return;
+    }
+    if (m_keystrokeEntries.isEmpty()) {
+        m_keyloggerTable->setRowCount(1);
+        auto *empty = new QTableWidgetItem(QStringLiteral("Keylogger nu a inregistrat nimic azi."));
+        empty->setFlags(empty->flags() & ~Qt::ItemIsEditable);
+        m_keyloggerTable->setItem(0, 0, empty);
+        m_keyloggerTable->setSpan(0, 0, 1, 4);
+        return;
+    }
+
+    constexpr qint64 kGroupGapMs = 2 * 60 * 1000;
+    struct Group { qint64 startMs; qint64 endMs; QString windowTitle; QString text; };
+    QList<Group> groups;
+    for (const HistoryKeystrokeEntry &entry : std::as_const(m_keystrokeEntries)) {
+        if (!groups.isEmpty() && groups.last().windowTitle == entry.windowTitle
+            && entry.timestampMs - groups.last().endMs <= kGroupGapMs) {
+            groups.last().endMs = entry.timestampMs;
+            groups.last().text += entry.text;
+        } else {
+            groups.append({entry.timestampMs, entry.timestampMs, entry.windowTitle, entry.text});
+        }
+    }
+
+    m_keyloggerTable->setRowCount(groups.size());
+    for (int row = 0; row < groups.size(); ++row) {
+        const Group &group = groups.at(row);
+        const QDateTime start = QDateTime::fromMSecsSinceEpoch(group.startMs);
+        const QDateTime end = QDateTime::fromMSecsSinceEpoch(group.endMs);
+        auto *dateItem = new QTableWidgetItem(start.toString(QStringLiteral("dd.MM.yyyy")));
+        auto *periodItem = new QTableWidgetItem(QStringLiteral("%1 - %2").arg(
+            start.toString(QStringLiteral("HH:mm:ss")), end.toString(QStringLiteral("HH:mm:ss"))));
+        auto *windowItem = new QTableWidgetItem(group.windowTitle);
+        auto *textItem = new QTableWidgetItem(group.text);
+        for (QTableWidgetItem *item : {dateItem, periodItem, windowItem, textItem}) {
+            item->setFlags(item->flags() & ~Qt::ItemIsEditable);
+        }
+        m_keyloggerTable->setItem(row, 0, dateItem);
+        m_keyloggerTable->setItem(row, 1, periodItem);
+        m_keyloggerTable->setItem(row, 2, windowItem);
+        m_keyloggerTable->setItem(row, 3, textItem);
+    }
+    filterKeyloggerTable();
+}
+
+void DeviceDetailView::filterKeyloggerTable()
+{
+    const QString needle = m_keyloggerSearch ? m_keyloggerSearch->text().trimmed() : QString();
+    for (int row = 0; row < m_keyloggerTable->rowCount(); ++row) {
+        if (needle.isEmpty()) {
+            m_keyloggerTable->setRowHidden(row, false);
+            continue;
+        }
+        const QTableWidgetItem *windowItem = m_keyloggerTable->item(row, 2);
+        const QTableWidgetItem *textItem = m_keyloggerTable->item(row, 3);
+        const bool matches =
+            (windowItem && windowItem->text().contains(needle, Qt::CaseInsensitive))
+            || (textItem && textItem->text().contains(needle, Qt::CaseInsensitive));
+        m_keyloggerTable->setRowHidden(row, !matches);
+    }
+}
+
+bool DeviceDetailView::eventFilter(QObject *watched, QEvent *event)
+{
+    if (watched == m_nameLabel && event->type() == QEvent::MouseButtonDblClick) {
+        emit renameRequested(m_sessionKey, m_nameLabel->text());
+        return true;
+    }
+    return QWidget::eventFilter(watched, event);
 }

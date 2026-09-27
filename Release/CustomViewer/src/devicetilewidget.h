@@ -8,6 +8,7 @@
 class QHBoxLayout;
 class QToolButton;
 class QTimer;
+class QVariantAnimation;
 
 // A single tile in the Tracker grid representing one DEVICE/session, not
 // one per monitor (see MainWindow's per-session grouping). Shows a live
@@ -37,6 +38,13 @@ public:
     // WindowListCapture active-window preview stream, or 0 if it doesn't
     // have one (yet).
     void setAvailableStreams(const QList<quint32> &monitorStreamIds, quint32 windowStreamId);
+    // StatusIcon.qml equivalent -- PersonalHost's WTS session state
+    // ("active"/"connected"/"disconnected"/"idle"/"other", see
+    // sessionmanager.cpp's wtsStateToString). The real viewer distinguishes
+    // more states (locked screen, screensaver, "video watch disabled",
+    // removed employee) that PersonalHost doesn't report yet -- those all
+    // still fall back to the generic "connecting" placeholder here.
+    void setSessionState(const QString &state);
 
 signals:
     void opened(quint32 sessionKey);
@@ -63,12 +71,20 @@ private:
     bool m_autoRotate = false;
     int m_autoRotateIndex = 0;
     QTimer *m_autoRotateTimer = nullptr;
+    QString m_sessionState;
 
     QWidget *m_selectorBar = nullptr;
     QHBoxLayout *m_selectorLayout = nullptr;
     QList<QToolButton *> m_monitorButtons;
     QToolButton *m_windowButton = nullptr;
     QToolButton *m_autoButton = nullptr;
+    // VideoSelector.qml's ~750ms eased highlight transition when the
+    // selected stream changes -- we fade the newly-active button's
+    // background in rather than snapping it, everything else still snaps
+    // (a full crossfade of the video itself would need double-buffering the
+    // thumbnail, out of scope for this pass).
+    QVariantAnimation *m_selectorHighlightAnim = nullptr;
+    QToolButton *m_animatingButton = nullptr;
 };
 
 // The "+" tile that lets the user add a device to the current tab. Matches

@@ -7,6 +7,7 @@
 #include <QWidget>
 
 class QComboBox;
+class QDialog;
 class QHBoxLayout;
 class QLabel;
 class QListWidget;
@@ -155,6 +156,7 @@ class TimeAxisWidget final : public QWidget
 public:
     explicit TimeAxisWidget(QWidget *parent = nullptr);
     void setRange(qint64 rangeStartMs, qint64 rangeEndMs);
+    void setCurrentPositionMs(qint64 positionMs);
 
 protected:
     void paintEvent(QPaintEvent *event) override;
@@ -163,6 +165,7 @@ protected:
 private:
     qint64 m_rangeStart = 0;
     qint64 m_rangeEnd = 0;
+    qint64 m_currentPositionMs = 0;
 };
 
 // The full embedded History page (replaces what used to be a separate
@@ -191,6 +194,11 @@ public:
     // Called whenever this page becomes the visible one; (re)kicks off the
     // device->days->frame request chain if nothing is loaded yet.
     void activate();
+    // filters/GoToHistoryDialog.qml equivalent, called from
+    // DeviceDetailView's "Go to History" button (via MainWindow): switches
+    // to this device and jumps straight to the given day ("yyyyMMdd",
+    // defaults to today) once its day list arrives.
+    void openForDevice(quint32 deviceKey, const QString &day = QString());
 
 private slots:
     void onDaysReceived(quint32 streamId, const QStringList &days);
@@ -281,8 +289,22 @@ private:
     QPushButton *m_changeSettingsButton = nullptr;
     QPushButton *m_playButton = nullptr;
     QComboBox *m_speedCombo = nullptr;
+    // Audio.qml: only visible at Time step = 1s in the real app (finer
+    // steps are the only ones granular enough for audio to make sense
+    // alongside). Always disabled here regardless -- no audio capture
+    // exists anywhere in this project (PersonalHost/PersonalSubService).
+    QPushButton *m_muteButton = nullptr;
     TimelineWidget *m_timeline = nullptr;
     QLabel *m_statusLabel = nullptr;
+    // utils/LoadingStatusDialog.qml equivalent -- a small floating popup
+    // ("Downloading...") instead of just the status label text below the
+    // video, shown while the initial days/frames request for a device or
+    // day is in flight. m_statusLabel is kept too (it also carries
+    // non-loading messages like "no history yet"), this is additive.
+    QDialog *m_loadingDialog = nullptr;
+    QLabel *m_loadingLabel = nullptr;
+    void showLoadingDialog(const QString &message);
+    void hideLoadingDialog();
 
     // "Violation panel": the Activity + Efficiency bars, wrapped together so
     // they can be hidden/shown as one unit (see onToggleViolationPanel).
@@ -305,6 +327,10 @@ private:
     QHash<quint32, QList<quint32>> m_deviceMonitorStreams; // deviceKey -> its monitor streamIds
     QHash<quint32, QString> m_monitorNames; // streamId -> its own display name
     quint32 m_currentDeviceKey = 0;
+    // Set by openForDevice(), consumed by onDaysReceived() once the day
+    // list for the target device actually arrives (switchDevice() clears
+    // and re-requests it, so the jump can't happen synchronously).
+    QString m_pendingJumpDay;
 
     // "Period" (Change settings dialog): filters which of m_allDays show up
     // in m_dayCombo, client-side -- there's no ranged day-list query in the
@@ -334,6 +360,11 @@ private:
         quint32 streamId = 0;
         QList<qint64> pending;
         int total = 0;
+        // VideoSaverSelector.qml's quality picker -- we still write PNGs
+        // (no video encoder here, see m_exportVideoButton), but quality
+        // isn't purely cosmetic: it scales the exported image resolution
+        // (100/75/50%), same trade-off the real quality picker makes.
+        int qualityPercent = 100;
     };
     VideoExportState m_videoExport;
     void exportNextVideoFrame();

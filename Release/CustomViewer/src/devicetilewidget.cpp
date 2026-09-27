@@ -5,6 +5,7 @@
 #include <QPainter>
 #include <QTimer>
 #include <QToolButton>
+#include <QVariantAnimation>
 
 namespace {
 // Real TrackerQuadratorFullCell.qml header is `height: 16` with the video
@@ -13,6 +14,8 @@ namespace {
 // (16px was too cramped to stay clickable), but same single-row layout.
 constexpr int kHeaderHeight = 20;
 constexpr int kAutoRotateIntervalMs = 4000;
+// VideoSelector.qml's transition duration for the active-button highlight.
+constexpr int kSelectorHighlightMs = 750;
 
 QString selectorButtonStyle(bool active)
 {
@@ -21,6 +24,31 @@ QString selectorButtonStyle(bool active)
                   : QStringLiteral("QToolButton { background: #55575f; color: #d7dadd; border: none; "
                                    "font-size: 8pt; }"
                                    "QToolButton:hover { background: #63656d; }");
+}
+
+QString selectorButtonStyleWithColor(const QColor &color)
+{
+    return QStringLiteral("QToolButton { background: %1; color: white; border: none; "
+                          "font-size: 8pt; font-weight: 700; }").arg(color.name());
+}
+
+// StatusIcon.qml equivalent -- only the states PersonalHost actually reports
+// today (see sessionmanager.cpp's wtsStateToString) get a distinct label;
+// everything else (locked screen, screensaver, "video watch disabled",
+// removed employee -- all present in the real app) falls back to the
+// generic "connecting" placeholder until the grabber reports them too.
+QString statusLabelForState(const QString &state)
+{
+    if (state == QStringLiteral("disconnected")) {
+        return QStringLiteral("Sesiune deconectata");
+    }
+    if (state == QStringLiteral("idle")) {
+        return QStringLiteral("Inactiv");
+    }
+    if (state == QStringLiteral("other")) {
+        return QStringLiteral("Stare necunoscuta");
+    }
+    return QString(); // "active"/"connected"/empty -- normal video, no badge
 }
 }
 
@@ -165,6 +193,47 @@ void DeviceTileWidget::selectStream(quint32 streamId)
     m_autoRotateTimer->stop();
     m_selectedStream = streamId;
     refreshButtonStyles();
+
+    if (m_selectorHighlightAnim) {
+        m_selectorHighlightAnim->stop();
+    }
+    m_animatingButton = nullptr;
+    for (int i = 0; i < m_monitorStreamIds.size(); ++i) {
+        if (m_monitorStreamIds.at(i) == streamId) {
+            m_animatingButton = m_monitorButtons.value(i, nullptr);
+            break;
+        }
+    }
+    if (!m_animatingButton && streamId == m_windowStreamId) {
+        m_animatingButton = m_windowButton;
+    }
+    if (m_animatingButton) {
+        m_selectorHighlightAnim = new QVariantAnimation(this);
+        m_selectorHighlightAnim->setStartValue(QColor(0x55, 0x57, 0x5f));
+        m_selectorHighlightAnim->setEndValue(QColor(0x1d, 0xa0, 0x6f));
+        m_selectorHighlightAnim->setDuration(kSelectorHighlightMs);
+        m_selectorHighlightAnim->setEasingCurve(QEasingCurve::OutCubic);
+        QToolButton *button = m_animatingButton;
+        connect(m_selectorHighlightAnim, &QVariantAnimation::valueChanged, this,
+               [button](const QVariant &value) {
+                   if (button) {
+                       button->setStyleSheet(selectorButtonStyleWithColor(value.value<QColor>()));
+                   }
+               });
+        connect(m_selectorHighlightAnim, &QVariantAnimation::finished, this,
+               &DeviceTileWidget::refreshButtonStyles);
+        m_selectorHighlightAnim->start(QAbstractAnimation::DeleteWhenStopped);
+    }
+
+    update();
+}
+
+void DeviceTileWidget::setSessionState(const QString &state)
+{
+    if (m_sessionState == state) {
+        return;
+    }
+    m_sessionState = state;
     update();
 }
 
@@ -202,9 +271,13 @@ void DeviceTileWidget::paintEvent(QPaintEvent *event)
     const int contentTop = kHeaderHeight;
     const QImage thumbnail = m_thumbnailsByStream.value(m_selectedStream);
     const QRect target = imageTargetRect();
-    if (!thumbnail.isNull()) {
+    const QString statusLabel = statusLabelForState(m_sessionState);
+    if (!thumbnail.isNull() && statusLabel.isEmpty()) {
         painter.drawImage(target, thumbnail);
     } else {
+        // StatusIcon.qml equivalent: replaces the video entirely while the
+        // session isn't in a normal active/connected state, or while we
+        // simply have no frame yet.
         painter.setRenderHint(QPainter::Antialiasing);
         const QPoint center(width() / 2, contentTop + (height() - contentTop) / 2);
         painter.setPen(QPen(QColor(45, 47, 53), 2));
@@ -214,7 +287,7 @@ void DeviceTileWidget::paintEvent(QPaintEvent *event)
         painter.setPen(QColor(50, 51, 58));
         painter.setFont(QFont(QStringLiteral("Segoe UI"), 8, QFont::DemiBold));
         painter.drawText(QRect(0, center.y() + 32, width(), 20), Qt::AlignCenter,
-                         QStringLiteral("Se conecteaza..."));
+                         statusLabel.isEmpty() ? QStringLiteral("Se conecteaza...") : statusLabel);
     }
 
     painter.fillRect(QRect(0, 0, width(), kHeaderHeight), QColor(0x38, 0x3a, 0x41));

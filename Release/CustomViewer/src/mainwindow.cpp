@@ -12,6 +12,7 @@
 #include <QDateTime>
 #include <QEvent>
 #include <QDialog>
+#include <QFile>
 #include <QDialogButtonBox>
 #include <QDir>
 #include <QFileDialog>
@@ -19,6 +20,7 @@
 #include <QFrame>
 #include <QGridLayout>
 #include <QHBoxLayout>
+#include <QInputDialog>
 #include <QKeyEvent>
 #include <QLabel>
 #include <QLineEdit>
@@ -32,13 +34,16 @@
 #include <QResizeEvent>
 #include <QScrollArea>
 #include <QSettings>
+#include <QSignalBlocker>
 #include <QSpinBox>
 #include <QStackedWidget>
 #include <QStandardPaths>
 #include <QStatusBar>
 #include <QStyle>
+#include <QSysInfo>
 #include <QTabBar>
 #include <QTimer>
+#include <QTreeWidget>
 #include <QToolButton>
 #include <QVBoxLayout>
 
@@ -51,6 +56,17 @@ namespace {
 // tooltip and does nothing (see AddDeviceTileWidget::setLimitReached) --
 // it does not auto-open a new tab.
 constexpr int kMaxTilesPerTab = 25;
+
+// A marker file rather than a QSettings key: "Delete local cache" needs to
+// survive the very QSettings().clear() it's scheduling, and a QSettings key
+// would get wiped along with everything else. Checked once at startup (see
+// MainWindow's constructor) before loadSettings() runs.
+QString pendingCacheClearMarkerPath()
+{
+    const QString dir = QStandardPaths::writableLocation(QStandardPaths::AppDataLocation);
+    QDir().mkpath(dir);
+    return dir + QStringLiteral("/pending_cache_clear");
+}
 }
 
 namespace {
@@ -101,12 +117,25 @@ private:
 MainWindow::MainWindow(QWidget *parent)
     : QMainWindow(parent)
 {
+    // "Delete local cache on Viewer restart" scheduled a clear on a
+    // previous run (see the menu action) -- honor it now, before anything
+    // reads settings this session.
+    const QString marker = pendingCacheClearMarkerPath();
+    if (QFile::exists(marker)) {
+        QSettings().clear();
+        QFile::remove(marker);
+    }
+
     m_tabs.append(TrackerTab{QStringLiteral("New tab_1"), {}});
 
     buildInterface();
     applyStyle();
     loadSettings();
     applyStyle(); // re-apply now that loadSettings() may have set m_fontScale
+    if (m_simpleModeAction) {
+        const QSignalBlocker blocker(m_simpleModeAction);
+        m_simpleModeAction->setChecked(m_simpleMode);
+    }
     qApp->installEventFilter(this);
 
     connect(&m_connection, &ViewerConnection::statusChanged,
@@ -121,6 +150,40 @@ MainWindow::MainWindow(QWidget *parent)
             this, &MainWindow::updateMetadata);
     connect(&m_connection, &ViewerConnection::protocolError,
             this, &MainWindow::showProtocolError);
+
+    // utils/NoCNodeConnectionBlocker.qml: modal after 60s with no server
+    // connection -- started on connect attempt, canceled on success/
+    // disconnect (see connectOrDisconnect()/updateStatus()).
+    m_noConnectionTimer = new QTimer(this);
+    m_noConnectionTimer->setSingleShot(true);
+    m_noConnectionTimer->setInterval(60000);
+    connect(m_noConnectionTimer, &QTimer::timeout, this, [this]() {
+        if (m_connection.isConnected()) {
+            return;
+        }
+        QMessageBox::warning(
+            this, QStringLiteral("Fara conexiune"),
+            QStringLiteral("Nu s-a putut stabili conexiunea cu serverul de peste 60 de secunde. "
+                           "Verifica host/port/token din Connection... si incearca din nou."));
+    });
+
+    // utils/NoEmployeesAssignedInformer.qml: informer after 5s if still
+    // connected but no device has shown up yet.
+    m_noEmployeesTimer = new QTimer(this);
+    m_noEmployeesTimer->setSingleShot(true);
+    m_noEmployeesTimer->setInterval(5000);
+    connect(m_noEmployeesTimer, &QTimer::timeout, this, [this]() {
+        if (m_connection.isConnected() && m_devicePrimaryStream.isEmpty()) {
+            m_agentLabel->show();
+        }
+    });
+
+    // Auto-connect on launch using the saved host/token, instead of making
+    // the user open Connection... and click "Connect now" every single
+    // time -- explicitly requested for this personal, single-user setup.
+    if (!m_hostEdit->text().isEmpty() && !m_tokenEdit->text().isEmpty()) {
+        QTimer::singleShot(0, this, &MainWindow::connectOrDisconnect);
+    }
 }
 
 void MainWindow::connectOrDisconnect()
@@ -130,6 +193,9 @@ void MainWindow::connectOrDisconnect()
         m_connection.disconnectFromAgent();
         clearMonitors();
         updateStatus(QStringLiteral("Deconectat"), false);
+        m_noConnectionTimer->stop();
+        m_noEmployeesTimer->stop();
+        m_agentLabel->hide();
         return;
     }
     clearMonitors();
@@ -138,6 +204,7 @@ void MainWindow::connectOrDisconnect()
                                 static_cast<quint16>(m_portSpin->value()),
                                 m_tokenEdit->text(), m_tlsCheck->isChecked(),
                                 m_fingerprintEdit->text());
+    m_noConnectionTimer->start();
 }
 
 void MainWindow::autoConnect(const QString &host, quint16 port, const QString &token, bool useTls)
@@ -216,9 +283,57 @@ bool MainWindow::eventFilter(QObject *watched, QEvent *event)
 
 void MainWindow::showAbout()
 {
-    QMessageBox::about(this, QStringLiteral("Despre Personal Viewer"),
-        QStringLiteral("Personal Screen Viewer 0.1\n\n"
-                       "Vizualizare autorizata a ecranelor, fara control la distanta si fara audio."));
+    // topPanel/AboutDialog.qml: a dedicated 450x358 dialog (Version/OS/
+    // Support/links/copyright), not a generic QMessageBox::about() text box.
+    auto *dialog = new QDialog(this);
+    dialog->setAttribute(Qt::WA_DeleteOnClose);
+    dialog->setWindowTitle(QStringLiteral("About the program"));
+    dialog->setFixedSize(450, 358);
+    auto *layout = new QVBoxLayout(dialog);
+    layout->setContentsMargins(24, 24, 24, 24);
+    layout->setSpacing(10);
+
+    auto *brand = new QLabel(QStringLiteral("Personal Screen Viewer"), dialog);
+    brand->setStyleSheet(QStringLiteral("font-size: 16pt; font-weight: 700; color: #1da06f;"));
+    layout->addWidget(brand);
+
+    auto addRow = [layout, dialog](const QString &label, const QString &value) {
+        auto *row = new QHBoxLayout;
+        auto *labelWidget = new QLabel(label, dialog);
+        labelWidget->setStyleSheet(QStringLiteral("color: #9fa5ae;"));
+        labelWidget->setFixedWidth(90);
+        row->addWidget(labelWidget);
+        auto *valueWidget = new QLabel(value, dialog);
+        valueWidget->setWordWrap(true);
+        valueWidget->setTextInteractionFlags(Qt::TextSelectableByMouse);
+        row->addWidget(valueWidget, 1);
+        layout->addLayout(row);
+    };
+    addRow(QStringLiteral("Version:"), QCoreApplication::applicationVersion());
+    addRow(QStringLiteral("OS:"),
+          QStringLiteral("%1 (%2)").arg(QSysInfo::prettyProductName(), QSysInfo::currentCpuArchitecture()));
+    addRow(QStringLiteral("Qt:"), QStringLiteral(QT_VERSION_STR));
+    addRow(QStringLiteral("Support:"), QStringLiteral("-- (proiect personal, fara suport comercial)"));
+
+    layout->addStretch();
+    auto *description = new QLabel(
+        QStringLiteral("Vizualizare autorizata a ecranelor din propria retea, fara control la "
+                       "distanta si fara transfer de fisiere."),
+        dialog);
+    description->setWordWrap(true);
+    description->setStyleSheet(QStringLiteral("color: #c9cdd3;"));
+    layout->addWidget(description);
+
+    auto *copyright = new QLabel(
+        QStringLiteral("© %1 -- proiect personal.").arg(QDate::currentDate().year()), dialog);
+    copyright->setStyleSheet(QStringLiteral("color: #6f747d; font-size: 8pt;"));
+    layout->addWidget(copyright);
+
+    auto *buttons = new QDialogButtonBox(QDialogButtonBox::Ok, dialog);
+    connect(buttons, &QDialogButtonBox::accepted, dialog, &QDialog::accept);
+    layout->addWidget(buttons);
+
+    dialog->show();
 }
 
 void MainWindow::updateStatus(const QString &text, bool connected)
@@ -229,16 +344,33 @@ void MainWindow::updateStatus(const QString &text, bool connected)
     m_statusLabel->style()->polish(m_statusLabel);
     m_connectButton->setText(connected ? QStringLiteral("Deconecteaza")
                                        : QStringLiteral("Conecteaza"));
+    if (connected) {
+        m_noConnectionTimer->stop();
+        m_noEmployeesTimer->start();
+    }
 }
 
 void MainWindow::setAgentIdentity(const QString &agentName, const QString &sessionName)
 {
-    m_agentLabel->setText(sessionName.isEmpty()
-        ? agentName : QStringLiteral("%1  /  %2").arg(agentName, sessionName));
+    // Used to (invisibly) set m_agentLabel's text -- that label was never
+    // actually added to any layout, so this never showed anywhere. Now that
+    // m_agentLabel is the real NoEmployeesAssignedInformer (see addMonitor/
+    // the timers in the constructor), this identity goes in the window
+    // title instead so the information isn't just dropped.
+    setWindowTitle(sessionName.isEmpty()
+                       ? QStringLiteral("Personal Viewer -- %1").arg(agentName)
+                       : QStringLiteral("Personal Viewer -- %1 / %2").arg(agentName, sessionName));
 }
 
 QString MainWindow::deviceDisplayName(quint32 sessionKey) const
 {
+    // CategorizationButton's employee-rename equivalent (see
+    // DeviceDetailView::renameRequested) -- a purely local override, wins
+    // over whatever the agent itself reports.
+    const QString renamedTo = m_deviceNameOverrides.value(sessionKey);
+    if (!renamedTo.isEmpty()) {
+        return renamedTo;
+    }
     const QString username = m_deviceUsernames.value(sessionKey);
     if (!username.isEmpty()) {
         return username;
@@ -252,11 +384,19 @@ void MainWindow::addMonitor(quint32 streamId, const QString &name, const QSize &
                             const QString &sessionState, bool isWindow)
 {
     Q_UNUSED(size)
-    Q_UNUSED(sessionState)
+    m_agentLabel->hide(); // a device showed up -- dismiss the informer, see the timer's comment
     if (m_monitors.contains(streamId)) {
         return;
     }
     const quint32 deviceKey = sessionId != 0 ? sessionId : streamId;
+    if (!sessionState.isEmpty()) {
+        m_deviceSessionState.insert(deviceKey, sessionState);
+        for (DeviceTileWidget *tile : std::as_const(m_deviceTiles)) {
+            if (tile->sessionKey() == deviceKey) {
+                tile->setSessionState(sessionState);
+            }
+        }
+    }
     const QString displayName = sessionUsername.isEmpty()
         ? name : QStringLiteral("%1 — %2").arg(sessionUsername, name);
 
@@ -455,6 +595,50 @@ void MainWindow::closeTab(int index)
     relayoutCurrentTab();
 }
 
+void MainWindow::moveTab(int from, int to)
+{
+    if (from < 0 || to < 0 || from >= m_tabs.size() || to >= m_tabs.size() || from == to) {
+        return;
+    }
+    m_tabs.move(from, to);
+    if (m_currentTabIndex == from) {
+        m_currentTabIndex = to;
+    } else if (from < m_currentTabIndex && m_currentTabIndex <= to) {
+        --m_currentTabIndex;
+    } else if (to <= m_currentTabIndex && m_currentTabIndex < from) {
+        ++m_currentTabIndex;
+    }
+}
+
+void MainWindow::renameTab(int index)
+{
+    if (index < 0 || index >= m_tabs.size()) {
+        return;
+    }
+    bool accepted = false;
+    const QString title = QInputDialog::getText(
+        this, QStringLiteral("Redenumeste tab"), QStringLiteral("Nume tab:"),
+        QLineEdit::Normal, m_tabs.at(index).title, &accepted).trimmed();
+    if (!accepted || title.isEmpty()) {
+        return;
+    }
+    m_tabs[index].title = title;
+    m_tabBar->setTabText(index, QStringLiteral("• %1").arg(title));
+}
+
+void MainWindow::toggleFiltersPanel(bool visible)
+{
+    if (m_filtersPanel) {
+        m_filtersPanel->setVisible(visible);
+    }
+}
+
+void MainWindow::setSimpleMode(bool simple)
+{
+    m_simpleMode = simple;
+    saveSettings();
+}
+
 void MainWindow::openGridsPanel()
 {
     auto *menu = new QMenu(this);
@@ -484,6 +668,42 @@ void MainWindow::openGridsPanel()
         });
     }
 
+    // TrackerGridsPanel.qml's Horizontal/Vertical switch (`layoutIsVertical`,
+    // which changes the baseline column count from 4 to 3 before the
+    // width-based growth in columnsForCurrentWidth()) -- distinct from the
+    // fixed 2-6 picker above, matches the real panel's own toggle.
+    menu->addSeparator();
+    auto *horizontalAction = menu->addAction(QStringLiteral("Layout: Orizontal (4 coloane)"));
+    horizontalAction->setCheckable(true);
+    horizontalAction->setChecked(current == 4);
+    connect(horizontalAction, &QAction::triggered, this, [this]() {
+        if (!m_tabs.isEmpty()) {
+            m_tabs[m_currentTabIndex].columnsOverride = 4;
+            relayoutCurrentTab();
+        }
+    });
+    auto *verticalAction = menu->addAction(QStringLiteral("Layout: Vertical (3 coloane)"));
+    verticalAction->setCheckable(true);
+    verticalAction->setChecked(current == 3);
+    connect(verticalAction, &QAction::triggered, this, [this]() {
+        if (!m_tabs.isEmpty()) {
+            m_tabs[m_currentTabIndex].columnsOverride = 3;
+            relayoutCurrentTab();
+        }
+    });
+
+    // TrackerGridsPanel.qml also lets you drag a whole department onto the
+    // grid to lay out its employees automatically -- there's no department
+    // model here (see EmployeePicker gap), so this stays visible-but-disabled
+    // as a placeholder for when PersonalHost grows one. Hidden entirely in
+    // Simple mode, same as the real TopPanel's department affordances.
+    if (!m_simpleMode) {
+        menu->addSeparator();
+        auto *departmentAction = menu->addAction(
+            QStringLiteral("Aseaza un departament pe grid... (necesita organizatie in grabber)"));
+        departmentAction->setEnabled(false);
+    }
+
     auto *sender = qobject_cast<QWidget *>(this->sender());
     const QPoint popupPos = sender ? sender->mapToGlobal(QPoint(0, sender->height())) : QCursor::pos();
     menu->popup(popupPos);
@@ -505,38 +725,83 @@ void MainWindow::openAddDeviceDialog()
 
     auto *dialog = new QDialog(this);
     dialog->setAttribute(Qt::WA_DeleteOnClose);
-    dialog->setWindowTitle(QStringLiteral("Adauga device"));
+    dialog->setWindowTitle(QStringLiteral("Select an Employee"));
     dialog->setModal(false);
-    dialog->setMinimumWidth(360);
+    dialog->setMinimumSize(420, 440);
     auto *layout = new QVBoxLayout(dialog);
 
-    QStringList availableKeys;
-    auto *list = new QListWidget(dialog);
+    // utils/EmployeePicker.qml equivalent: real one is a full Organization ->
+    // Department -> Employee -> Session tree with search and an "online
+    // only" filter. We have no department/organization model (PersonalHost
+    // just reports flat connected sessions), so this is a single-level tree
+    // under one "Toate device-urile" root instead of real departments --
+    // but search and the online filter are real and wired against actual
+    // session state (m_deviceSessionState), not stubs.
+    auto *searchEdit = new QLineEdit(dialog);
+    searchEdit->setPlaceholderText(QStringLiteral("Type name or login"));
+    layout->addWidget(searchEdit);
+
+    auto *onlineOnlyCheck = new QCheckBox(QStringLiteral("Show online employees only"), dialog);
+    layout->addWidget(onlineOnlyCheck);
+
+    auto *tree = new QTreeWidget(dialog);
+    tree->setHeaderHidden(true);
+    // Simple mode hides the department-shaped root label entirely (there's
+    // no department model behind it anyway); Advanced mode shows it as a
+    // placeholder for where real departments would nest once PersonalHost
+    // has an org model.
+    QTreeWidgetItem *root = m_simpleMode ? tree->invisibleRootItem()
+                                         : new QTreeWidgetItem(tree, {QStringLiteral("Toate device-urile")});
+    if (!m_simpleMode) {
+        // The QTreeWidgetItem(tree, ...) constructor above already appends
+        // it as a top-level item -- root is just made non-selectable here.
+        root->setFlags(root->flags() & ~Qt::ItemIsSelectable);
+    }
+
+    QHash<QTreeWidgetItem *, quint32> deviceForItem;
     for (auto it = m_devicePrimaryStream.cbegin(); it != m_devicePrimaryStream.cend(); ++it) {
         const quint32 deviceKey = it.key();
-        list->addItem(deviceDisplayName(deviceKey));
-        availableKeys.append(QString::number(deviceKey));
+        auto *deviceItem = new QTreeWidgetItem(root, {deviceDisplayName(deviceKey)});
+        const bool offline = m_deviceSessionState.value(deviceKey) == QStringLiteral("disconnected");
+        deviceItem->setData(0, Qt::UserRole, offline);
+        deviceForItem.insert(deviceItem, deviceKey);
     }
-    if (availableKeys.isEmpty()) {
+    tree->expandAll();
+    if (deviceForItem.isEmpty()) {
         auto *empty = new QLabel(
             QStringLiteral("Niciun device disponibil -- doar cele conectate acum pot fi adaugate."),
             dialog);
         empty->setWordWrap(true);
         layout->addWidget(empty);
     } else {
-        layout->addWidget(list);
+        layout->addWidget(tree, 1);
     }
-    auto *buttons = new QDialogButtonBox(QDialogButtonBox::Close, dialog);
+
+    auto applyFilter = [tree, root, onlineOnlyCheck, searchEdit]() {
+        const QString needle = searchEdit->text().trimmed();
+        const bool onlineOnly = onlineOnlyCheck->isChecked();
+        for (int i = 0; i < root->childCount(); ++i) {
+            QTreeWidgetItem *child = root->child(i);
+            const bool offline = child->data(0, Qt::UserRole).toBool();
+            const bool matchesSearch =
+                needle.isEmpty() || child->text(0).contains(needle, Qt::CaseInsensitive);
+            const bool matchesOnline = !onlineOnly || !offline;
+            child->setHidden(!(matchesSearch && matchesOnline));
+        }
+    };
+    connect(searchEdit, &QLineEdit::textChanged, dialog, applyFilter);
+    connect(onlineOnlyCheck, &QCheckBox::toggled, dialog, applyFilter);
+
+    auto *buttons = new QDialogButtonBox(QDialogButtonBox::Cancel, dialog);
     connect(buttons, &QDialogButtonBox::rejected, dialog, &QDialog::close);
     layout->addWidget(buttons);
 
-    connect(list, &QListWidget::itemClicked, this,
-            [this, dialog, availableKeys](QListWidgetItem *item) {
-                const int row = item->listWidget()->row(item);
-                if (row < 0 || row >= availableKeys.size()) {
+    connect(tree, &QTreeWidget::itemClicked, this,
+            [this, dialog, deviceForItem](QTreeWidgetItem *item) {
+                if (!deviceForItem.contains(item)) {
                     return;
                 }
-                const quint32 deviceKey = availableKeys.at(row).toUInt();
+                const quint32 deviceKey = deviceForItem.value(item);
                 TrackerTab &currentTab = m_tabs[m_currentTabIndex];
                 currentTab.tiles.append({m_nextTileId++, deviceKey});
                 relayoutCurrentTab();
@@ -623,7 +888,10 @@ void MainWindow::pruneStaleWindowStreams()
 void MainWindow::buildInterface()
 {
     setWindowTitle(QStringLiteral("Personal Viewer"));
-    resize(1500, 880);
+    // Tall enough that History's controls block (buttons/timeline/toggle/
+    // Activity-Efficiency) isn't clipped at the bottom by default -- see
+    // HistoryView's m_videoColumn maximumHeight comment.
+    resize(1500, 960);
     setMinimumSize(920, 560);
 
     auto *root = new QWidget(this);
@@ -653,15 +921,34 @@ void MainWindow::buildInterface()
     QAction *connectionAction = menu->addAction(QStringLiteral("Connection..."));
     QAction *clearAction = menu->addAction(QStringLiteral("Delete local cache on Viewer restart"));
     menu->addSeparator();
-    QAction *basicAction = menu->addAction(QStringLiteral("Basic version"));
+    // TopPanel.qml's "Simple/Advanced mode" switch -- the real one swaps
+    // the whole organization model (departments/roles disappear in Simple
+    // mode). We have no department model to swap (see EmployeePicker gap),
+    // so this only tells the Grids panel's "assign department" entry and
+    // the add-device picker's tree root to hide -- everything Advanced mode
+    // would otherwise show that we don't have yet.
+    QAction *basicAction = menu->addAction(QStringLiteral("Basic version (Simple mode)"));
     basicAction->setCheckable(true);
-    basicAction->setChecked(true);
+    basicAction->setChecked(m_simpleMode);
+    m_simpleModeAction = basicAction;
     QAction *aboutAction = menu->addAction(QStringLiteral("About the program"));
     QAction *exitAction = menu->addAction(QStringLiteral("Exit"));
     menuButton->setMenu(menu);
     connect(preferencesAction, &QAction::triggered, this, &MainWindow::showPreferences);
     connect(connectionAction, &QAction::triggered, this, &MainWindow::showSettings);
-    connect(clearAction, &QAction::triggered, this, [] { QSettings().clear(); });
+    connect(clearAction, &QAction::triggered, this, [this]() {
+        // Matches the action's own label ("...on Viewer restart") and the
+        // real app.scheduleLocalCacheRemoval(): marks the cache for
+        // deletion on the NEXT launch instead of wiping it out from under
+        // the still-running app, plus a confirmation message -- neither of
+        // which the previous QSettings().clear() (immediate, silent) did.
+        QFile marker(pendingCacheClearMarkerPath());
+        (void)marker.open(QIODevice::WriteOnly);
+        QMessageBox::information(
+            this, QStringLiteral("Delete local cache"),
+            QStringLiteral("Cache-ul local va fi sters la urmatoarea pornire a Viewer-ului."));
+    });
+    connect(basicAction, &QAction::toggled, this, &MainWindow::setSimpleMode);
     connect(aboutAction, &QAction::triggered, this, &MainWindow::showAbout);
     connect(exitAction, &QAction::triggered, this, &QWidget::close);
 
@@ -711,8 +998,10 @@ void MainWindow::buildInterface()
     auto *grids = new QPushButton(QStringLiteral("▦  Grids"), subbar);
     grids->setObjectName(QStringLiteral("flatButton"));
     connect(grids, &QPushButton::clicked, this, &MainWindow::openGridsPanel);
-    auto *filters = new QPushButton(QStringLiteral("ⓘ  Filters"), subbar);
-    filters->setObjectName(QStringLiteral("flatButton"));
+    m_filtersButton = new QPushButton(QStringLiteral("ⓘ  Filters"), subbar);
+    m_filtersButton->setObjectName(QStringLiteral("flatButton"));
+    m_filtersButton->setCheckable(true);
+    connect(m_filtersButton, &QPushButton::toggled, this, &MainWindow::toggleFiltersPanel);
     auto *demoButton = new QPushButton(QStringLiteral("▶  Demo"), subbar);
     demoButton->setObjectName(QStringLiteral("flatButton"));
     connect(demoButton, &QPushButton::clicked, this, &MainWindow::startDemo);
@@ -721,7 +1010,7 @@ void MainWindow::buildInterface()
     m_snapshotButton->setEnabled(false);
     connect(m_snapshotButton, &QPushButton::clicked, this, &MainWindow::saveSnapshot);
     subLayout->addWidget(grids);
-    subLayout->addWidget(filters);
+    subLayout->addWidget(m_filtersButton);
     subLayout->addWidget(demoButton);
     subLayout->addWidget(m_snapshotButton);
     subLayout->addStretch();
@@ -734,9 +1023,14 @@ void MainWindow::buildInterface()
     m_tabBar->setObjectName(QStringLiteral("tabs"));
     m_tabBar->setExpanding(false);
     m_tabBar->setTabsClosable(true);
+    // Matches the real Kickidler viewer's ViewerControls/Tabs.qml: tabs can
+    // be dragged to reorder, and double-clicking the current tab renames it.
+    m_tabBar->setMovable(true);
     m_tabBar->addTab(QStringLiteral("• %1").arg(m_tabs.first().title));
     connect(m_tabBar, &QTabBar::currentChanged, this, &MainWindow::switchTab);
     connect(m_tabBar, &QTabBar::tabCloseRequested, this, &MainWindow::closeTab);
+    connect(m_tabBar, &QTabBar::tabMoved, this, &MainWindow::moveTab);
+    connect(m_tabBar, &QTabBar::tabBarDoubleClicked, this, &MainWindow::renameTab);
     subLayout->addWidget(m_tabBar);
     rootLayout->addWidget(subbar);
 
@@ -744,9 +1038,31 @@ void MainWindow::buildInterface()
     auto *contentLayout = new QVBoxLayout(m_trackerPage);
     contentLayout->setContentsMargins(5, 5, 5, 5);
     contentLayout->setSpacing(0);
-    m_agentLabel = new QLabel(QStringLiteral("Niciun agent selectat"), m_trackerPage);
+    // utils/NoEmployeesAssignedInformer.qml equivalent: was created but
+    // never actually put into a layout (a dead leftover, never visible) --
+    // repurposed here as the real informer, shown by
+    // showNoEmployeesInformerIfStillEmpty() 5s after connecting if still
+    // no devices have shown up.
+    m_agentLabel = new QLabel(
+        QStringLiteral("Niciun device disponibil inca -- asteapta ca agentul sa se conecteze."),
+        m_trackerPage);
+    m_agentLabel->setObjectName(QStringLiteral("privacy"));
+    m_agentLabel->setWordWrap(true);
     m_agentLabel->hide();
-    auto *scroll = new QScrollArea(m_trackerPage);
+    contentLayout->addWidget(m_agentLabel);
+
+    auto *contentRow = new QHBoxLayout;
+    contentRow->setContentsMargins(0, 0, 0, 0);
+    contentRow->setSpacing(0);
+
+    // TrackerDefaultPrompt.qml equivalent: swaps in for the grid once the
+    // current tab has no real tiles at all (an empty grid full of nothing
+    // but "+" tiles otherwise, which is a valid but less clear substitute).
+    m_gridStack = new QStackedWidget(m_trackerPage);
+    m_gridScrollPage = new QWidget(m_gridStack);
+    auto *gridScrollLayout = new QVBoxLayout(m_gridScrollPage);
+    gridScrollLayout->setContentsMargins(0, 0, 0, 0);
+    auto *scroll = new QScrollArea(m_gridScrollPage);
     scroll->setWidgetResizable(true);
     scroll->setFrameShape(QFrame::NoFrame);
     m_monitorContainer = new QWidget(scroll);
@@ -756,11 +1072,104 @@ void MainWindow::buildInterface()
     m_monitorGrid->setHorizontalSpacing(3);
     m_monitorGrid->setVerticalSpacing(3);
     scroll->setWidget(m_monitorContainer);
-    contentLayout->addWidget(scroll, 1);
+    gridScrollLayout->addWidget(scroll, 1);
+    m_gridStack->addWidget(m_gridScrollPage);
+
+    // TrackerDefaultPrompt.qml: centered message + "Add" button, shown
+    // instead of the grid when the current tab is completely empty.
+    m_emptyPrompt = new QWidget(m_gridStack);
+    auto *emptyLayout = new QVBoxLayout(m_emptyPrompt);
+    emptyLayout->addStretch();
+    auto *emptyIcon = new QLabel(QStringLiteral("▦"), m_emptyPrompt);
+    emptyIcon->setAlignment(Qt::AlignCenter);
+    emptyIcon->setStyleSheet(QStringLiteral("color: #55575f; font-size: 48pt;"));
+    emptyLayout->addWidget(emptyIcon);
+    auto *emptyText = new QLabel(
+        QStringLiteral("Nu ai adaugat niciun device in acest tab inca."), m_emptyPrompt);
+    emptyText->setAlignment(Qt::AlignCenter);
+    emptyText->setStyleSheet(QStringLiteral("color: #9fa5ae; font-size: 11pt;"));
+    emptyLayout->addWidget(emptyText);
+    auto *emptyAddButton = new QPushButton(QStringLiteral("+  Adauga device"), m_emptyPrompt);
+    emptyAddButton->setObjectName(QStringLiteral("primaryButton"));
+    emptyAddButton->setFixedWidth(200);
+    connect(emptyAddButton, &QPushButton::clicked, this, &MainWindow::openAddDeviceDialog);
+    auto *emptyButtonRow = new QHBoxLayout;
+    emptyButtonRow->addStretch();
+    emptyButtonRow->addWidget(emptyAddButton);
+    emptyButtonRow->addStretch();
+    emptyLayout->addLayout(emptyButtonRow);
+    emptyLayout->addStretch();
+    m_gridStack->addWidget(m_emptyPrompt);
+
+    contentRow->addWidget(m_gridStack, 1);
+
+    // TrackerFiltersPanel.qml equivalent -- see toggleFiltersPanel().
+    m_filtersPanel = new QFrame(m_trackerPage);
+    m_filtersPanel->setObjectName(QStringLiteral("filtersPanel"));
+    m_filtersPanel->setFixedWidth(168);
+    m_filtersPanel->hide();
+    auto *filtersLayout = new QVBoxLayout(m_filtersPanel);
+    filtersLayout->setContentsMargins(10, 10, 10, 10);
+    auto *filtersTitle = new QLabel(QStringLiteral("Filtre"), m_filtersPanel);
+    filtersTitle->setStyleSheet(QStringLiteral("color: white; font-weight: 600;"));
+    filtersLayout->addWidget(filtersTitle);
+    auto *filtersTree = new QTreeWidget(m_filtersPanel);
+    filtersTree->setHeaderHidden(true);
+    filtersTree->setDragEnabled(true);
+    auto *appsGroup = new QTreeWidgetItem(filtersTree, {QStringLiteral("Aplicatii neproductive")});
+    Q_UNUSED(appsGroup)
+    auto *webGroup = new QTreeWidgetItem(filtersTree, {QStringLiteral("Pagini web neproductive")});
+    Q_UNUSED(webGroup)
+    auto *inactivityGroup = new QTreeWidgetItem(filtersTree, {QStringLiteral("Inactivitate prelungita")});
+    Q_UNUSED(inactivityGroup)
+    filtersLayout->addWidget(filtersTree, 1);
+    auto *filtersNote = new QLabel(
+        QStringLiteral("Trage un filtru pe o celula pentru a-l aplica.\n"
+                       "(Motorul de reguli/violari nu exista inca in grabber --\n"
+                       "panoul e pregatit, dar inert pana atunci.)"),
+        m_filtersPanel);
+    filtersNote->setWordWrap(true);
+    filtersNote->setStyleSheet(QStringLiteral("color: #7a7e86; font-size: 8pt;"));
+    filtersLayout->addWidget(filtersNote);
+    auto *trashLabel = new QLabel(QStringLiteral("🗑  Scoate filtrul de pe celula"), m_filtersPanel);
+    trashLabel->setAlignment(Qt::AlignCenter);
+    trashLabel->setStyleSheet(
+        QStringLiteral("color: #9fa5ae; border: 1px dashed #55575f; padding: 6px;"));
+    filtersLayout->addWidget(trashLabel);
+    contentRow->addWidget(m_filtersPanel);
+
+    contentLayout->addLayout(contentRow, 1);
 
     m_historyView = new HistoryView(m_connection, root);
     m_deviceDetailView = new DeviceDetailView(m_connection, root);
     connect(m_deviceDetailView, &DeviceDetailView::backRequested, this, &MainWindow::closeDeviceDetail);
+    connect(m_deviceDetailView, &DeviceDetailView::goToHistoryRequested, this,
+            [this](quint32 sessionKey) {
+                showHistoryPage();
+                m_historyView->openForDevice(sessionKey);
+            });
+    connect(m_deviceDetailView, &DeviceDetailView::renameRequested, this,
+            [this](quint32 sessionKey, const QString &currentName) {
+                bool accepted = false;
+                const QString name = QInputDialog::getText(
+                    this, QStringLiteral("Redenumeste angajatul"),
+                    QStringLiteral("Nume (doar local, in acest Viewer):"), QLineEdit::Normal,
+                    currentName, &accepted).trimmed();
+                if (!accepted || name.isEmpty() || name == currentName) {
+                    return;
+                }
+                m_deviceNameOverrides.insert(sessionKey, name);
+                saveSettings();
+                for (DeviceTileWidget *tile : std::as_const(m_deviceTiles)) {
+                    if (tile->sessionKey() == sessionKey) {
+                        tile->setDisplayName(deviceDisplayName(sessionKey));
+                    }
+                }
+                if (m_openDeviceKey == sessionKey) {
+                    m_deviceDetailView->setDisplayName(deviceDisplayName(sessionKey));
+                }
+                refreshHistoryDevices();
+            });
 
     m_windowStreamPruneTimer = new QTimer(this);
     m_windowStreamPruneTimer->setInterval(2000);
@@ -802,7 +1211,7 @@ void MainWindow::buildInterface()
     form->addRow(QStringLiteral("Amprenta"), m_fingerprintEdit);
     settingsLayout->addLayout(form);
     auto *notice = new QLabel(QStringLiteral(
-        "Viewer-ul accepta numai video si metadate. Tokenul nu este salvat."),
+        "Viewer-ul accepta numai video si metadate. Conexiunea se reface automat la pornire."),
         m_settingsDialog);
     notice->setWordWrap(true);
     notice->setObjectName(QStringLiteral("privacy"));
@@ -843,6 +1252,12 @@ void MainWindow::applyStyle()
         QLabel#status[connected="true"] { color: white; }
         QPushButton#flatButton { color: #b8bdc5; background: transparent; border: none; padding: 6px; }
         QPushButton#flatButton:hover { color: white; }
+        QPushButton#historyPill, QComboBox#historyPill { color: #d7dadd; background: #3a3d45; border: none; border-radius: 4px; padding: 2px 8px; font-size: 8pt; text-align: left; }
+        QPushButton#historyPill:hover { background: #454850; }
+        QComboBox#historyPill::drop-down { border: none; }
+        QPushButton#historyIconPill { color: #d7dadd; background: #3a3d45; border: none; border-radius: 11px; font-size: 8pt; }
+        QPushButton#historyIconPill:hover { background: #454850; }
+        QPushButton#historyIconPill:disabled { color: #6f747d; }
         QToolButton#plus { color: #d7dadd; background: transparent; border: none; font-size: 15pt; padding: 0 5px; }
         QToolButton#plus:hover { color: white; }
         QTabBar#tabs::tab { background: #383b43; color: #9fa5ae; padding: 8px 36px; border: 1px solid #292b32; }
@@ -851,6 +1266,9 @@ void MainWindow::applyStyle()
         QLabel#privacy { color: #aab0b8; padding: 10px; background: #343740; }
         QWidget#detailHeader { background: #383b43; border-bottom: 1px solid #17191e; }
         QWidget#statsPanel { background: #34363e; border-left: 1px solid #17191e; }
+        QFrame#filtersPanel { background: #34363e; border-left: 1px solid #17191e; }
+        QPushButton#primaryButton { background: #1da06f; color: white; border: none; padding: 8px 12px; font-weight: 600; }
+        QPushButton#primaryButton:hover { background: #21b780; }
         QLineEdit, QSpinBox { background: #262930; border: 1px solid #4d515b; padding: 7px; selection-background-color: #1da06f; }
         QLineEdit:focus, QSpinBox:focus { border-color: #21b780; }
         QPushButton { background: #3c4048; border: 1px solid #50545e; padding: 7px 12px; }
@@ -890,7 +1308,7 @@ void MainWindow::clearMonitors()
     }
     m_selectedStream = 0;
     m_snapshotButton->setEnabled(false);
-    m_agentLabel->setText(QStringLiteral("Niciun agent selectat"));
+    m_agentLabel->hide();
     if (m_contentStack->currentWidget() == m_deviceDetailView) {
         closeDeviceDetail();
     }
@@ -940,6 +1358,9 @@ void MainWindow::relayoutCurrentTab()
         return;
     }
     const TrackerTab &tab = m_tabs[m_currentTabIndex];
+    if (m_gridStack) {
+        m_gridStack->setCurrentWidget(tab.tiles.isEmpty() ? m_emptyPrompt : m_gridScrollPage);
+    }
     const int columns = effectiveColumns();
 
     int index = 0;
@@ -956,6 +1377,10 @@ void MainWindow::relayoutCurrentTab()
                 if (MonitorWidget *monitor = m_monitors.value(monitorStream, nullptr)) {
                     tile->updateThumbnail(monitorStream, monitor->currentFrame());
                 }
+            }
+            const QString knownState = m_deviceSessionState.value(entry.deviceKey);
+            if (!knownState.isEmpty()) {
+                tile->setSessionState(knownState);
             }
         }
         tile->setParent(m_monitorContainer);
@@ -994,12 +1419,34 @@ void MainWindow::loadSettings()
     m_portSpin->setValue(settings.value(QStringLiteral("connection/port"), 45870).toInt());
     m_tlsCheck->setChecked(settings.value(QStringLiteral("connection/tls"), true).toBool());
     m_fingerprintEdit->setText(settings.value(QStringLiteral("connection/fingerprint")).toString());
+    // Saved (and auto-connected on launch, see the constructor) -- the user
+    // explicitly asked not to have to retype it every time on their own,
+    // self-hosted setup. Was deliberately left unsaved before, for a
+    // multi-user-machine privacy concern that doesn't apply here.
+    m_tokenEdit->setText(settings.value(QStringLiteral("connection/token")).toString());
 
     m_language = settings.value(QStringLiteral("preferences/language"), QStringLiteral("ro")).toString();
     QLocale::setDefault(
         QLocale(m_language == QStringLiteral("en") ? QLocale::English : QLocale::Romanian));
     m_fontScale = settings.value(QStringLiteral("preferences/fontScale"), 1.0).toDouble();
     m_tooltipsEnabled = settings.value(QStringLiteral("preferences/tooltipsEnabled"), true).toBool();
+    m_simpleMode = settings.value(QStringLiteral("preferences/simpleMode"), false).toBool();
+
+    // Local rename overrides -- keyed by deviceKey, which is only stable
+    // for as long as PersonalHost keeps reporting the same sessionId for
+    // that machine (see the member comment). Best-effort until there's a
+    // real, persistent employee identity to key on instead.
+    m_deviceNameOverrides.clear();
+    const int overrideCount = settings.beginReadArray(QStringLiteral("deviceNameOverrides"));
+    for (int i = 0; i < overrideCount; ++i) {
+        settings.setArrayIndex(i);
+        const quint32 key = settings.value(QStringLiteral("deviceKey")).toUInt();
+        const QString name = settings.value(QStringLiteral("name")).toString();
+        if (key != 0 && !name.isEmpty()) {
+            m_deviceNameOverrides.insert(key, name);
+        }
+    }
+    settings.endArray();
 }
 
 void MainWindow::saveSettings() const
@@ -1009,8 +1456,19 @@ void MainWindow::saveSettings() const
     settings.setValue(QStringLiteral("connection/port"), m_portSpin->value());
     settings.setValue(QStringLiteral("connection/tls"), m_tlsCheck->isChecked());
     settings.setValue(QStringLiteral("connection/fingerprint"), m_fingerprintEdit->text());
+    settings.setValue(QStringLiteral("connection/token"), m_tokenEdit->text());
 
     settings.setValue(QStringLiteral("preferences/language"), m_language);
     settings.setValue(QStringLiteral("preferences/fontScale"), m_fontScale);
     settings.setValue(QStringLiteral("preferences/tooltipsEnabled"), m_tooltipsEnabled);
+    settings.setValue(QStringLiteral("preferences/simpleMode"), m_simpleMode);
+
+    settings.beginWriteArray(QStringLiteral("deviceNameOverrides"));
+    int index = 0;
+    for (auto it = m_deviceNameOverrides.cbegin(); it != m_deviceNameOverrides.cend(); ++it) {
+        settings.setArrayIndex(index++);
+        settings.setValue(QStringLiteral("deviceKey"), it.key());
+        settings.setValue(QStringLiteral("name"), it.value());
+    }
+    settings.endArray();
 }

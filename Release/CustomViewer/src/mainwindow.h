@@ -7,6 +7,7 @@
 #include <QMainWindow>
 #include <QSet>
 
+class QAction;
 class QCheckBox;
 class QDialog;
 class QFrame;
@@ -19,6 +20,7 @@ class QStackedWidget;
 class QTabBar;
 class QTimer;
 class QToolButton;
+class QTreeWidget;
 class MonitorWidget;
 class DeviceTileWidget;
 class DeviceDetailView;
@@ -65,6 +67,9 @@ private slots:
     void switchTab(int index);
     void addNewTab();
     void closeTab(int index);
+    // ViewerControls/Tabs.qml: drag-reorder and double-click-to-rename.
+    void moveTab(int from, int to);
+    void renameTab(int index);
     void openAddDeviceDialog();
     // "Grids" subbar button -- matches the real Kickidler viewer's
     // TrackerGridsPanel.qml (a slide-out panel of preset quadrator layouts,
@@ -73,6 +78,21 @@ private slots:
     // actually useful here: picking a fixed column count for the current
     // tab instead of the width-derived default (see TrackerTab::columnsOverride).
     void openGridsPanel();
+    // TrackerFiltersPanel.qml equivalent -- toggles a side panel listing
+    // violation-rule categories. There's no rule engine anywhere in this
+    // system (PersonalHost has no concept of a "violation"), so the panel
+    // is structural/visual only for now: it shows the category tree and a
+    // trash drop target the same as the original, but nothing is wired to
+    // actual detection yet. Kept separate from the rule engine so the UI
+    // is ready the day PersonalHost gains one.
+    void toggleFiltersPanel(bool visible);
+    // TopPanel.qml's main menu has a "Simple/Advanced mode" switch that
+    // swaps the whole organization model (departments/roles) in the real
+    // app. We have no department model to swap, so this only toggles
+    // whether department-shaped affordances (the Grids panel's "assign
+    // department" entry, the tree root label in the add-device picker)
+    // are shown -- a stub for when PersonalHost grows an org model.
+    void setSimpleMode(bool simple);
     void openDeviceDetail(quint32 sessionKey);
     void closeDeviceDetail();
     void pruneStaleWindowStreams();
@@ -126,7 +146,11 @@ protected:
     QPushButton *m_connectButton = nullptr;
     QPushButton *m_snapshotButton = nullptr;
     QLabel *m_statusLabel = nullptr;
-    QLabel *m_agentLabel = nullptr;
+    QLabel *m_agentLabel = nullptr; // utils/NoEmployeesAssignedInformer.qml equivalent
+    // utils/NoCNodeConnectionBlocker.qml / NoEmployeesAssignedInformer.qml
+    // equivalents -- see connectOrDisconnect()/updateStatus()/addMonitor().
+    QTimer *m_noConnectionTimer = nullptr;
+    QTimer *m_noEmployeesTimer = nullptr;
     QWidget *m_monitorContainer = nullptr;
     QGridLayout *m_monitorGrid = nullptr;
 
@@ -142,8 +166,21 @@ protected:
     // (demo mode / single-session PersonalScreenAgent) -- same fallback
     // MonitorInfo grouping has always used.
     QHash<quint32, QString> m_deviceUsernames; // key: deviceKey
+    // Local-only rename override (see DeviceDetailView::renameRequested) --
+    // persisted in QSettings, keyed by deviceKey.
+    QHash<quint32, QString> m_deviceNameOverrides;
     QHash<quint32, quint32> m_devicePrimaryStream; // key: deviceKey -> first-seen streamId
     QHash<quint32, QList<quint32>> m_deviceMonitorStreams; // key: deviceKey
+    // Latest WTS session state PersonalHost reported for this device
+    // (sessionmanager.cpp's wtsStateToString: "active"/"connected"/
+    // "disconnected"/"idle"/"other") -- real backend data that was
+    // previously received and discarded (see addMonitor()). Drives the
+    // tile status badge (StatusIcon.qml equivalent) and the add-device
+    // picker's "online only" filter. The original also distinguishes
+    // locked-screen/screensaver/"video watch disabled"/removed-employee,
+    // none of which PersonalHost currently reports -- those stay as the
+    // generic "connecting" fallback until the grabber is extended.
+    QHash<quint32, QString> m_deviceSessionState; // key: deviceKey
     // Reverse lookup for updateFrame() to find which device (and so which
     // tiles) a given streamId belongs to, for the tile video selector --
     // covers both monitor and window streams.
@@ -198,4 +235,17 @@ protected:
     DeviceDetailView *m_deviceDetailView = nullptr;
     QPushButton *m_trackerNavButton = nullptr;
     QPushButton *m_historyNavButton = nullptr;
+
+    // TrackerDefaultPrompt.qml equivalent: swaps in for the monitor grid
+    // scroll area when the current tab has no real tiles at all.
+    QStackedWidget *m_gridStack = nullptr;
+    QWidget *m_gridScrollPage = nullptr;
+    QWidget *m_emptyPrompt = nullptr;
+
+    // TrackerFiltersPanel.qml equivalent -- see toggleFiltersPanel().
+    QFrame *m_filtersPanel = nullptr;
+    QPushButton *m_filtersButton = nullptr;
+
+    bool m_simpleMode = false;
+    QAction *m_simpleModeAction = nullptr;
 };
