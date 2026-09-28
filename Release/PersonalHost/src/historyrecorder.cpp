@@ -227,15 +227,38 @@ QByteArray HistoryRecorder::readFrame(quint32 monitorStreamId, qint64 timestampM
     if (!m_database.isOpen()) {
         return {};
     }
-    QSqlQuery query(m_database);
-    query.prepare(QStringLiteral(
-        "SELECT file_path FROM frames WHERE monitor_stream_id = ? AND timestamp_ms = ? LIMIT 1"));
-    query.addBindValue(monitorStreamId);
-    query.addBindValue(timestampMs);
-    if (!query.exec() || !query.next()) {
-        return {};
+    // Each monitor is recorded on its own clock (see recordFrame), so the
+    // viewer asking every screen of a device for monitor 1's timestamps
+    // almost never hits an exact match on the others. Serve what that
+    // screen showed at that moment instead: its latest frame at or before
+    // timestampMs, else the first one after -- within kMaxDistanceMs, so a
+    // screen that wasn't being recorded then stays empty rather than
+    // showing something from hours away.
+    constexpr qint64 kMaxDistanceMs = 10 * 60 * 1000;
+    QString relativePath;
+    QSqlQuery before(m_database);
+    before.prepare(QStringLiteral(
+        "SELECT file_path FROM frames WHERE monitor_stream_id = ? AND timestamp_ms <= ? "
+        "AND timestamp_ms >= ? ORDER BY timestamp_ms DESC LIMIT 1"));
+    before.addBindValue(monitorStreamId);
+    before.addBindValue(timestampMs);
+    before.addBindValue(timestampMs - kMaxDistanceMs);
+    if (before.exec() && before.next()) {
+        relativePath = before.value(0).toString();
+    } else {
+        QSqlQuery after(m_database);
+        after.prepare(QStringLiteral(
+            "SELECT file_path FROM frames WHERE monitor_stream_id = ? AND timestamp_ms > ? "
+            "AND timestamp_ms <= ? ORDER BY timestamp_ms ASC LIMIT 1"));
+        after.addBindValue(monitorStreamId);
+        after.addBindValue(timestampMs);
+        after.addBindValue(timestampMs + kMaxDistanceMs);
+        if (!after.exec() || !after.next()) {
+            return {};
+        }
+        relativePath = after.value(0).toString();
     }
-    QFile file(QDir(m_historyDir).filePath(query.value(0).toString()));
+    QFile file(QDir(m_historyDir).filePath(relativePath));
     if (!file.open(QIODevice::ReadOnly)) {
         return {};
     }

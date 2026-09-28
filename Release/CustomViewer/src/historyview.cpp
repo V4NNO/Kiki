@@ -10,16 +10,20 @@
 #include <QFile>
 #include <QFileDialog>
 #include <QFormLayout>
+#include <QGraphicsOpacityEffect>
 #include <QHBoxLayout>
 #include <QLabel>
 #include <QListWidget>
 #include <QMessageBox>
 #include <QMouseEvent>
+#include <QFontDatabase>
 #include <QPainter>
+#include <QSet>
 #include <QAbstractItemView>
 #include <QHeaderView>
 #include <QPushButton>
 #include <QResizeEvent>
+#include <QScrollBar>
 #include <QScrollArea>
 #include <QSizePolicy>
 #include <QTableWidget>
@@ -28,9 +32,11 @@
 #include <QTimer>
 #include <QToolButton>
 #include <QVBoxLayout>
+#include <QWheelEvent>
 
 #include <algorithm>
 #include <array>
+#include <cmath>
 #include <limits>
 
 namespace {
@@ -45,61 +51,123 @@ QString formatDuration(qint64 ms)
     return QStringLiteral("%1h %2m").arg(totalMinutes / 60).arg(totalMinutes % 60);
 }
 
-// Shared time-of-day -> pixel mapping used by ActivityBarWidget,
-// EfficiencyBarWidget and TimelineWidget so they stay pixel-aligned when
-// stacked -- the yellow current-position line has to land on the same x in
-// all three.
-int xForTimeOfDay(qint64 timestampMs, qint64 rangeStartMs, qint64 rangeEndMs, int widgetWidth)
+// Timeline/Activity/Efficiency/violations all used to span just
+// [first captured timestamp, last captured timestamp], so a device that only
+// recorded 5 minutes today stretched those 5 minutes across the whole bar --
+// the real viewer's bar always spans the full day (00:00-24:00), with actual
+// activity occupying only its real slice of that fixed width.
+QPair<qint64, qint64> dayRangeMs(const QString &day)
 {
-    if (rangeEndMs <= rangeStartMs) {
-        return 0;
+    const QDate date = QDate::fromString(day, QStringLiteral("yyyyMMdd"));
+    if (!date.isValid()) {
+        return {0, 0};
     }
-    const double fraction = qBound(
-        0.0, static_cast<double>(timestampMs - rangeStartMs) / (rangeEndMs - rangeStartMs), 1.0);
-    return static_cast<int>(fraction * widgetWidth);
+    const qint64 start = QDateTime(date, QTime(0, 0)).toMSecsSinceEpoch();
+    return {start, start + 24 * 60 * 60 * 1000};
 }
 
-// The fixed-width left column shared by the transport controls (Change
-// settings/Video+speed/Text, see the HBox in HistoryView's constructor) and
-// every chart row below it (Activity/Efficiency/ViolationsFilter, still
-// full-page-width widgets that reserve this much blank space on their own
-// left edge) so the yellow current-position line lands
-// on the exact same x in all of them and the whole block reads as one
-// aligned unit, matching the real viewer's History.qml layout (button
-// column left, chart/timeline content right, sharing one inset). TimeAxis
-// is the one exception: it now lives INSIDE the button-column HBox itself
-// (see the constructor), so it draws in plain local coordinates with no
-// offset of its own -- adding one there would double up with the HBox's
-// own positioning.
-// At the reference window width the chart starts at x=283.  History.qml
-// gives the page 8 px of outer inset, leaving a 275 px controls/labels
-// column.  Keeping this value shared is important: the scrubber, time
-// labels and every chart must start on exactly the same vertical line.
-constexpr int kLeftColumnWidth = 275;
+// History.qml's page background. Background.qml itself is compiled C++ (not
+// in qml_real), but the anti-aliased rounded caps of sliderBar/bg_none.png
+// were rendered against exactly this color.
+const QColor kHistoryBackground(0x47, 0x48, 0x50);
+const QColor kTickColor(0x54, 0x54, 0x5a);       // chart/TimeLine.qml
+const QColor kGridColor(0x53, 0x53, 0x5b);       // chart/Grid.qml
+const QColor kSeparatorDark(0x43, 0x44, 0x4c);   // utils/Chart.qml separator1
+const QColor kSeparatorLight(0x4c, 0x4d, 0x54);
+const QColor kActivityColor(0x7a, 0xa1, 0xe2);   // content/HistoLine.qml
+const QColor kMarkerColor(0xf0, 0xe6, 0x8c);     // HistoryPlayerMarkerControl.qml: "khaki"
 
-constexpr int kChartGridStep = 36;
+// Geometry of History.qml's sliderAndMeta block (125px) and chartsItem
+// (opened to 186px), in page coordinates.
+constexpr int kControlBlockHeight = 125;
+constexpr int kChartsItemHeight = 186;
+constexpr int kSliderBarY = 35;         // MultiSessionsSlider: ListView topMargin 35
+constexpr int kSliderBarHeight = 4;     // SliderBar.qml __sliderBar
+constexpr int kTimeLineY = 62;          // MultiSessionsSlider column, single session
+constexpr int kTimeLineHighHeight = 16; // TimeLine.qml highLineHeight
+constexpr int kTimeLineLowHeight = 12;  // TimeLine.qml lowLineHeight
+constexpr int kChartLeft = 10;          // Filters anchors.leftMargin
+constexpr int kChartBottomMargin = 15;  // Filters anchors.bottomMargin
+constexpr int kLabelsLeft = 20;         // ExtraHeaders mainHeaderText leftMargin
+constexpr int kRowHeight = 30;          // ExtraHeaders.rowHeight / HistoLine outer Item
+constexpr int kHistogramHeight = 20;    // HistoLine.histogramHeight
+constexpr int kProductivityHeight = 22; // Line.qml singleLineHeight (not a filter line)
 
-void drawChartBackground(QPainter &painter, int left, int top, int chartWidth, int chartHeight)
+void ensureHistoryFonts()
 {
-    painter.fillRect(QRect(left, top, chartWidth, chartHeight), QColor(0x3b, 0x3d, 0x45));
-    painter.setPen(QPen(QColor(0x44, 0x46, 0x4e), 1));
-    for (int x = left; x <= left + chartWidth; x += kChartGridStep) {
-        painter.drawLine(x, top, x, top + chartHeight);
-    }
+    static const bool loaded = [] {
+        for (const QString &file : {QStringLiteral(":/fonts/Roboto-Regular.ttf"),
+                                    QStringLiteral(":/fonts/Roboto-Medium.ttf"),
+                                    QStringLiteral(":/fonts/Roboto-Bold.ttf")}) {
+            QFontDatabase::addApplicationFont(file);
+        }
+        return true;
+    }();
+    Q_UNUSED(loaded)
 }
 
-void drawPositionLine(QPainter &painter, qint64 positionMs, qint64 rangeStartMs, qint64 rangeEndMs,
-                     int widgetWidth, int widgetHeight, int leftOffset = 0)
+// Fonts.rb_small_b: Roboto Bold 10px -- a real screenshot's
+// "Friday, September 25, 2026" date label is exactly 134px wide, which is
+// what Roboto Bold measures at 10px.
+QFont smallBoldFont()
 {
-    if (positionMs <= 0 || rangeEndMs <= rangeStartMs) {
+    QFont font(QStringLiteral("Roboto"));
+    font.setPixelSize(10);
+    font.setBold(true);
+    return font;
+}
+
+// Fonts.rr_medium: Roboto Regular 12px ("Activity" measures 40px in the
+// same screenshot).
+QFont mediumFont()
+{
+    QFont font(QStringLiteral("Roboto"));
+    font.setPixelSize(12);
+    return font;
+}
+
+// QML BorderImage with horizontalTileMode: Repeat (and the default vertical
+// Stretch): fixed left/right caps, middle slice tiled across.
+void drawBorderImage(QPainter &painter, const QRectF &target, const QPixmap &pixmap, int borderLeft,
+                     int borderRight)
+{
+    if (pixmap.isNull() || target.width() <= 0 || target.height() <= 0) {
         return;
     }
-    const int x = leftOffset
-        + xForTimeOfDay(positionMs, rangeStartMs, rangeEndMs, widgetWidth - leftOffset);
-    painter.setPen(QPen(QColor(0, 0, 0, 160), 3));
-    painter.drawLine(x, 0, x, widgetHeight);
-    painter.setPen(QPen(QColor(0xff, 0xd7, 0x00), 2));
-    painter.drawLine(x, 0, x, widgetHeight);
+    const int height = qMax(1, qRound(target.height()));
+    const QPixmap scaled = pixmap.height() == height
+        ? pixmap
+        : pixmap.scaled(pixmap.width(), height, Qt::IgnoreAspectRatio, Qt::SmoothTransformation);
+    const qreal left = qMin<qreal>(borderLeft, target.width() / 2);
+    const qreal right = qMin<qreal>(borderRight, target.width() - left);
+    if (left > 0) {
+        painter.drawPixmap(QRectF(target.left(), target.top(), left, height), scaled,
+                           QRectF(0, 0, left, height));
+    }
+    if (right > 0) {
+        painter.drawPixmap(QRectF(target.right() - right, target.top(), right, height), scaled,
+                           QRectF(scaled.width() - right, 0, right, height));
+    }
+    const int middleWidth = scaled.width() - borderLeft - borderRight;
+    const qreal targetMiddle = target.width() - left - right;
+    if (middleWidth > 0 && targetMiddle > 0) {
+        painter.drawTiledPixmap(QRectF(target.left() + left, target.top(), targetMiddle, height),
+                                scaled.copy(borderLeft, 0, middleWidth, height));
+    }
+}
+
+// Two 1px lines, darker then lighter -- the separator style Chart.qml's
+// separator1 spells out, used for its HSeparator/VSeparator too.
+void drawHorizontalSeparator(QPainter &painter, qreal x, qreal y, qreal width)
+{
+    painter.fillRect(QRectF(x, y, width, 1), kSeparatorDark);
+    painter.fillRect(QRectF(x, y + 1, width, 1), kSeparatorLight);
+}
+
+void drawVerticalSeparator(QPainter &painter, qreal x, qreal y, qreal height)
+{
+    painter.fillRect(QRectF(x, y, 1, height), kSeparatorDark);
+    painter.fillRect(QRectF(x + 1, y, 1, height), kSeparatorLight);
 }
 
 // Groups consecutive same-window keystroke entries into "pressing period"
@@ -301,274 +369,274 @@ bool writeMinimalXlsx(const QString &path, const QList<QStringList> &rows)
 
 }
 
-ActivityBarWidget::ActivityBarWidget(QWidget *parent)
+HistoryVideoHeader::HistoryVideoHeader(QWidget *parent)
     : QWidget(parent)
 {
-    // Real Kickidler viewer's activity chart is compact, not a dominant
-    // tall block -- matches HistoLine.qml's histogramHeight (20).
     setFixedHeight(24);
 }
 
-void ActivityBarWidget::setSamples(const QList<HistoryActivitySample> &samples, qint64 rangeStartMs,
-                                   qint64 rangeEndMs)
+void HistoryVideoHeader::setName(const QString &name)
 {
-    m_samples = samples;
-    m_rangeStart = rangeStartMs;
-    m_rangeEnd = rangeEndMs;
+    m_name = name;
     update();
 }
 
-void ActivityBarWidget::setCurrentPositionMs(qint64 positionMs)
+void HistoryVideoHeader::setMoment(const QString &moment)
 {
-    m_currentPositionMs = positionMs;
+    m_moment = moment;
     update();
 }
 
-void ActivityBarWidget::setBucketMs(qint64 bucketMs)
-{
-    if (bucketMs <= 0 || m_bucketMs == bucketMs) {
-        return;
-    }
-    m_bucketMs = bucketMs;
-    update();
-}
-
-void ActivityBarWidget::paintEvent(QPaintEvent *)
+void HistoryVideoHeader::paintEvent(QPaintEvent *)
 {
     QPainter painter(this);
-    painter.fillRect(rect(), QColor(0x24, 0x27, 0x2e));
-    drawChartBackground(painter, kLeftColumnWidth, 0, qMax(1, width() - kLeftColumnWidth), height());
-    // chart/ExtraHeaders.qml's row label, in the same left column as the
-    // transport buttons and every other chart row (see kLeftColumnWidth) --
-    // confirmed from a real screenshot (the label reads "Activity", plain
-    // left-aligned text, not a guess).
-    painter.setPen(QColor(0xb6, 0xb6, 0xb8));
-    painter.setFont(QFont(QStringLiteral("Segoe UI"), 8));
-    painter.drawText(QRect(8, 0, kLeftColumnWidth - 12, height()), Qt::AlignLeft | Qt::AlignVCenter,
-                     QStringLiteral("Activitate"));
-    if (m_samples.isEmpty() || m_rangeEnd <= m_rangeStart) {
-        return;
-    }
+    painter.fillRect(rect(), QColor(0x3f, 0x40, 0x47));
+    painter.fillRect(QRect(0, 0, width(), 1), QColor(0x33, 0x34, 0x3a));
+    painter.fillRect(QRect(0, 1, width(), 1), QColor(0x3b, 0x3c, 0x43));
+    painter.fillRect(QRect(0, height() - 2, width(), 1), QColor(0x3b, 0x3c, 0x42));
+    painter.fillRect(QRect(0, height() - 1, width(), 1), QColor(0x41, 0x42, 0x49));
 
-    // Bucket into fixed-size columns (m_bucketMs, see setBucketMs) and sum
-    // each bucket's actual inputEvents -- a real intensity measure, not
-    // just "was there any activity" -- then normalize to the busiest
-    // bucket in view, same idea as a real activity histogram (matches
-    // HistoLine.qml's `value[idx]`, a continuous 0..1 fed from the
-    // backend). An earlier version instead counted "active vs not" samples
-    // against an expected-samples-per-bucket estimate, which collapsed to
-    // a flat 0-or-1 result whenever a bucket held only one raw sample
-    // (e.g. at a 1-second Time step) -- every bar came out identical
-    // instead of varying with how active the period actually was.
-    const qint64 kBucketMs = m_bucketMs;
-    QHash<qint64, qint64> eventsByBucket;
-    qint64 maxBucketEvents = 1;
-    for (const HistoryActivitySample &sample : m_samples) {
-        if (sample.inputEvents <= 0) {
-            continue;
-        }
-        const qint64 bucket = (sample.timestampMs - m_rangeStart) / kBucketMs;
-        const qint64 total = eventsByBucket.value(bucket, 0) + sample.inputEvents;
-        eventsByBucket[bucket] = total;
-        maxBucketEvents = qMax(maxBucketEvents, total);
+    // name: Fonts.rr_medium_b, horizontally centered on its own;
+    // currentMarker: Fonts.rm_medium_b, anchored 10px right of the name.
+    QFont nameFont = mediumFont();
+    nameFont.setBold(true);
+    QFont markerFont(QStringLiteral("Roboto Medium"));
+    markerFont.setPixelSize(12);
+    markerFont.setBold(true);
+    const QFontMetrics nameMetrics(nameFont);
+    const int nameWidth = nameMetrics.horizontalAdvance(m_name);
+    const int nameX = (width() - nameWidth) / 2;
+    painter.setPen(Qt::white);
+    painter.setFont(nameFont);
+    painter.drawText(QRect(nameX, 0, nameWidth + 1, height()), Qt::AlignLeft | Qt::AlignVCenter, m_name);
+    if (!m_moment.isEmpty()) {
+        painter.setFont(markerFont);
+        painter.drawText(QRect(nameX + nameWidth + 10, 0, width(), height()),
+                         Qt::AlignLeft | Qt::AlignVCenter, m_moment);
     }
-
-    const qint64 bucketCount = qMax<qint64>(1, (m_rangeEnd - m_rangeStart) / kBucketMs + 1);
-    const int barAreaWidth = qMax(1, width() - kLeftColumnWidth);
-    const double bucketWidth = static_cast<double>(barAreaWidth) / static_cast<double>(bucketCount);
-    painter.setPen(Qt::NoPen);
-    // #7aa1e2: exact color from the real viewer's HistoLine.qml canvas draw.
-    painter.setBrush(QColor(0x7a, 0xa1, 0xe2));
-    for (auto it = eventsByBucket.cbegin(); it != eventsByBucket.cend(); ++it) {
-        const double fraction = qBound(0.0, static_cast<double>(it.value()) / maxBucketEvents, 1.0);
-        const int barHeight = qMax(1, static_cast<int>(fraction * (height() - 3)));
-        const int x = kLeftColumnWidth + static_cast<int>(it.key() * bucketWidth);
-        const int barWidth = qMax(1, static_cast<int>(bucketWidth) - 1);
-        painter.drawRect(x, height() - barHeight, barWidth, barHeight);
-    }
-
-    drawPositionLine(painter, m_currentPositionMs, m_rangeStart, m_rangeEnd, width(), height(),
-                     kLeftColumnWidth);
 }
 
-EfficiencyBarWidget::EfficiencyBarWidget(QWidget *parent)
+HistoryVideoStrip::HistoryVideoStrip(QWidget *parent)
     : QWidget(parent)
 {
-    setFixedHeight(20);
+    // utils/Spinner.qml: spinner.png rotated by 45 degrees every 300 ms.
+    m_spinnerTimer = new QTimer(this);
+    m_spinnerTimer->setInterval(300);
+    connect(m_spinnerTimer, &QTimer::timeout, this, [this] {
+        m_spinnerAngle = (m_spinnerAngle + 45) % 360;
+        update();
+    });
 }
 
-void EfficiencyBarWidget::setSegments(const QList<HistoryAppSegment> &segments,
-                                      const QHash<QString, QString> &categories,
-                                      qint64 rangeStartMs, qint64 rangeEndMs)
+void HistoryVideoStrip::setStreams(const QList<quint32> &streamIds)
 {
-    m_segments = segments;
-    m_categories = categories;
-    m_rangeStart = rangeStartMs;
-    m_rangeEnd = rangeEndMs;
-    update();
+    m_screens.clear();
+    for (quint32 streamId : streamIds) {
+        m_screens.append({streamId, {}, Status::Loading});
+    }
+    relayout();
 }
 
-void EfficiencyBarWidget::setCurrentPositionMs(qint64 positionMs)
+void HistoryVideoStrip::setAllLoading()
 {
-    m_currentPositionMs = positionMs;
-    update();
+    for (Screen &screen : m_screens) {
+        screen.status = Status::Loading;
+        screen.image = {};
+    }
+    relayout();
 }
 
-void EfficiencyBarWidget::paintEvent(QPaintEvent *)
+void HistoryVideoStrip::setFrame(quint32 streamId, const QImage &image)
 {
-    // Matches the real viewer's chart/content/Line.qml: when several
-    // distinct categories fall in the same pixel column (because segment
-    // boundaries are finer than one pixel of screen time), it does NOT
-    // blend or let the last one win -- it stacks them as equal-height
-    // horizontal bands within that column, top-to-bottom in the order they
-    // actually happened. Drawing each segment as one full-height rect (the
-    // previous approach) made only the LAST segment touching a column
-    // visible, silently hiding the others whenever more than one category
-    // occurred within the same on-screen pixel.
-    QPainter painter(this);
-    painter.fillRect(rect(), QColor(0x24, 0x27, 0x2e));
-    drawChartBackground(painter, kLeftColumnWidth, 0, qMax(1, width() - kLeftColumnWidth), height());
-    painter.setPen(QColor(0xb6, 0xb6, 0xb8));
-    painter.setFont(QFont(QStringLiteral("Segoe UI"), 8));
-    painter.drawText(QRect(8, 0, kLeftColumnWidth - 12, height()), Qt::AlignLeft | Qt::AlignVCenter,
-                     QStringLiteral("Eficiență"));
-    const int barAreaWidth = qMax(1, width() - kLeftColumnWidth);
-    if (!m_segments.isEmpty() && m_rangeEnd > m_rangeStart) {
-        const double span = static_cast<double>(m_rangeEnd - m_rangeStart);
-
-        QList<HistoryAppSegment> sorted = m_segments;
-        std::sort(sorted.begin(), sorted.end(),
-                 [](const HistoryAppSegment &a, const HistoryAppSegment &b) {
-                     return a.startMs < b.startMs;
-                 });
-
-        // column -> ordered, de-duplicated (consecutive) list of categories
-        // that occurred there.
-        QHash<int, QList<QString>> columnCategories;
-        for (const HistoryAppSegment &segment : std::as_const(sorted)) {
-            const QString category =
-                m_categories.value(segment.application, QStringLiteral("none"));
-            const double startFraction = (segment.startMs - m_rangeStart) / span;
-            const double endFraction = (segment.endMs - m_rangeStart) / span;
-            const int x0 = static_cast<int>(qBound(0.0, startFraction, 1.0) * barAreaWidth);
-            const int x1 =
-                qMax(x0 + 1, static_cast<int>(qBound(0.0, endFraction, 1.0) * barAreaWidth));
-            for (int x = x0; x < x1; ++x) {
-                QList<QString> &categories = columnCategories[x];
-                if (categories.isEmpty() || categories.last() != category) {
-                    categories.append(category);
-                }
-            }
-        }
-
-        painter.setPen(Qt::NoPen);
-        for (auto it = columnCategories.cbegin(); it != columnCategories.cend(); ++it) {
-            const QList<QString> &categories = it.value();
-            const double bandHeight = static_cast<double>(height()) / categories.size();
-            double y = 0.0;
-            for (const QString &category : categories) {
-                painter.setBrush(EfficiencyCategoryButton::color(category));
-                const int top = static_cast<int>(y);
-                const int bottom = static_cast<int>(y + bandHeight);
-                painter.drawRect(kLeftColumnWidth + it.key(), top, 1, qMax(1, bottom - top));
-                y += bandHeight;
-            }
+    for (Screen &screen : m_screens) {
+        if (screen.streamId == streamId) {
+            screen.image = image;
+            screen.status = image.isNull() ? Status::Offline : Status::Online;
         }
     }
-    drawPositionLine(painter, m_currentPositionMs, m_rangeStart, m_rangeEnd, width(), height(),
-                     kLeftColumnWidth);
+    relayout();
 }
 
-namespace {
-constexpr int kViolationRowHeight = 20;
-// Shares kLeftColumnWidth with the transport controls and every other
-// chart row (see its own comment) so the violations rows' bars line up
-// with Activity/Efficiency above them instead of using their own width.
-constexpr int kViolationLabelWidth = kLeftColumnWidth;
+void HistoryVideoStrip::setOffline(quint32 streamId)
+{
+    for (Screen &screen : m_screens) {
+        if (screen.streamId == streamId) {
+            screen.image = {};
+            screen.status = Status::Offline;
+        }
+    }
+    relayout();
 }
 
-ViolationsFilterWidget::ViolationsFilterWidget(QWidget *parent)
+void HistoryVideoStrip::setViewSize(const QSize &size)
+{
+    if (size != m_viewSize) {
+        m_viewSize = size;
+        relayout();
+    }
+}
+
+QList<QRect> HistoryVideoStrip::screenRects() const
+{
+    // Video.qml: Image height = video height - header - 5; width unset while
+    // online (PreserveAspectFit -> aspect-correct width), width/count while
+    // loading or offline; Row spacing 30, left-padded to center it.
+    QList<QRect> rects;
+    if (m_screens.isEmpty() || m_viewSize.isEmpty()) {
+        return rects;
+    }
+    const int frameHeight = qMax(1, m_viewSize.height() - 5);
+    const int evenWidth = m_viewSize.width() / m_screens.size();
+    QList<int> widths;
+    int total = 0;
+    for (const Screen &screen : m_screens) {
+        const int width = screen.status == Status::Online && screen.image.height() > 0
+            ? qRound(static_cast<double>(frameHeight) * screen.image.width() / screen.image.height())
+            : evenWidth;
+        widths.append(width);
+        total += width;
+    }
+    total += 30 * (m_screens.size() - 1);
+    int x = total > m_viewSize.width() ? 0 : (m_viewSize.width() - total) / 2;
+    for (int width : std::as_const(widths)) {
+        rects.append(QRect(x, 0, width, frameHeight));
+        x += width + 30;
+    }
+    return rects;
+}
+
+void HistoryVideoStrip::relayout()
+{
+    const QList<QRect> rects = screenRects();
+    const int contentWidth = rects.isEmpty() ? 0 : rects.last().right() + 1;
+    setFixedSize(qMax(contentWidth, m_viewSize.width()), qMax(1, m_viewSize.height()));
+    bool loading = false;
+    for (const Screen &screen : std::as_const(m_screens)) {
+        loading = loading || screen.status == Status::Loading;
+    }
+    if (loading && !m_spinnerTimer->isActive()) {
+        m_spinnerTimer->start();
+    } else if (!loading) {
+        m_spinnerTimer->stop();
+    }
+    update();
+}
+
+void HistoryVideoStrip::paintEvent(QPaintEvent *)
+{
+    static const QPixmap spinner(QStringLiteral(":/history/spinner/spinner.png"));
+    static const QPixmap emptyStream(QStringLiteral(":/history/big_emptyStream.png"));
+    QPainter painter(this);
+    painter.setRenderHint(QPainter::SmoothPixmapTransform);
+    const QList<QRect> rects = screenRects();
+    for (int i = 0; i < rects.size() && i < m_screens.size(); ++i) {
+        const Screen &screen = m_screens.at(i);
+        const QRect &r = rects.at(i);
+        switch (screen.status) {
+        case Status::Online:
+            painter.drawImage(r, screen.image);
+            break;
+        case Status::Loading:
+            painter.save();
+            painter.translate(r.center());
+            painter.rotate(m_spinnerAngle);
+            painter.drawPixmap(-spinner.width() / 2, -spinner.height() / 2, spinner);
+            painter.restore();
+            break;
+        case Status::Offline: {
+            // big_emptyStream.png over "No video" (18pt bold #38373d),
+            // spacing 10, centered in a #424349 box.
+            painter.fillRect(r, QColor(0x42, 0x43, 0x49));
+            QFont font(QStringLiteral("Roboto"));
+            font.setPointSize(18);
+            font.setBold(true);
+            const QFontMetrics metrics(font);
+            const QString text = QStringLiteral("No video");
+            const int blockHeight = emptyStream.height() + 10 + metrics.height();
+            const int top = r.center().y() - blockHeight / 2;
+            painter.drawPixmap(r.center().x() - emptyStream.width() / 2, top, emptyStream);
+            painter.setFont(font);
+            painter.setPen(QColor(0x38, 0x37, 0x3d));
+            painter.drawText(QRect(r.left(), top + emptyStream.height() + 10, r.width(), metrics.height()),
+                             Qt::AlignHCenter | Qt::AlignTop, text);
+            break;
+        }
+        }
+    }
+}
+
+void HistoryVideoStrip::mousePressEvent(QMouseEvent *event)
+{
+    for (const QRect &r : screenRects()) {
+        if (r.contains(event->pos())) {
+            emit clicked();
+            return;
+        }
+    }
+}
+
+KeystreamBar::KeystreamBar(QWidget *parent)
     : QWidget(parent)
 {
+    setFixedHeight(30);
 }
 
-void ViolationsFilterWidget::setRows(const QList<ViolationRow> &rows, qint64 rangeStartMs,
-                                     qint64 rangeEndMs)
+void KeystreamBar::setText(const QString &past, const QString &future)
 {
-    m_rows = rows;
-    m_rangeStart = rangeStartMs;
-    m_rangeEnd = rangeEndMs;
-    setFixedHeight(qMax(kViolationRowHeight, rows.size() * kViolationRowHeight));
+    if (past == m_past && future == m_future) {
+        return;
+    }
+    m_past = past;
+    m_future = future;
     update();
 }
 
-void ViolationsFilterWidget::setCurrentPositionMs(qint64 positionMs)
+void KeystreamBar::wheelEvent(QWheelEvent *event)
 {
-    m_currentPositionMs = positionMs;
+    // The real bar is a ScrollView, so an overlong line can be scrolled.
+    const int delta = event->angleDelta().x() != 0 ? event->angleDelta().x() : event->angleDelta().y();
+    m_scroll = qMax(0, m_scroll - delta / 2);
     update();
 }
 
-QSize ViolationsFilterWidget::sizeHint() const
+void KeystreamBar::paintEvent(QPaintEvent *)
 {
-    return QSize(400, qMax(kViolationRowHeight, m_rows.size() * kViolationRowHeight));
-}
-
-void ViolationsFilterWidget::paintEvent(QPaintEvent *)
-{
+    static const QPixmap background(QStringLiteral(":/history/keylogger_bg.png"));
     QPainter painter(this);
-    painter.fillRect(rect(), QColor(0x24, 0x27, 0x2e));
-    const int stripX = kViolationLabelWidth;
-    const int stripWidth = qMax(1, width() - stripX);
-    const double span = static_cast<double>(m_rangeEnd - m_rangeStart);
+    // BorderImage, 2px top/bottom borders, tiled horizontally, stretched
+    // vertically -- keylogger_bg.png is 1px wide.
+    const int bgHeight = background.height();
+    painter.drawTiledPixmap(QRect(0, 0, width(), 2), background.copy(0, 0, 1, 2));
+    painter.drawTiledPixmap(QRect(0, height() - 2, width(), 2), background.copy(0, bgHeight - 2, 1, 2));
+    painter.drawTiledPixmap(QRect(0, 2, width(), height() - 4),
+                            background.copy(0, 2, 1, bgHeight - 4).scaled(1, height() - 4));
 
-    painter.setFont(QFont(QStringLiteral("Segoe UI"), 8));
-    for (int row = 0; row < m_rows.size(); ++row) {
-        const ViolationRow &violation = m_rows.at(row);
-        const int y = row * kViolationRowHeight;
-
-        painter.setPen(QColor(0xb6, 0xb6, 0xb8));
-        painter.drawText(QRect(4, y, kViolationLabelWidth - 8, kViolationRowHeight),
-                         Qt::AlignLeft | Qt::AlignVCenter,
-                         painter.fontMetrics().elidedText(violation.label, Qt::ElideRight,
-                                                          kViolationLabelWidth - 12));
-
-        drawChartBackground(painter, stripX, y, stripWidth, kViolationRowHeight - 2);
-
-        if (span > 0) {
-            painter.setBrush(QColor(0xe7, 0x4c, 0x3c));
-            for (const auto &violationRange : violation.ranges) {
-                const double startFraction = (violationRange.first - m_rangeStart) / span;
-                const double endFraction = (violationRange.second - m_rangeStart) / span;
-                const int x = stripX + static_cast<int>(qBound(0.0, startFraction, 1.0) * stripWidth);
-                const int right =
-                    stripX + static_cast<int>(qBound(0.0, endFraction, 1.0) * stripWidth);
-                painter.drawRect(x, y, qMax(1, right - x), kViolationRowHeight - 2);
-            }
-        }
-    }
-
-    if (m_currentPositionMs > 0 && span > 0) {
-        const int x = stripX + xForTimeOfDay(m_currentPositionMs, m_rangeStart, m_rangeEnd, stripWidth);
-        painter.setPen(QPen(QColor(0, 0, 0, 160), 3));
-        painter.drawLine(x, 0, x, height());
-        painter.setPen(QPen(QColor(0xff, 0xd7, 0x00), 2));
-        painter.drawLine(x, 0, x, height());
-    }
+    // Row of two Keystream texts (Fonts.rr_medium): typed so far in white,
+    // still to come in gray; x = max(0, (viewport - row) / 2), leftMargin 5.
+    const QFont font = mediumFont();
+    painter.setFont(font);
+    const QFontMetrics metrics(font);
+    const int viewport = width() - 10;
+    const int pastWidth = metrics.horizontalAdvance(m_past);
+    const int rowWidth = pastWidth + metrics.horizontalAdvance(m_future);
+    const int maxScroll = qMax(0, rowWidth - viewport);
+    const int scroll = qMin(m_scroll, maxScroll);
+    const int x = 5 + qMax(0, (viewport - rowWidth) / 2) - scroll;
+    painter.setClipRect(QRect(5, 0, viewport, height()));
+    painter.setPen(Qt::white);
+    painter.drawText(QRect(x, 0, pastWidth + 1, height()), Qt::AlignLeft | Qt::AlignVCenter, m_past);
+    painter.setPen(QColor(Qt::gray));
+    painter.drawText(QRect(x + pastWidth, 0, rowWidth - pastWidth + 1, height()),
+                     Qt::AlignLeft | Qt::AlignVCenter, m_future);
 }
 
 TimelineWidget::TimelineWidget(QWidget *parent)
     : QWidget(parent)
 {
-    // Paired only with the settings/Play/Mute row (see the constructor),
-    // not the whole 3-row button block -- matches a real screenshot: only
-    // ~10-20px of blank space between the video/keylogger above and the
-    // scrub circle, which a taller widget (stretched to match 3 button
-    // rows, or History.qml's literal 125px) can't give without leaving a
-    // tall empty area above the track. The track itself still sits near
-    // this widget's own bottom edge (see paintEvent), matching the real
-    // slider's position right at the row's bottom.
-    setFixedHeight(30);
-    setMouseTracking(false);
+    // Spans sliderAndMeta from its top down to where TimeLine starts, so the
+    // bar lands at the real y=35 of the 125px block.
+    setFixedHeight(kTimeLineY);
+    setMouseTracking(true);
 }
 
 void TimelineWidget::setTimestamps(const QList<qint64> &timestamps)
@@ -576,6 +644,21 @@ void TimelineWidget::setTimestamps(const QList<qint64> &timestamps)
     m_timestamps = timestamps;
     m_currentIndex = timestamps.isEmpty() ? -1 : qBound(0, m_currentIndex, timestamps.size() - 1);
     update();
+}
+
+void TimelineWidget::setRange(qint64 rangeStartMs, qint64 rangeEndMs)
+{
+    m_rangeStart = rangeStartMs;
+    m_rangeEnd = rangeEndMs;
+    update();
+}
+
+void TimelineWidget::setStepMs(qint64 stepMs)
+{
+    if (stepMs > 0 && stepMs != m_stepMs) {
+        m_stepMs = stepMs;
+        update();
+    }
 }
 
 void TimelineWidget::setCurrentIndex(int index)
@@ -587,25 +670,37 @@ void TimelineWidget::setCurrentIndex(int index)
     update();
 }
 
-QSize TimelineWidget::sizeHint() const
+int TimelineWidget::xForTime(qint64 timestampMs) const
 {
-    return QSize(400, 30);
+    // SliderBar.qml positions everything in whole markers (markWidth *
+    // marker), a marker being one Time step.
+    if (m_rangeEnd <= m_rangeStart || m_stepMs <= 0) {
+        return 0;
+    }
+    const double markWidth = static_cast<double>(width()) * m_stepMs / (m_rangeEnd - m_rangeStart);
+    const qint64 marker = qMax<qint64>(0, (timestampMs - m_rangeStart) / m_stepMs);
+    return static_cast<int>(markWidth * marker);
+}
+
+QRect TimelineWidget::pickRect() const
+{
+    if (m_currentIndex < 0 || m_currentIndex >= m_timestamps.size()) {
+        return {};
+    }
+    // 19x19 pick image, vertically centered on the 4px bar, horizontally
+    // centered on its marker (Math.max(markWidth, 19) wide).
+    const int x = xForTime(m_timestamps.at(m_currentIndex));
+    return QRect(x - 9, kSliderBarY + kSliderBarHeight / 2 - 9, 19, 19);
 }
 
 int TimelineWidget::indexForX(int x) const
 {
-    if (m_timestamps.isEmpty() || width() <= 0) {
+    if (m_timestamps.isEmpty() || width() <= 0 || m_rangeEnd <= m_rangeStart) {
         return -1;
     }
-    const qint64 rangeStart = m_timestamps.first();
-    const qint64 rangeEnd = m_timestamps.last();
-    if (rangeEnd <= rangeStart) {
-        return 0;
-    }
     const double fraction = qBound(0.0, static_cast<double>(x) / width(), 1.0);
-    const qint64 targetMs = rangeStart + static_cast<qint64>(fraction * (rangeEnd - rangeStart));
-    // Nearest timestamp to targetMs -- frames aren't necessarily evenly
-    // spaced, so a straight index-from-fraction would drift.
+    const qint64 targetMs = m_rangeStart + static_cast<qint64>(fraction * (m_rangeEnd - m_rangeStart));
+    // Nearest captured frame -- frames aren't evenly spaced.
     int closest = 0;
     qint64 closestDelta = qAbs(m_timestamps.first() - targetMs);
     for (int i = 1; i < m_timestamps.size(); ++i) {
@@ -631,54 +726,110 @@ void TimelineWidget::seekToX(int x)
 
 void TimelineWidget::mousePressEvent(QMouseEvent *event)
 {
+    // Only the bar itself (plus the pick) is clickable, like SliderBar.qml's
+    // MouseArea over __sliderBar.
+    const QRect hitArea(0, kSliderBarY - 8, width(), kSliderBarHeight + 16);
+    if (!hitArea.contains(event->pos()) && !pickRect().contains(event->pos())) {
+        return;
+    }
+    m_pressed = true;
     seekToX(event->pos().x());
 }
 
 void TimelineWidget::mouseMoveEvent(QMouseEvent *event)
 {
-    if (event->buttons() & Qt::LeftButton) {
+    if (m_pressed && (event->buttons() & Qt::LeftButton)) {
         seekToX(event->pos().x());
+        return;
+    }
+    const bool hovered = pickRect().contains(event->pos());
+    if (hovered != m_pickHovered) {
+        m_pickHovered = hovered;
+        update();
+    }
+}
+
+void TimelineWidget::mouseReleaseEvent(QMouseEvent *)
+{
+    m_pressed = false;
+    update();
+}
+
+void TimelineWidget::leaveEvent(QEvent *)
+{
+    if (m_pickHovered) {
+        m_pickHovered = false;
+        update();
     }
 }
 
 void TimelineWidget::paintEvent(QPaintEvent *)
 {
-    // Track sits near the BOTTOM of the whole control block (see the
-    // constructor comment), not vertically centered across it -- that's
-    // what puts it right next to the violation-panel toggle button below,
-    // matching History.qml.
+    static const QPixmap bgNone(QStringLiteral(":/history/sliderBar/bg_none.png"));
+    static const QPixmap bgLoaded(QStringLiteral(":/history/sliderBar/bg_loaded_cropped.png"));
+    static const QPixmap pickNormal(QStringLiteral(":/history/sliderBar/pick_normal.png"));
+    static const QPixmap pickHovered(QStringLiteral(":/history/sliderBar/pick_hovered.png"));
+    static const QPixmap pickPressed(QStringLiteral(":/history/sliderBar/pick_pressed.png"));
+
     QPainter painter(this);
-    painter.fillRect(rect(), QColor(0x1b, 0x1e, 0x24));
-    if (m_timestamps.isEmpty()) {
+    painter.fillRect(rect(), kHistoryBackground);
+    drawBorderImage(painter, QRectF(0, kSliderBarY, width(), kSliderBarHeight), bgNone, 4, 4);
+    if (m_rangeEnd <= m_rangeStart || m_timestamps.isEmpty()) {
         return;
     }
-    const qint64 rangeStart = m_timestamps.first();
-    const qint64 rangeEnd = m_timestamps.last();
-    // In History.qml the 4 px SliderBar sits at about y=102 inside the
-    // 125 px sliderAndMeta block, leaving room for its 19 px pick image.
-    const int trackY = qMax(7, height() - 22);
 
-    painter.setPen(QPen(QColor(0x3a, 0x3e, 0x47), 3));
-    painter.drawLine(0, trackY, width(), trackY);
+    // loadedRanges: runs of markers that have frames, each drawn
+    // (stop - start + 1) markers wide. Frames are a few seconds apart, so at
+    // fine Time steps (1s) neighbouring frames still count as one run when
+    // they're within a minute of each other.
+    const double markWidth = static_cast<double>(width()) * m_stepMs / (m_rangeEnd - m_rangeStart);
+    const qint64 mergeMarkers = qMax<qint64>(1, 60 * 1000 / m_stepMs);
+    qint64 runStart = -1;
+    qint64 runStop = -1;
+    const auto flushRun = [&] {
+        if (runStart >= 0) {
+            drawBorderImage(painter,
+                            QRectF(runStart * markWidth, kSliderBarY,
+                                   qMax(1.0, (runStop - runStart + 1) * markWidth), kSliderBarHeight),
+                            bgLoaded, 0, 0);
+        }
+    };
+    for (qint64 timestamp : std::as_const(m_timestamps)) {
+        const qint64 marker = (timestamp - m_rangeStart) / m_stepMs;
+        if (runStart >= 0 && marker <= runStop + mergeMarkers) {
+            runStop = qMax(runStop, marker);
+            continue;
+        }
+        flushRun();
+        runStart = marker;
+        runStop = marker;
+    }
+    flushRun();
 
-    if (m_currentIndex >= 0 && m_currentIndex < m_timestamps.size()) {
-        const int x = xForTimeOfDay(m_timestamps.at(m_currentIndex), rangeStart, rangeEnd, width());
-        painter.setRenderHint(QPainter::Antialiasing);
-        painter.setPen(Qt::NoPen);
-        painter.setBrush(QColor(0xff, 0xd7, 0x00));
-        painter.drawEllipse(QPoint(x, trackY), 5, 5);
+    const QRect pick = pickRect();
+    if (!pick.isNull()) {
+        painter.drawPixmap(pick.topLeft(),
+                           m_pressed ? pickPressed : (m_pickHovered ? pickHovered : pickNormal));
     }
 }
 
 namespace {
-constexpr int kTimeAxisDateHeight = 18;
-constexpr int kTimeAxisTicksHeight = 26;
+QString timeLineLowLabel(qint64 ms)
+{
+    // TimeLine.qml rebuilds "hh:mm" from toLocaleTimeString() -- with the
+    // real viewer's English locale that's the 12-hour clock ("12:00",
+    // "01:29", ...), without the AM/PM suffix.
+    const QTime time = QDateTime::fromMSecsSinceEpoch(ms).time();
+    const int hour = time.hour() % 12 == 0 ? 12 : time.hour() % 12;
+    return QStringLiteral("%1:%2").arg(hour, 2, 10, QLatin1Char('0')).arg(time.minute(), 2, 10,
+                                                                      QLatin1Char('0'));
+}
 }
 
 TimeAxisWidget::TimeAxisWidget(QWidget *parent)
     : QWidget(parent)
 {
-    setFixedHeight(kTimeAxisDateHeight + kTimeAxisTicksHeight);
+    setFixedHeight(kTimeLineHighHeight + kTimeLineLowHeight);
 }
 
 void TimeAxisWidget::setRange(qint64 rangeStartMs, qint64 rangeEndMs)
@@ -688,61 +839,306 @@ void TimeAxisWidget::setRange(qint64 rangeStartMs, qint64 rangeEndMs)
     update();
 }
 
-void TimeAxisWidget::setCurrentPositionMs(qint64 positionMs)
+void TimeAxisWidget::setStepMs(qint64 stepMs)
+{
+    if (stepMs > 0 && stepMs != m_stepMs) {
+        m_stepMs = stepMs;
+        update();
+    }
+}
+
+void TimeAxisWidget::paintEvent(QPaintEvent *)
+{
+    QPainter painter(this);
+    painter.fillRect(rect(), kHistoryBackground);
+    const qint64 span = m_rangeEnd - m_rangeStart;
+    if (span <= 0 || width() <= 0) {
+        return;
+    }
+
+    // TimeLine.qml's updateTicker, step for step.
+    qint64 step = m_stepMs > 0 ? m_stepMs : 60 * 1000;
+    while (span / step > 1000) {
+        step *= 2;
+    }
+    struct Mark {
+        qint64 ms;
+        int index;
+    };
+    QList<Mark> highLabels;
+    QList<Mark> lowLabels;
+    QDate previousDate = QDateTime::fromMSecsSinceEpoch(m_rangeStart - step).date();
+    int index = 0;
+    for (qint64 pos = m_rangeStart; pos < m_rangeEnd; pos += step, ++index) {
+        const QDate date = QDateTime::fromMSecsSinceEpoch(pos).date();
+        if (date != previousDate) {
+            previousDate = date;
+            highLabels.append({pos, index});
+        }
+        lowLabels.append({pos, index});
+    }
+    if (highLabels.isEmpty()) {
+        highLabels.append({m_rangeStart, 0});
+    }
+    if (lowLabels.size() == highLabels.size()) {
+        lowLabels.clear();
+    }
+
+    const double marks = static_cast<double>(span) / step;
+    const double markWidth = width() / marks;
+    const double highLabelWidth = static_cast<double>(width()) / highLabels.size();
+
+    const QFont font = smallBoldFont();
+    painter.setFont(font);
+    const QFontMetrics metrics(font);
+    const QLocale english(QLocale::English);
+
+    for (const Mark &mark : std::as_const(highLabels)) {
+        const double x = markWidth * mark.index;
+        const QDate date = QDateTime::fromMSecsSinceEpoch(mark.ms).date();
+        // formatHighLabel: Locale.LongFormat unless it doesn't fit its slot
+        // or would run past the right edge, then Locale.ShortFormat.
+        QString text = english.toString(date, QStringLiteral("dddd, MMMM d, yyyy"));
+        const int longWidth = metrics.horizontalAdvance(text);
+        if (longWidth + x > width() || longWidth > highLabelWidth) {
+            text = english.toString(date, QStringLiteral("M/d/yy"));
+        }
+        if (x + metrics.horizontalAdvance(text) >= width()) {
+            continue;
+        }
+        painter.fillRect(QRectF(x, 0, 1, kTimeLineHighHeight), kTickColor);
+        painter.setPen(Qt::white);
+        painter.drawText(QRectF(x + 3, 0, highLabelWidth, kTimeLineHighHeight),
+                         Qt::AlignLeft | Qt::AlignTop,
+                         metrics.elidedText(text, Qt::ElideRight, qMax(1, int(highLabelWidth))));
+    }
+
+    if (lowLabels.isEmpty()) {
+        return;
+    }
+    const int lowY = kTimeLineHighHeight;
+    // indexVisible: how many marks the first label's implicit width (+5)
+    // covers, so shown labels never overlap.
+    const int labelImplicitWidth = metrics.horizontalAdvance(timeLineLowLabel(lowLabels.first().ms)) + 5;
+    const int indexVisible = lowLabels.size() > 1
+        ? qMax(1, static_cast<int>(std::ceil(labelImplicitWidth / (static_cast<double>(width())
+                                                                     / (lowLabels.size() - 1)))))
+        : 1;
+    for (int i = 0; i < lowLabels.size(); ++i) {
+        const Mark &mark = lowLabels.at(i);
+        const QString text = timeLineLowLabel(mark.ms);
+        const double x = markWidth * mark.index;
+        const bool visible = i == 0
+            || (i % indexVisible == 0 && x + metrics.horizontalAdvance(text) <= width());
+        if (!visible) {
+            continue;
+        }
+        painter.fillRect(QRectF(x, lowY, 1, kTimeLineLowHeight), kTickColor);
+        painter.setPen(Qt::white);
+        painter.drawText(QRectF(x + 2, lowY, width() - x, kTimeLineLowHeight),
+                         Qt::AlignLeft | Qt::AlignTop, text);
+    }
+}
+
+HistoryChartWidget::HistoryChartWidget(QWidget *parent)
+    : QWidget(parent)
+{
+    setFixedHeight(kChartsItemHeight);
+}
+
+qint64 HistoryChartWidget::chartStepMs(qint64 rangeMs, qint64 userStepMs)
+{
+    // HistoryTab.qml: chartTimeStep = alingStep(rangeSeconds, stepSeconds, 60).
+    static constexpr qint64 kRoundedSteps[] = {
+        1 * 60,           2 * 60,           5 * 60,           10 * 60,          15 * 60,
+        20 * 60,          30 * 60,          1 * 60 * 60,      2 * 60 * 60,      4 * 60 * 60,
+        6 * 60 * 60,      8 * 60 * 60,      12 * 60 * 60,     1 * 24 * 60 * 60, 2 * 24 * 60 * 60,
+        4 * 24 * 60 * 60, 5 * 24 * 60 * 60, 10 * 24 * 60 * 60,
+    };
+    constexpr double kMaxAmount = 60;
+    const double distance = rangeMs / 1000.0;
+    const qint64 step = qMax<qint64>(1, userStepMs / 1000);
+    if (distance / step <= kMaxAmount) {
+        return step * 1000;
+    }
+    for (qint64 rounded : kRoundedSteps) {
+        if (rounded >= distance / kMaxAmount) {
+            return rounded * 1000;
+        }
+    }
+    const qint64 day = 24 * 60 * 60;
+    return static_cast<qint64>(std::ceil(distance / kMaxAmount / day)) * day * 1000;
+}
+
+void HistoryChartWidget::setRange(qint64 rangeStartMs, qint64 rangeEndMs)
+{
+    m_rangeStart = rangeStartMs;
+    m_rangeEnd = rangeEndMs;
+    update();
+}
+
+void HistoryChartWidget::setStepMs(qint64 stepMs)
+{
+    if (stepMs > 0 && stepMs != m_stepMs) {
+        m_stepMs = stepMs;
+        update();
+    }
+}
+
+void HistoryChartWidget::setGridLeft(int x)
+{
+    if (x != m_gridLeft) {
+        m_gridLeft = x;
+        update();
+    }
+}
+
+void HistoryChartWidget::setActivity(const QList<HistoryActivitySample> &samples)
+{
+    m_samples = samples;
+    update();
+}
+
+void HistoryChartWidget::setEfficiency(const QList<HistoryAppSegment> &segments,
+                                       const QHash<QString, QString> &categories)
+{
+    m_segments = segments;
+    m_categories = categories;
+    update();
+}
+
+void HistoryChartWidget::setCurrentPositionMs(qint64 positionMs)
 {
     m_currentPositionMs = positionMs;
     update();
 }
 
-QSize TimeAxisWidget::sizeHint() const
+void HistoryChartWidget::paintEvent(QPaintEvent *)
 {
-    return QSize(400, kTimeAxisDateHeight + kTimeAxisTicksHeight);
-}
-
-void TimeAxisWidget::paintEvent(QPaintEvent *)
-{
-    // Matches the real viewer's TimeLine.qml: a date label (highLabels) then
-    // a row of evenly spaced HH:mm ticks (lowLabels), #54545a tick marks,
-    // white bold labels. Purely visual -- TimeLine.qml has no MouseArea of
-    // its own; scrubbing happens on the separate SliderBar (TimelineWidget).
-    // NOT offset by kLeftColumnWidth -- unlike ActivityBarWidget/
-    // EfficiencyBarWidget/ViolationsFilterWidget (still full page-width
-    // widgets that reserve that much on their own left edge), this widget
-    // now only occupies the right-hand cell of the button-column HBox (see
-    // the constructor), so it's already positioned to the right of the
-    // buttons by the layout itself -- adding the offset again here doubled
-    // it, pushing the date/ticks far past where the buttons actually end.
     QPainter painter(this);
-    painter.fillRect(rect(), QColor(0x1b, 0x1e, 0x24));
-    if (m_rangeEnd <= m_rangeStart) {
+    painter.fillRect(rect(), kHistoryBackground);
+
+    // Filters.qml: anchors.fill chartsItem, leftMargin 10, bottomMargin 15;
+    // Chart.qml with needPlayerLine splits it 40% (Activity/Efficiency) /
+    // separator1 (10px) / 60% (filters).
+    const double chartHeight = height() - kChartBottomMargin;
+    const double extraHeight = chartHeight * 0.4;
+    const double filtersTop = extraHeight + 10;
+    const double filtersHeight = chartHeight * 0.6;
+    const int gridLeft = m_gridLeft;
+    const double gridWidth = qMax(1, width() - gridLeft);
+    const qint64 span = m_rangeEnd - m_rangeStart;
+
+    drawHorizontalSeparator(painter, kChartLeft, 0, width() - kChartLeft);
+
+    // ExtraHeaders: labels 20px in, first text 10px down, rows 30 apart,
+    // VSeparator at its right edge minus 13.
+    painter.setFont(mediumFont());
+    painter.setPen(Qt::white);
+    painter.drawText(QPointF(kChartLeft + kLabelsLeft, 10 + QFontMetrics(mediumFont()).ascent()),
+                     QStringLiteral("Activity"));
+    painter.drawText(QPointF(kChartLeft + kLabelsLeft,
+                             kRowHeight + 10 + QFontMetrics(mediumFont()).ascent()),
+                     QStringLiteral("Efficiency"));
+    drawVerticalSeparator(painter, gridLeft - 13 - 2, 0, extraHeight);
+
+    if (span <= 0) {
         return;
     }
+    const qint64 chartStep = chartStepMs(span, m_stepMs);
 
-    painter.setPen(QColor(0xff, 0xff, 0xff));
-    painter.setFont(QFont(QStringLiteral("Segoe UI"), 8, QFont::Bold));
-    painter.drawText(QRect(4, 0, width() - 8, kTimeAxisDateHeight),
-                     Qt::AlignLeft | Qt::AlignVCenter,
-                     QDateTime::fromMSecsSinceEpoch(m_rangeStart).toString(QStringLiteral("dddd, d MMMM yyyy")));
-
-    const int tickY = kTimeAxisDateHeight;
-    const int labelWidthEstimate = 60;
-    const int tickCount = qMax(2, width() / labelWidthEstimate);
-    for (int i = 0; i <= tickCount; ++i) {
-        const qint64 tickMs = m_rangeStart + (m_rangeEnd - m_rangeStart) * i / tickCount;
-        const int x = xForTimeOfDay(tickMs, m_rangeStart, m_rangeEnd, width());
-        painter.setPen(QColor(0x54, 0x54, 0x5a));
-        painter.drawLine(x, tickY, x, tickY + 4);
-        painter.setPen(QColor(0xff, 0xff, 0xff));
-        const QString label = QDateTime::fromMSecsSinceEpoch(tickMs).toString(QStringLiteral("HH:mm"));
-        painter.drawText(QRect(x - 24, tickY + 4, 48, 12), Qt::AlignHCenter | Qt::AlignTop, label);
+    // Grid.qml, once over the extra rows and once over the filters area:
+    // marks+1 one-pixel lines, markWidth = width / marks.
+    const double marks = static_cast<double>(span) / chartStep;
+    const double gridMarkWidth = gridWidth / marks;
+    const int lineCount = static_cast<int>(marks) + 1;
+    for (int i = 0; i < lineCount; ++i) {
+        const double x = gridLeft + gridMarkWidth * i;
+        painter.fillRect(QRectF(x, 0, 1, extraHeight), kGridColor);
+        painter.fillRect(QRectF(x, filtersTop, 1, filtersHeight), kGridColor);
     }
 
-    // Continues the same yellow line as Activity/Efficiency/ViolationsFilter
-    // below it -- no offset needed here (unlike those, which are full
-    // page-width widgets): this widget's local x=0 is already at global
-    // x=kLeftColumnWidth via the HBox layout, so the same fraction of ITS
-    // OWN width lands on the same global x as their offset formula does.
-    drawPositionLine(painter, m_currentPositionMs, m_rangeStart, m_rangeEnd, width(), height());
+    painter.save();
+    painter.setClipRect(QRectF(gridLeft, 0, gridWidth, extraHeight));
+
+    // HistoLine.qml: fillRect(relPos * w, (1 - v) * h, relInterval * w + 1, h)
+    // inside a 20px area centered in its 30px row. Activity granula is
+    // max(chartStep / 5, 60s) (ChartsModel.qml).
+    const qint64 activityGranula = qMax<qint64>(chartStep / 5, 60 * 1000);
+    QHash<qint64, qint64> eventsByBucket;
+    qint64 maxEvents = 0;
+    for (const HistoryActivitySample &sample : std::as_const(m_samples)) {
+        if (sample.inputEvents <= 0 || sample.timestampMs < m_rangeStart
+            || sample.timestampMs >= m_rangeEnd) {
+            continue;
+        }
+        const qint64 bucket = (sample.timestampMs - m_rangeStart) / activityGranula;
+        const qint64 total = eventsByBucket.value(bucket) + sample.inputEvents;
+        eventsByBucket[bucket] = total;
+        maxEvents = qMax(maxEvents, total);
+    }
+    const double histogramTop = (kRowHeight - kHistogramHeight) / 2.0;
+    const double activityWidth = gridWidth * activityGranula / span + 1;
+    for (auto it = eventsByBucket.cbegin(); it != eventsByBucket.cend(); ++it) {
+        const double value = static_cast<double>(it.value()) / maxEvents;
+        const double x = gridLeft + gridWidth * (it.key() * activityGranula) / span;
+        const double y = histogramTop + (1 - value) * kHistogramHeight;
+        painter.fillRect(QRectF(x, y, activityWidth, histogramTop + kHistogramHeight - y),
+                         kActivityColor);
+    }
+
+    // Line.qml (displayKind "colors"): one column per chart step, split into
+    // equal-height bands, one per category that occurred in it, stacked in
+    // the real viewer's order -- non-productive, productive, neutral,
+    // uncategorized from top to bottom.
+    static const QStringList kBandOrder = {QStringLiteral("unproductive"), QStringLiteral("productive"),
+                                           QStringLiteral("neutral"), QStringLiteral("none")};
+    QHash<qint64, QSet<QString>> categoriesByBucket;
+    for (const HistoryAppSegment &segment : std::as_const(m_segments)) {
+        const qint64 from = qMax(segment.startMs, m_rangeStart);
+        const qint64 to = qMin(segment.endMs, m_rangeEnd);
+        if (to <= from) {
+            continue;
+        }
+        QString category = m_categories.value(segment.application, QStringLiteral("none"));
+        if (!kBandOrder.contains(category)) {
+            category = QStringLiteral("none");
+        }
+        for (qint64 bucket = (from - m_rangeStart) / chartStep;
+             bucket <= (to - 1 - m_rangeStart) / chartStep; ++bucket) {
+            categoriesByBucket[bucket].insert(category);
+        }
+    }
+    const double productivityTop = kRowHeight;
+    const double productivityWidth = gridWidth * chartStep / span + 1;
+    for (auto it = categoriesByBucket.cbegin(); it != categoriesByBucket.cend(); ++it) {
+        QStringList bands;
+        for (const QString &category : kBandOrder) {
+            if (it.value().contains(category)) {
+                bands.append(category);
+            }
+        }
+        const double x = gridLeft + gridWidth * (it.key() * chartStep) / span - 0.5;
+        const double bandHeight = static_cast<double>(kProductivityHeight) / bands.size();
+        double y = productivityTop;
+        for (const QString &category : std::as_const(bands)) {
+            painter.fillRect(QRectF(x, y, productivityWidth, bandHeight),
+                             EfficiencyCategoryButton::color(category));
+            y += bandHeight;
+        }
+    }
+    painter.restore();
+
+    // separator1: 10px tall, two lines centered, 25px short of the right.
+    drawHorizontalSeparator(painter, kChartLeft, extraHeight + 4, width() - kChartLeft - 25);
+
+    // HistoryPlayerMarkerControl: 1px khaki line at the current marker,
+    // chart height + 10 tall.
+    if (m_currentPositionMs >= m_rangeStart && m_currentPositionMs < m_rangeEnd) {
+        const double markerWidth = gridWidth * m_stepMs / span;
+        const double x = gridLeft + markerWidth * ((m_currentPositionMs - m_rangeStart) / m_stepMs);
+        painter.fillRect(QRectF(x, 0, 1, chartHeight + 10), kMarkerColor);
+    }
 }
 
 HistoryView::HistoryView(ViewerConnection &connection, QWidget *parent)
@@ -757,111 +1153,90 @@ HistoryView::HistoryView(ViewerConnection &connection, QWidget *parent)
     // COLLAPSED and only opens via its own toggle button (panelViolation in
     // History.qml: `height: 0`, opens via "Open violation panel"/"Hide
     // violation panel", not shown by default like our first attempt had it).
+    ensureHistoryFonts();
     auto *root = new QVBoxLayout(this);
-    root->setContentsMargins(8, 8, 8, 8);
+    // No page margins: videoCell/keylogger/sliderAndMeta/chartsItem span
+    // the page edge to edge and carry their own insets (History.qml).
+    root->setContentsMargins(0, 0, 0, 0);
     // History.qml's panelViolation toggle button is anchored directly to
     // the bottom edge of the same container the slider lives in (bottomMargin
     // -5, i.e. no gap at all, even slightly overlapping) -- root's spacing
     // is kept small everywhere for that reason, not just between these two.
     root->setSpacing(0);
 
-    // Every screen of the current device, shown live at once, side by side
-    // -- not a dropdown you pick one monitor from.
-    m_monitorStripArea = new QScrollArea(this);
-    m_monitorStripArea->setObjectName(QStringLiteral("historyPreview"));
-    m_monitorStripArea->setWidgetResizable(true);
-    m_monitorStripArea->setHorizontalScrollBarPolicy(Qt::ScrollBarAsNeeded);
-    m_monitorStripArea->setVerticalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
-    m_monitorStripArea->setMinimumSize(400, 250);
-    m_monitorStripContainer = new QWidget(m_monitorStripArea);
-    m_monitorStripLayout = new QHBoxLayout(m_monitorStripContainer);
-    m_monitorStripLayout->setContentsMargins(4, 4, 4, 4);
-    m_monitorStripLayout->setSpacing(8);
-    m_monitorStripArea->setWidget(m_monitorStripContainer);
-
-    // No maximumHeight here (tried, reverted) -- History.qml's own
-    // sliderAndMeta is anchored `anchors.bottom: chartsItem.top`, i.e. the
-    // controls block sits directly above the violation panel and rides up
-    // and down as chartsItem's height animates between 0 (collapsed) and
-    // 186 (open); video fills whatever's left above that. A hard cap on
-    // the video column breaks exactly that: it stops video from expanding
-    // into the space chartsItem frees up when collapsed, so the controls
-    // stayed pinned high instead of dropping down to follow the (now
-    // closed) panel. The real fix for the overflow this was working
-    // around is resizeMonitorStripToFit()'s qBound floor/ceiling on the
-    // PREVIEW's minimum size (see below) -- that's what stops the runaway
-    // lock-in, without blocking legitimate growth into freed space.
-    m_videoColumn = new QWidget(this);
-    auto *videoColumnLayout = new QVBoxLayout(m_videoColumn);
-    videoColumnLayout->setContentsMargins(0, 0, 0, 0);
-    videoColumnLayout->setSpacing(2);
-
-    // history/video/Header.qml: a dedicated 24px bar, background #3f4047
-    // with 2px border lines top/bottom, employee name + "( date time )"
-    // CENTERED as one unit -- not a docked left-aligned label with a
-    // stretch, which was this project's own earlier (wrong) guess before a
-    // real screenshot confirmed the centered layout.
-    auto *videoHeaderBar = new QWidget(this);
-    videoHeaderBar->setFixedHeight(24);
-    videoHeaderBar->setStyleSheet(
-        QStringLiteral("background: #3f4047; border-top: 1px solid #33343a; "
-                       "border-bottom: 1px solid #414249;"));
-    auto *videoHeaderRow = new QHBoxLayout(videoHeaderBar);
-    videoHeaderRow->setContentsMargins(0, 0, 0, 0);
-    videoHeaderRow->addStretch();
-    m_employeeLabel = new QLabel(videoHeaderBar);
-    m_employeeLabel->setStyleSheet(QStringLiteral("color: white; font-weight: 700;"));
-    videoHeaderRow->addWidget(m_employeeLabel);
-    m_timeLabel = new QLabel(videoHeaderBar);
-    m_timeLabel->setStyleSheet(QStringLiteral("color: white; font-weight: 700; padding-left: 10px;"));
-    videoHeaderRow->addWidget(m_timeLabel);
-    videoHeaderRow->addStretch();
-    videoColumnLayout->addWidget(videoHeaderBar);
+    // History.qml's videoCell fills the page above the keylogger bar (8px
+    // gap), with Video.qml inset 7px inside it: #45464d, 1px #414248 lines
+    // left/right, the 24px header, then the row of screens.
+    m_videoPanel = new QWidget(this);
+    m_videoPanel->setObjectName(QStringLiteral("historyVideo"));
+    m_videoPanel->setAttribute(Qt::WA_StyledBackground);
+    m_videoPanel->setStyleSheet(QStringLiteral(
+        "QWidget#historyVideo { background: #45464d; border-left: 1px solid #414248;"
+        " border-right: 1px solid #414248; }"
+        "QScrollArea { background: transparent; border: none; }"
+        "QScrollBar:horizontal { background: transparent; height: 8px; margin: 0; }"
+        "QScrollBar::handle:horizontal { background: #5a5b63; border-radius: 4px; min-width: 30px; }"
+        "QScrollBar::add-line:horizontal, QScrollBar::sub-line:horizontal { width: 0; }"
+        "QScrollBar::add-page:horizontal, QScrollBar::sub-page:horizontal { background: none; }"
+        "QListWidget#historyApps { background: #3f4047; border-left: 2px solid #43444c;"
+        " border-right: 2px solid #43444c; color: white; }"));
+    auto *videoLayout = new QVBoxLayout(m_videoPanel);
+    videoLayout->setContentsMargins(0, 0, 0, 0);
+    videoLayout->setSpacing(0);
+    m_videoHeader = new HistoryVideoHeader(m_videoPanel);
+    videoLayout->addWidget(m_videoHeader);
 
     auto *videoBody = new QHBoxLayout;
+    videoBody->setContentsMargins(0, 0, 0, 0);
+    videoBody->setSpacing(0);
+    m_monitorStripArea = new QScrollArea(m_videoPanel);
+    m_monitorStripArea->setFrameShape(QFrame::NoFrame);
+    m_monitorStripArea->setHorizontalScrollBarPolicy(Qt::ScrollBarAsNeeded);
+    m_monitorStripArea->setVerticalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
+    m_monitorStripArea->viewport()->setAutoFillBackground(false);
+    m_monitorStripArea->viewport()->installEventFilter(this);
+    m_videoStrip = new HistoryVideoStrip;
+    m_monitorStripArea->setWidget(m_videoStrip);
+    connect(m_videoStrip, &HistoryVideoStrip::clicked, this, &HistoryView::togglePanelFull);
     videoBody->addWidget(m_monitorStripArea, 1);
-    m_runningAppsList = new QListWidget(this);
-    m_runningAppsList->setFixedWidth(420); // matches History.qml's `panel { width: 420 }`
-    m_runningAppsList->hide(); // matches appButton's panel: closed by default
+    // Running applications panel: 420px wide on the video's right edge,
+    // below the header (History.qml `panel`), closed by default.
+    m_runningAppsList = new QListWidget(m_videoPanel);
+    m_runningAppsList->setObjectName(QStringLiteral("historyApps"));
+    m_runningAppsList->setFixedWidth(420);
+    m_runningAppsList->hide();
     videoBody->addWidget(m_runningAppsList);
-    videoColumnLayout->addLayout(videoBody, 1);
+    videoLayout->addLayout(videoBody, 1);
 
-    // appButton (Running Applications toggle): a semi-transparent overlay
-    // floating on TOP of the video's top-right corner in the real app, not
-    // a docked row -- see resizeEvent() for how its geometry is kept
-    // pinned there.
-    m_toggleAppsButton = new QPushButton(QStringLiteral("Running applications ◀"), m_monitorStripArea);
+    // Video.qml's "excuse", centered over the video area (Fonts.rr_xtra).
+    m_statusLabel = new QLabel(m_monitorStripArea);
+    m_statusLabel->setAlignment(Qt::AlignCenter);
+    m_statusLabel->setWordWrap(true);
+    m_statusLabel->setAttribute(Qt::WA_TransparentForMouseEvents);
+    m_statusLabel->setStyleSheet(QStringLiteral(
+        "background: transparent; color: white; font-family: Roboto; font-size: 20px;"));
+    m_statusLabel->hide();
+
+    auto *videoCell = new QVBoxLayout;
+    videoCell->setContentsMargins(7, 7, 7, 7 + 8);
+    videoCell->addWidget(m_videoPanel);
+    root->addLayout(videoCell, 1);
+
+    m_keystream = new KeystreamBar(this);
+    root->addWidget(m_keystream);
+
+    // appButton: "Running applications" over the video's top-right corner
+    // (topMargin 30 / rightMargin 5, less the Button's own -5 margins),
+    // opacity 0.8 -- see positionOverlays().
+    m_toggleAppsButton = new QPushButton(QStringLiteral("Running applications"), this);
     m_toggleAppsButton->setObjectName(QStringLiteral("flatButton"));
-    m_toggleAppsButton->setStyleSheet(
-        QStringLiteral("QPushButton#flatButton { background: rgba(56,58,65,0.8); }"));
+    m_toggleAppsButton->setIcon(
+        QIcon(QStringLiteral(":/history/video/buttonRunningApp/applications_arrow_left.png")));
+    m_toggleAppsButton->setIconSize(QSize(8, 14));
+    auto *appButtonOpacity = new QGraphicsOpacityEffect(m_toggleAppsButton);
+    appButtonOpacity->setOpacity(0.8);
+    m_toggleAppsButton->setGraphicsEffect(appButtonOpacity);
     connect(m_toggleAppsButton, &QPushButton::clicked, this, &HistoryView::onToggleRunningApps);
-    m_toggleAppsButton->raise();
-
-    // Keylogger: a single-line ticker directly under the video, not a
-    // separate "Text mode" of the whole page -- History.qml's `keylogger`
-    // BorderImage is always visible right under videoCell, showing text
-    // flowing around the current playback moment. The full grouped table
-    // (real columns: Date/Pressing period/Application/Title/Keystrokes,
-    // Table.qml) opens on demand via m_keylogTableButton instead, since
-    // that table belongs to the Tracker tile's own Keylogger tab in the
-    // real app, not to History's main view.
-    m_keylogTicker = new QLabel(this);
-    m_keylogTicker->setObjectName(QStringLiteral("privacy"));
-    m_keylogTicker->setFixedHeight(30); // matches History.qml's keylogger BorderImage height
-    m_keylogTicker->setAlignment(Qt::AlignCenter);
-    m_keylogTicker->setStyleSheet(QStringLiteral("color: #9fa5ae;"));
-    videoColumnLayout->addWidget(m_keylogTicker);
-    // Stretch weights 1:8 -- video still grows a little with the window,
-    // A small FIXED gap, not a competing stretch (tried and reverted --
-    // shrank video to a tiny box) and not a large fixed value either (also
-    // tried and reverted -- 90px pushed the controls block far enough down
-    // that it landed BELOW the visible window on a normal-sized window,
-    // since this page has no scroll area: anything that doesn't fit is
-    // simply clipped, not scrolled to). Keeping this small guarantees the
-    // controls stay on-screen; see kLeftColumnWidth's callers for the
-    // actual alignment work, which doesn't depend on this value.
-    root->addWidget(m_videoColumn, 1);
-    root->addSpacing(10);
 
     // Real Kickidler keylogger table columns (keylogger/Table.qml):
     // Date/Pressing period/Application/Title/Keystrokes. The Application
@@ -889,164 +1264,141 @@ HistoryView::HistoryView(ViewerConnection &connection, QWidget *parent)
     // top-left corner" bug).
     m_textLog->hide();
 
-    // History.qml's transport controls are a COLUMN to the left of the
-    // timeline (Change settings / Play+Audio / Video+speed / Text), not a
-    // horizontal row above it -- see the fixed-width leftColumn widget
-    // below, built with the same kLeftColumnWidth every chart row
-    // (Activity/Efficiency/ViolationsFilter/TimeAxis) reserves on their own
-    // left edge, so the whole block (buttons, timeline, charts) shares one
-    // aligned left edge and the yellow position line lands at the same x
-    // everywhere.
+    // History.qml's sliderAndMeta: a fixed 125px block, leftMargin 12, with
+    // column1 (Change period / Video+speed / Text, spacing 10 after a 5px
+    // spacer), column2 (the 60px round play button, 11px down), column21
+    // (audio, only at Time step = 1s) and then the slider + TimeLine; the
+    // panelViolation button sits at its bottom center. Buttons use the
+    // original history/*.png assets.
     m_changeSettingsButton = new QPushButton(QStringLiteral("Change settings"), this);
-    m_changeSettingsButton->setObjectName(QStringLiteral("historyPill"));
-    m_changeSettingsButton->setFixedSize(217, 31);
+    m_changeSettingsButton->setObjectName(QStringLiteral("historyChangeButton"));
+    m_changeSettingsButton->setFixedSize(140, 25);
     connect(m_changeSettingsButton, &QPushButton::clicked, this, &HistoryView::onChangeSettingsClicked);
+    // Not shown -- day/period selection lives in the "Change settings"
+    // dialog; m_dayCombo stays alive for applyPeriodFilter/onDayChanged.
     m_dayCombo = new QComboBox(this);
-    m_keylogTableButton = new QPushButton(QStringLiteral("→ Text"), this);
-    m_keylogTableButton->setObjectName(QStringLiteral("historyPill"));
-    m_keylogTableButton->setFixedSize(69, 30);
-    m_keylogTableButton->setToolTip(QStringLiteral("Keylogger"));
-    connect(m_keylogTableButton, &QPushButton::clicked, this, &HistoryView::onKeylogTableClicked);
-    // "Video" export in the real viewer saves an actual AVI (VideoSaverSelector.qml);
-    // we have no video encoder in this project's dependencies, so this
-    // exports the day's captured frames as a numbered PNG sequence instead
-    // -- same underlying data (requestHistoryFrame per timestamp), honestly
-    // labeled as image export rather than pretending to produce a video file.
-    m_exportVideoButton = new QPushButton(QStringLiteral("→ Video"), this);
-    m_exportVideoButton->setObjectName(QStringLiteral("historyPill"));
-    m_exportVideoButton->setFixedSize(82, 31);
-    m_exportVideoButton->setToolTip(QStringLiteral("Export imagini (secventa PNG -- fara encoder video)"));
-    connect(m_exportVideoButton, &QPushButton::clicked, this, &HistoryView::onExportVideoClicked);
-    m_playButton = new QPushButton(QStringLiteral("▶"), this);
-    m_playButton->setObjectName(QStringLiteral("historyIconPill"));
-    m_playButton->setFixedSize(22, 22);
-    connect(m_playButton, &QPushButton::clicked, this, &HistoryView::onPlayClicked);
-    // Real speed options (SpeedButton.qml): 0.5x/0.75x/1x/2x/4x/8x/16x.
-    m_speedCombo = new QComboBox(this);
-    m_speedCombo->setObjectName(QStringLiteral("historyPill"));
-    m_speedCombo->addItems({QStringLiteral("0.5x"), QStringLiteral("0.75x"), QStringLiteral("1x"),
-                            QStringLiteral("2x"), QStringLiteral("4x"), QStringLiteral("8x"),
-                            QStringLiteral("16x")});
-    m_speedCombo->setFixedSize(60, 22);
-    m_speedCombo->setCurrentIndex(2); // 1x
-    connect(m_speedCombo, &QComboBox::currentIndexChanged, this, &HistoryView::onSpeedChanged);
-    m_muteButton = new QPushButton(QStringLiteral("🔇"), this);
-    m_muteButton->setObjectName(QStringLiteral("historyIconPill"));
-    m_muteButton->setFixedSize(22, 22);
-    m_muteButton->setEnabled(false);
-    m_muteButton->setToolTip(QStringLiteral("Fara audio in acest sistem."));
-    // Audio.qml is only visible at Time step = 1s -- default Time step here
-    // is 5 minutes (m_timeStepMs), so it starts hidden.
-    m_muteButton->setVisible(m_timeStepMs <= 1000);
-    m_timeline = new TimelineWidget(this);
-    connect(m_timeline, &TimelineWidget::indexSelected, this, &HistoryView::onTimelineMoved);
-
-    // Re-read History.qml directly: `sliderAndMeta` (this whole block) is
-    // ONE fixed-height (125px there) container where the button columns
-    // (Change settings / Play+Audio / Video+speed / Text) and the slider
-    // are SIBLINGS sharing that same height -- not two separate rows with
-    // the slider only paired with row 1. panelViolation (the toggle button
-    // below) is anchored to THIS container's own bottom edge, no gap. So
-    // here: one fixed-width column with all 3 button rows stacked, paired
-    // with m_timeline (which now spans the whole column's height and draws
-    // its track near ITS OWN bottom -- see TimelineWidget::paintEvent) in a
-    // single HBox, immediately followed by the toggle row.
-    // Two SEPARATE fixed-width rows, not one tall column: only row 1
-    // (Change settings + Play + Mute) sits next to the timeline -- pairing
-    // the timeline with the WHOLE 3-row button block (as a previous pass
-    // tried) made the gap between the video/keylogger above and the slider
-    // circle far too tall (the timeline widget stretched to match that
-    // whole block's height, with just blank fill above its own track).
-    // Video+speed and Text sit in their own compact row below, confined to
-    // the same column width, nothing beside them.
-    auto *settingsRowContainer = new QWidget(this);
-    settingsRowContainer->setFixedWidth(kLeftColumnWidth);
-    auto *settingsRow = new QHBoxLayout(settingsRowContainer);
-    settingsRow->setContentsMargins(10, 3, 10, 3);
-    settingsRow->setSpacing(6);
-    settingsRow->addWidget(m_changeSettingsButton);
-    settingsRow->addWidget(m_playButton);
-    settingsRow->addWidget(m_muteButton);
-    settingsRow->addStretch();
-    // Not shown -- the reference screenshot's button column has no visible
-    // day picker at all (day/period selection lives entirely in the
-    // "Change settings" dialog, see onChangeSettingsClicked); m_dayCombo
-    // stays alive and fully functional (applyPeriodFilter/onDayChanged
-    // still use it), just never added to a visible layout.
     m_dayCombo->hide();
 
-    auto *belowButtonsContainer = new QWidget(this);
-    belowButtonsContainer->setFixedWidth(kLeftColumnWidth);
-    auto *belowButtonsLayout = new QVBoxLayout(belowButtonsContainer);
-    belowButtonsLayout->setContentsMargins(10, 0, 10, 4);
-    belowButtonsLayout->setSpacing(4);
-    auto *videoRow = new QHBoxLayout;
-    videoRow->setSpacing(6);
-    videoRow->addWidget(m_exportVideoButton);
-    videoRow->addWidget(m_speedCombo);
-    videoRow->addStretch();
-    belowButtonsLayout->addLayout(videoRow);
-    belowButtonsLayout->addWidget(m_keylogTableButton, 0, Qt::AlignLeft);
+    const QIcon exportIcon = [] {
+        QIcon icon;
+        icon.addPixmap(QPixmap(QStringLiteral(":/history/avi_export_normal.png")), QIcon::Normal);
+        icon.addPixmap(QPixmap(QStringLiteral(":/history/avi_export_hovered.png")), QIcon::Active);
+        icon.addPixmap(QPixmap(QStringLiteral(":/history/avi_export_normal.png")), QIcon::Disabled);
+        return icon;
+    }();
+    // "Video" in the real viewer saves an AVI; with no encoder here it
+    // exports the day's frames as a PNG sequence instead.
+    m_exportVideoButton = new QPushButton(exportIcon, QStringLiteral("Video"), this);
+    m_exportVideoButton->setObjectName(QStringLiteral("historyAssetButton"));
+    m_exportVideoButton->setIconSize(QSize(13, 9));
+    m_exportVideoButton->setFixedSize(65, 19);
+    m_exportVideoButton->setToolTip(QStringLiteral("Export imagini (secventa PNG -- fara encoder video)"));
+    connect(m_exportVideoButton, &QPushButton::clicked, this, &HistoryView::onExportVideoClicked);
+    // SpeedButton.qml options.
+    m_speedCombo = new QComboBox(this);
+    m_speedCombo->setObjectName(QStringLiteral("historySpeed"));
+    m_speedCombo->addItems({QStringLiteral("0,5x"), QStringLiteral("0,75x"), QStringLiteral("1x"),
+                            QStringLiteral("2x"), QStringLiteral("4x"), QStringLiteral("8x"),
+                            QStringLiteral("16x")});
+    m_speedCombo->setFixedSize(65, 19);
+    m_speedCombo->setCurrentIndex(2); // 1x
+    connect(m_speedCombo, &QComboBox::currentIndexChanged, this, &HistoryView::onSpeedChanged);
+    m_keylogTableButton = new QPushButton(exportIcon, QStringLiteral("Text"), this);
+    m_keylogTableButton->setObjectName(QStringLiteral("historyAssetButton"));
+    m_keylogTableButton->setIconSize(QSize(13, 9));
+    m_keylogTableButton->setFixedSize(65, 19);
+    m_keylogTableButton->setToolTip(QStringLiteral("Keylogger"));
+    connect(m_keylogTableButton, &QPushButton::clicked, this, &HistoryView::onKeylogTableClicked);
 
-    // history/MultiSessionsSlider.qml equivalent -- the real one is one
-    // slider PER login session within the viewed range (Up/Down switches
-    // which session's slider is active), since a real History "period" can
-    // span several logins. Ours works on whole days from one flat
-    // per-day store (historyrecorder.cpp), with no concept of session
-    // boundaries at all -- there's nothing to actually switch between yet,
-    // so this is a single, disabled placeholder row rather than a fake
-    // multi-session UI. A real one needs PersonalHost to record session
-    // start/end boundaries, not just per-day buckets.
-    // Hidden by default and left that way: the real MultiSessionsSlider
-    // only appears at all once a viewed period actually spans more than
-    // one login session -- with our flat per-day model that's never true,
-    // so permanently showing this placeholder just added a row that isn't
-    // in the reference screenshot at all. Kept around, unparented from any
-    // visible layout below, for whenever PersonalHost gains real session
-    // boundaries.
-    auto *sessionSliderContainer = new QWidget(this);
-    auto *sessionSliderRow = new QHBoxLayout(sessionSliderContainer);
-    sessionSliderRow->setContentsMargins(0, 0, 0, 0);
-    auto *sessionUpButton = new QToolButton(this);
-    sessionUpButton->setText(QStringLiteral("▲"));
-    sessionUpButton->setEnabled(false);
-    auto *sessionDownButton = new QToolButton(this);
-    sessionDownButton->setText(QStringLiteral("▼"));
-    sessionDownButton->setEnabled(false);
-    auto *sessionLabel = new QLabel(QStringLiteral("Sesiunea 1/1"), this);
-    sessionLabel->setStyleSheet(QStringLiteral("color: #6f747d; font-size: 8pt;"));
-    sessionLabel->setToolTip(
-        QStringLiteral("Grabber-ul nu inregistreaza inca limitele sesiunilor de login -- "
-                       "toata ziua e tratata ca o singura sesiune."));
-    sessionSliderRow->addWidget(sessionUpButton);
-    sessionSliderRow->addWidget(sessionDownButton);
-    sessionSliderRow->addWidget(sessionLabel);
-    sessionSliderRow->addStretch();
-    sessionSliderContainer->hide();
-    root->addWidget(sessionSliderContainer);
+    m_playButton = new QPushButton(this);
+    m_playButton->setObjectName(QStringLiteral("historyPlay"));
+    m_playButton->setFixedSize(60, 60);
+    m_playButton->setIconSize(QSize(23, 30));
+    connect(m_playButton, &QPushButton::clicked, this, &HistoryView::onPlayClicked);
+    setPlaying(false);
+    // Audio.qml -- only at Time step = 1s (see applyTimeStep). Always
+    // disabled: nothing in this project captures audio.
+    m_muteButton = new QPushButton(this);
+    m_muteButton->setObjectName(QStringLiteral("historyAudio"));
+    m_muteButton->setFixedSize(39, 39);
+    m_muteButton->setIconSize(QSize(32, 32));
+    {
+        QIcon icon;
+        const QPixmap off(QStringLiteral(":/history/volume_off.png"));
+        icon.addPixmap(off, QIcon::Normal);
+        icon.addPixmap(off, QIcon::Disabled);
+        m_muteButton->setIcon(icon);
+    }
+    m_muteButton->setEnabled(false);
+    m_muteButton->setToolTip(QStringLiteral("Fara audio in acest sistem."));
 
-    // Left column (all 3 button rows stacked) | right column (timeline +
-    // date/ticks stacked) as the TWO cells of ONE HBox, so Qt gives them
-    // the exact same height automatically (whichever is taller wins, the
-    // shorter one's own trailing stretch just absorbs the difference
-    // inside itself) -- a real screenshot showed the button column
-    // stopping short while the timeline+date/ticks column kept going,
-    // leaving a bare/mismatched gap under the buttons instead of both
-    // sides ending flush together right above Activity/Efficiency.
-    // Always visible, unlike m_violationPanel -- MultiSessionsSlider.qml's
-    // own TimeLine (date+ticks) lives inside the always-shown slider block,
-    // not inside the collapsible chartsItem (Activity/Efficiency/Filters).
+    m_timeline = new TimelineWidget(this);
+    connect(m_timeline, &TimelineWidget::indexSelected, this, &HistoryView::onTimelineMoved);
     m_timeAxis = new TimeAxisWidget(this);
-    auto *leftColumn = new QWidget(this);
-    leftColumn->setFixedWidth(kLeftColumnWidth);
-    auto *leftColumnLayout = new QVBoxLayout(leftColumn);
-    leftColumnLayout->setContentsMargins(0, 0, 0, 0);
-    leftColumnLayout->setSpacing(4);
-    leftColumnLayout->addWidget(settingsRowContainer);
-    leftColumnLayout->addWidget(belowButtonsContainer);
-    leftColumnLayout->addStretch(1);
 
-    auto *rightColumn = new QWidget(this);
+    auto *controlBlock = new QWidget(this);
+    controlBlock->setObjectName(QStringLiteral("historyControls"));
+    controlBlock->setFixedHeight(kControlBlockHeight);
+    controlBlock->setStyleSheet(QStringLiteral(
+        "QWidget#historyControls { background: #474850; }"
+        ".QWidget { background: transparent; }"
+        "QPushButton#historyChangeButton { background: #404148; color: white; border: none;"
+        "  border-radius: 3px; font-family: Roboto; font-size: 12px; padding: 0; }"
+        "QPushButton#historyChangeButton:hover { background: #6b6d79; }"
+        "QPushButton#historyChangeButton:pressed { background: #34373e; }"
+        "QPushButton#historyAssetButton { border-image: url(:/history/speedButton/speed_bg.png);"
+        "  border: none; color: white; font-family: Roboto; font-size: 11px; text-align: left;"
+        "  padding: 0 0 0 10px; }"
+        "QPushButton#historyAssetButton:hover {"
+        "  border-image: url(:/history/speedButton/speed_bg_hovered.png); }"
+        "QPushButton#historyAssetButton:pressed {"
+        "  border-image: url(:/history/speedButton/speed_bg_pressed.png); }"
+        "QComboBox#historySpeed { border-image: url(:/history/speedButton/speed_bg.png); border: none;"
+        "  color: white; font-family: Roboto; font-size: 11px; padding: 0 0 0 10px; }"
+        "QComboBox#historySpeed:hover {"
+        "  border-image: url(:/history/speedButton/speed_bg_hovered.png); }"
+        "QComboBox#historySpeed::drop-down { border: none; width: 16px; }"
+        "QComboBox#historySpeed::down-arrow {"
+        "  image: url(:/history/speedButton/triangle_normal.png); width: 8px; height: 5px; }"
+        "QComboBox#historySpeed::down-arrow:hover {"
+        "  image: url(:/history/speedButton/triangle_hovered.png); }"
+        "QPushButton#historyPlay { border-image: url(:/history/bg_play.png); border: none;"
+        "  padding: 0 0 0 8px; }"
+        "QPushButton#historyAudio { border-image: url(:/history/bg_audio.png); border: none;"
+        "  padding: 0; }"));
+    auto *controlLayout = new QVBoxLayout(controlBlock);
+    controlLayout->setContentsMargins(0, 0, 0, 0);
+    controlLayout->setSpacing(0);
+
+    m_leftColumn = new QWidget(controlBlock);
+    auto *buttonColumns = new QHBoxLayout(m_leftColumn);
+    buttonColumns->setContentsMargins(12, 0, 0, 0);
+    buttonColumns->setSpacing(5);
+    auto *column1 = new QVBoxLayout;
+    column1->setContentsMargins(0, 15, 0, 0);
+    column1->setSpacing(10);
+    column1->addWidget(m_changeSettingsButton);
+    auto *twoButtons = new QHBoxLayout;
+    twoButtons->setSpacing(10);
+    twoButtons->addWidget(m_exportVideoButton);
+    twoButtons->addWidget(m_speedCombo);
+    column1->addLayout(twoButtons);
+    column1->addWidget(m_keylogTableButton, 0, Qt::AlignLeft);
+    column1->addStretch(1);
+    buttonColumns->addLayout(column1);
+    auto *column2 = new QVBoxLayout;
+    column2->setContentsMargins(0, 11, 0, 0);
+    column2->addWidget(m_playButton);
+    column2->addStretch(1);
+    buttonColumns->addLayout(column2);
+    auto *column21 = new QVBoxLayout;
+    column21->setContentsMargins(0, 21, 0, 0);
+    column21->addWidget(m_muteButton);
+    column21->addStretch(1);
+    buttonColumns->addLayout(column21);
+    buttonColumns->addStretch(1);
+
+    auto *rightColumn = new QWidget(controlBlock);
     auto *rightColumnLayout = new QVBoxLayout(rightColumn);
     rightColumnLayout->setContentsMargins(0, 0, 0, 0);
     rightColumnLayout->setSpacing(0);
@@ -1057,63 +1409,30 @@ HistoryView::HistoryView(ViewerConnection &connection, QWidget *parent)
     auto *combinedRow = new QHBoxLayout;
     combinedRow->setContentsMargins(0, 0, 0, 0);
     combinedRow->setSpacing(0);
-    combinedRow->addWidget(leftColumn);
+    combinedRow->addWidget(m_leftColumn);
     combinedRow->addWidget(rightColumn, 1);
-    root->addLayout(combinedRow);
+    controlLayout->addLayout(combinedRow, 1);
 
-    // Violation panel toggle: centered below the transport row, matches
-    // History.qml's panelViolation button (bottom-center, arrow icon,
-    // "Open violation panel" / "Hide violation panel" -- panel starts
-    // collapsed).
     auto *violationToggleRow = new QHBoxLayout;
     violationToggleRow->addStretch();
-    m_violationToggleButton = new QPushButton(QStringLiteral("▲ Open violation panel"), this);
+    m_violationToggleButton = new QPushButton(controlBlock);
     m_violationToggleButton->setObjectName(QStringLiteral("flatButton"));
-    // Shrunk from 36 -- this row is literally the only thing standing
-    // between "-> Text" (bottom of the button column) and the Activity/
-    // Efficiency frame below it, so its own height IS most of that gap.
-    // 20 (tried) clipped the text top/bottom -- "flatButton" has 6px
-    // padding top+bottom baked into its stylesheet, so anything under
-    // about 26px squeezes the label instead of shrinking real whitespace.
+    // "flatButton" has 6px padding top+bottom -- under ~26px squeezes text.
     m_violationToggleButton->setFixedHeight(26);
     connect(m_violationToggleButton, &QPushButton::clicked, this,
             &HistoryView::onToggleViolationPanel);
     violationToggleRow->addWidget(m_violationToggleButton);
     violationToggleRow->addStretch();
-    root->addLayout(violationToggleRow);
+    controlLayout->addLayout(violationToggleRow);
+    root->addWidget(controlBlock);
+    m_controlBlock = controlBlock;
 
-    // "Violation panel": Activity (5-minute activity pillars) + Efficiency
-    // (productive/neutral/unproductive coloring) -- matching Chart.qml's top
-    // "extraLine" charts -- plus a filters strip chart below them (matching
-    // Chart.qml's "filtersLine": one row per violation rule, red blocks
-    // where triggered; see ViolationsFilterWidget/refreshViolationsFilter).
-    // Grouped so onToggleViolationPanel can hide/show all of it as one
-    // unit. Starts hidden; TimeAxis is toggled alongside this widget.
-    m_violationPanel = new QWidget(this);
-    auto *violationLayout = new QVBoxLayout(m_violationPanel);
-    violationLayout->setContentsMargins(0, 0, 0, 0);
-    // Zero spacing: Activity/Efficiency/ViolationsFilter are pixel-adjacent
-    // so each one's own position-line segment (they all share
-    // kLeftColumnWidth and the same rangeStart/rangeEnd, and continue the
-    // same line m_timeAxis above them already draws) reads as one
-    // continuous line down the whole block instead of a dashed one with
-    // visible gaps at every row boundary.
-    violationLayout->setSpacing(0);
-    m_activityBar = new ActivityBarWidget(m_violationPanel);
-    violationLayout->addWidget(m_activityBar);
-    m_efficiencyBar = new EfficiencyBarWidget(m_violationPanel);
-    violationLayout->addWidget(m_efficiencyBar);
-    m_violationsFilter = new ViolationsFilterWidget(m_violationPanel);
-    violationLayout->addWidget(m_violationsFilter);
-    violationLayout->addStretch();
-    m_violationPanel->setFixedHeight(104);
-    m_violationPanel->hide();
-    root->addWidget(m_violationPanel);
-
-    m_statusLabel = new QLabel(this);
-    m_statusLabel->setObjectName(QStringLiteral("privacy"));
-    m_statusLabel->setWordWrap(true);
-    root->addWidget(m_statusLabel);
+    // chartsItem, opened to 186px by panelViolation (starts closed).
+    m_chart = new HistoryChartWidget(this);
+    m_chart->hide();
+    root->addWidget(m_chart);
+    updateViolationToggleText();
+    applyTimeStep();
 
     // utils/LoadingStatusDialog.qml equivalent.
     m_loadingDialog = new QDialog(this, Qt::FramelessWindowHint | Qt::Tool);
@@ -1149,6 +1468,8 @@ HistoryView::HistoryView(ViewerConnection &connection, QWidget *parent)
     connect(&m_connection, &ViewerConnection::historyKeystrokesReceived, this,
             &HistoryView::onKeystrokesReceived);
     connect(&m_connection, &ViewerConnection::historyError, this, &HistoryView::onHistoryError);
+    connect(&m_connection, &ViewerConnection::historyFrameMissing, this,
+            &HistoryView::onHistoryFrameMissing);
 }
 
 void HistoryView::setDevices(const QHash<quint32, QString> &deviceNames,
@@ -1222,103 +1543,56 @@ quint32 HistoryView::currentStreamId() const
 
 void HistoryView::rebuildMonitorStrip()
 {
-    QLayoutItem *item = nullptr;
-    while ((item = m_monitorStripLayout->takeAt(0)) != nullptr) {
-        delete item->widget();
-        delete item;
-    }
-    m_monitorPreviewLabels.clear();
-
-    for (quint32 streamId : m_deviceMonitorStreams.value(m_currentDeviceKey)) {
-        auto *cell = new QWidget(m_monitorStripContainer);
-        auto *cellLayout = new QVBoxLayout(cell);
-        cellLayout->setContentsMargins(0, 0, 0, 0);
-        cellLayout->setSpacing(2);
-
-        auto *preview = new QLabel(cell);
-        preview->setAlignment(Qt::AlignCenter);
-        preview->setStyleSheet(QStringLiteral("background: #05080f; border: 1px solid #4b4e57;"));
-        preview->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Expanding);
-        cellLayout->addWidget(preview, 1);
-
-        auto *caption = new QLabel(m_monitorNames.value(streamId, QStringLiteral("Monitor %1")
-                                                                       .arg(streamId)),
-                                   cell);
-        caption->setAlignment(Qt::AlignCenter);
-        caption->setStyleSheet(QStringLiteral("color: #9fa5ae;"));
-        cellLayout->addWidget(caption);
-
-        m_monitorPreviewLabels.insert(streamId, preview);
-        m_monitorStripLayout->addWidget(cell);
-    }
-    m_monitorStripLayout->addStretch();
-    // The strip's viewport height isn't reliable yet the first time this
-    // runs (same deferred-layout issue as DeviceDetailView's monitor
-    // stacking) -- defer one event-loop turn.
-    QTimer::singleShot(0, this, &HistoryView::resizeMonitorStripToFit);
+    m_videoStrip->setStreams(m_deviceMonitorStreams.value(m_currentDeviceKey));
+    positionOverlays();
 }
 
-void HistoryView::resizeMonitorStripToFit()
+void HistoryView::positionOverlays()
 {
-    if (m_monitorPreviewLabels.isEmpty() || !m_monitorStripArea) {
-        return;
-    }
-    // Real Kickidler behavior (confirmed from the extracted QML,
-    // __historyVideoSelf__: `width: __historyVideoSelf__.width /
-    // videoFrames.length`): screens divide the available width evenly, no
-    // scrolling, as long as there are few enough of them. We keep that for
-    // the common case, but floor each screen's width so it never gets too
-    // small to read -- past that floor the total width exceeds the
-    // viewport and the strip scrolls horizontally (the scrollbar the user
-    // explicitly asked for, for when a device has many screens).
-    constexpr int kCaptionAndSpacing = 22;
-    constexpr int kMargins = 8;
-    constexpr int kMinPreviewWidth = 220;
-    const int count = m_monitorPreviewLabels.size();
-    // Capped at both ends -- floor so a tiny window doesn't crush the
-    // preview to nothing, ceiling so this reactive sizing (it feeds off
-    // the viewport's OWN current height, computed after a previous pass
-    // already gave it generous space) can't lock in a minimumSize so tall
-    // that the fixed-height rows below it (buttons, timeline, toggle) no
-    // longer fit in the window at all -- exactly what was happening
-    // before this cap: the controls were being pushed entirely past the
-    // bottom edge, with no scroll area to reach them.
-    const int availableHeight = qBound(
-        160, m_monitorStripArea->viewport()->height() - kCaptionAndSpacing - kMargins, 420);
-    const int evenWidth = (m_monitorStripArea->viewport()->width() - kMargins) / qMax(1, count);
-    // No aspect-ratio cap on the width -- the real behavior (confirmed
-    // above) is a plain width/count split, full stop. Capping width at
-    // availableHeight*16/9 (removed) left a single monitor stuck at a
-    // fixed ~16:9 box with a huge dead area to its right instead of
-    // actually filling the strip, since evenWidth (the whole viewport, for
-    // count=1) was almost always wider than that cap. The video label
-    // itself already letterboxes via Qt::KeepAspectRatio when scaling the
-    // frame in, so a wide box with a shorter 16:9 image centered inside it
-    // is the correct (and real) look, not a bug to "fix" by shrinking the box.
-    const int previewWidth = qMax(kMinPreviewWidth, evenWidth);
-    for (QLabel *preview : std::as_const(m_monitorPreviewLabels)) {
-        preview->setMinimumSize(previewWidth, availableHeight);
-    }
+    // The strip reserves the scrollbar's height up front so a horizontal
+    // scrollbar appearing (screens wider than the view) can't shrink the
+    // frames and make it disappear again.
+    const int scrollbarHeight = m_monitorStripArea->horizontalScrollBar()->sizeHint().height();
+    m_videoStrip->setViewSize(QSize(m_monitorStripArea->viewport()->width(),
+                                    m_monitorStripArea->height() - scrollbarHeight));
+    m_statusLabel->setGeometry(m_monitorStripArea->rect().adjusted(20, 0, -20, 0));
+    const QSize hint = m_toggleAppsButton->sizeHint();
+    m_toggleAppsButton->setGeometry(width() - hint.width(), 25, hint.width(), hint.height());
+    m_toggleAppsButton->raise();
+}
+
+void HistoryView::updateStatusVisibility()
+{
+    m_statusLabel->setVisible(!m_statusLabel->text().isEmpty());
+    m_statusLabel->raise();
 }
 
 void HistoryView::resizeEvent(QResizeEvent *event)
 {
     QWidget::resizeEvent(event);
-    resizeMonitorStripToFit();
-    if (m_toggleAppsButton && m_monitorStripArea) {
-        const QSize hint = m_toggleAppsButton->sizeHint();
-        m_toggleAppsButton->setGeometry(m_monitorStripArea->width() - hint.width() - 8, 8,
-                                        hint.width(), hint.height());
-        m_toggleAppsButton->raise();
+    positionOverlays();
+}
+
+void HistoryView::paintEvent(QPaintEvent *)
+{
+    QPainter painter(this);
+    painter.fillRect(rect(), kHistoryBackground);
+}
+
+bool HistoryView::eventFilter(QObject *watched, QEvent *event)
+{
+    if (watched == m_monitorStripArea->viewport() && event->type() == QEvent::Resize) {
+        positionOverlays();
     }
+    return QWidget::eventFilter(watched, event);
 }
 
 void HistoryView::switchDevice(quint32 deviceKey)
 {
     m_playbackTimer->stop();
-    m_playButton->setText(QStringLiteral("▶"));
+    setPlaying(false);
     m_currentDeviceKey = deviceKey;
-    m_employeeLabel->setText(m_deviceNames.value(deviceKey, QStringLiteral("Employee %1").arg(deviceKey)));
+    m_videoHeader->setName(m_deviceNames.value(deviceKey, QStringLiteral("Employee %1").arg(deviceKey)));
     rebuildMonitorStrip();
 
     m_dayCombo->clear();
@@ -1327,21 +1601,26 @@ void HistoryView::switchDevice(quint32 deviceKey)
     m_periodEnd = QDate();
     m_timestamps.clear();
     m_timeline->setTimestamps({});
+    m_timeline->setRange(0, 0);
     m_timeAxis->setRange(0, 0);
-    m_timeLabel->clear();
+    m_chart->setRange(0, 0);
+    m_chart->setActivity({});
+    m_chart->setEfficiency({}, m_categories);
+    m_videoHeader->setMoment(QString());
+    m_keystream->setText(QString(), QString());
     m_runningApps.clear();
     m_appSegments.clear();
     m_activitySamples.clear();
     m_keystrokeEntries.clear();
     m_runningAppsList->clear();
     m_textLog->setRowCount(0);
-    m_violationsFilter->setRows({}, 0, 0);
 
     const quint32 streamId = currentStreamId();
     if (streamId == 0) {
         return;
     }
-    m_statusLabel->setText(QStringLiteral("Se incarca zilele disponibile..."));
+    m_statusLabel->clear();
+    updateStatusVisibility();
     showLoadingDialog(QStringLiteral("Downloading..."));
     m_connection.requestHistoryDays(streamId);
     m_connection.requestCategories(streamId);
@@ -1373,13 +1652,11 @@ void HistoryView::applyPeriodFilter()
 void HistoryView::onDayChanged(int index)
 {
     m_playbackTimer->stop();
-    m_playButton->setText(QStringLiteral("▶"));
+    setPlaying(false);
     m_timestamps.clear();
     m_timeline->setTimestamps({});
-    for (QLabel *preview : std::as_const(m_monitorPreviewLabels)) {
-        preview->clear();
-    }
-    m_timeLabel->clear();
+    m_videoStrip->setAllLoading();
+    m_videoHeader->setMoment(QString());
     if (index < 0) {
         return;
     }
@@ -1393,7 +1670,8 @@ void HistoryView::refreshDayDependentData()
     if (day.isEmpty()) {
         return;
     }
-    m_statusLabel->setText(QStringLiteral("Se incarca momentele capturate..."));
+    m_statusLabel->clear();
+    updateStatusVisibility();
     showLoadingDialog(QStringLiteral("Downloading..."));
     m_connection.requestHistoryFrames(streamId, day);
     m_connection.requestHistoryActivity(streamId, day);
@@ -1413,8 +1691,12 @@ void HistoryView::requestFrameAt(int index)
         return;
     }
     const qint64 timestampMs = m_timestamps.at(index);
-    m_timeLabel->setText(QStringLiteral("( %1 )").arg(
-        QDateTime::fromMSecsSinceEpoch(timestampMs).toString(QStringLiteral("dd.MM.yyyy HH:mm:ss"))));
+    // Header.qml's currentMarker: "( <short date> hh:mm:ss )", English
+    // locale like the real viewer.
+    const QDateTime moment = QDateTime::fromMSecsSinceEpoch(timestampMs);
+    m_videoHeader->setMoment(QStringLiteral("( %1 %2 )")
+                                 .arg(QLocale(QLocale::English).toString(moment.date(), QStringLiteral("M/d/yy")),
+                                      moment.toString(QStringLiteral("hh:mm:ss"))));
     // Every screen of the device is shown at once (see rebuildMonitorStrip),
     // so a frame is fetched for each of its monitor streams, not just the
     // one used for the non-video queries (currentStreamId()).
@@ -1422,18 +1704,16 @@ void HistoryView::requestFrameAt(int index)
         m_connection.requestHistoryFrame(streamId, timestampMs);
     }
     updateTextLogHighlight(timestampMs);
+    updateKeystream(timestampMs);
     m_timeline->setCurrentIndex(index);
-    m_timeAxis->setCurrentPositionMs(timestampMs);
-    m_activityBar->setCurrentPositionMs(timestampMs);
-    m_efficiencyBar->setCurrentPositionMs(timestampMs);
-    m_violationsFilter->setCurrentPositionMs(timestampMs);
+    m_chart->setCurrentPositionMs(timestampMs);
 }
 
 void HistoryView::onPlayClicked()
 {
     if (m_playbackTimer->isActive()) {
         m_playbackTimer->stop();
-        m_playButton->setText(QStringLiteral("▶"));
+        setPlaying(false);
         return;
     }
     if (m_timestamps.isEmpty()) {
@@ -1442,7 +1722,7 @@ void HistoryView::onPlayClicked()
     if (m_timeline->currentIndex() >= m_timeline->count() - 1) {
         requestFrameAt(0);
     }
-    m_playButton->setText(QStringLiteral("⏸"));
+    setPlaying(true);
     m_playbackTimer->start();
 }
 
@@ -1451,7 +1731,7 @@ void HistoryView::onPlaybackTick()
     const int next = m_timeline->currentIndex() + 1;
     if (next > m_timeline->count() - 1) {
         m_playbackTimer->stop();
-        m_playButton->setText(QStringLiteral("▶"));
+        setPlaying(false);
         return;
     }
     requestFrameAt(next);
@@ -1459,13 +1739,65 @@ void HistoryView::onPlaybackTick()
 
 void HistoryView::onToggleViolationPanel()
 {
-    // Exact wording from the real viewer (History.qml's panelViolation
-    // button): "Open violation panel" / "Hide violation panel", starts
-    // closed.
-    const bool visible = !m_violationPanel->isVisible();
-    m_violationPanel->setVisible(visible);
-    m_violationToggleButton->setText(visible ? QStringLiteral("▼ Hide violation panel")
-                                             : QStringLiteral("▲ Open violation panel"));
+    m_chartOpen = !m_chartOpen;
+    m_chart->setVisible(m_chartOpen && !m_panelFull);
+    updateViolationToggleText();
+}
+
+void HistoryView::togglePanelFull()
+{
+    // chartsItem/sliderAndMeta heights are `panelFull ? 0 : ...`; the
+    // keylogger bar drops to the page bottom.
+    m_panelFull = !m_panelFull;
+    m_controlBlock->setVisible(!m_panelFull);
+    m_chart->setVisible(m_chartOpen && !m_panelFull);
+}
+
+void HistoryView::updateViolationToggleText()
+{
+    // History.qml's panelViolation: arrow_down + "Hide violation panel"
+    // while open, arrow_up + "Open violation panel" while closed.
+    const bool open = m_chartOpen;
+    m_violationToggleButton->setIcon(QIcon(open
+        ? QStringLiteral(":/history/iconButtonViolation/arrow_down.png")
+        : QStringLiteral(":/history/iconButtonViolation/arrow_up.png")));
+    m_violationToggleButton->setText(open ? QStringLiteral("Hide violation panel")
+                                          : QStringLiteral("Open violation panel"));
+}
+
+void HistoryView::setPlaying(bool playing)
+{
+    QIcon icon;
+    icon.addPixmap(QPixmap(playing ? QStringLiteral(":/history/pause_normal.png")
+                                   : QStringLiteral(":/history/play_normal.png")),
+                   QIcon::Normal);
+    icon.addPixmap(QPixmap(playing ? QStringLiteral(":/history/pause_active.png")
+                                   : QStringLiteral(":/history/play_active.png")),
+                   QIcon::Active);
+    m_playButton->setIcon(icon);
+    // play_normal is nudged 4px right of center, pause_normal 2px
+    // (History.qml's horizontalCenterOffset).
+    m_playButton->setStyleSheet(
+        QStringLiteral("QPushButton { border-image: url(:/history/bg_play.png); border: none;"
+                       " padding: 0 0 0 %1px; }")
+            .arg(playing ? 4 : 8));
+}
+
+void HistoryView::applyTimeStep()
+{
+    // Audio.qml (column21) only exists at Time step = 1s, and shifts both
+    // the slider/TimeLine (12 leftMargin + column1 140 + 5 + column2 60 + 5
+    // [+ column21 39 + 5] + 1 + MultiSessionsSlider spacing 10) and the chart
+    // grid (Filters leftMargin 10 + widthActionButtons = column1 + column2
+    // + 20 + 12 [+ column21]).
+    const bool audioVisible = m_timeStepMs <= 1000;
+    m_muteButton->setVisible(audioVisible);
+    const int audioWidth = audioVisible ? 39 : 0;
+    m_leftColumn->setFixedWidth(12 + 140 + 5 + 60 + 5 + (audioVisible ? audioWidth + 5 : 0) + 1 + 10);
+    m_chart->setGridLeft(10 + 140 + 60 + 20 + 12 + audioWidth);
+    m_timeline->setStepMs(m_timeStepMs);
+    m_timeAxis->setStepMs(m_timeStepMs);
+    m_chart->setStepMs(m_timeStepMs);
 }
 
 void HistoryView::onSpeedChanged(int index)
@@ -1567,7 +1899,8 @@ void HistoryView::onExportVideoClicked()
     // See m_exportVideoButton's comment: PNG sequence, not an actual video
     // file (no encoder in this project's dependencies).
     if (m_timestamps.isEmpty()) {
-        m_statusLabel->setText(QStringLiteral("Nimic de exportat pentru aceasta zi."));
+        QMessageBox::information(this, QStringLiteral("Export imagini"),
+                                 QStringLiteral("Nimic de exportat pentru aceasta zi."));
         return;
     }
     // VideoSaverSelector.qml's quality picker (Low/Medium/High).
@@ -1610,14 +1943,16 @@ void HistoryView::exportNextVideoFrame()
     if (m_videoExport.pending.isEmpty()) {
         m_videoExport.active = false;
         m_exportVideoButton->setEnabled(true);
-        m_statusLabel->setText(
+        hideLoadingDialog();
+        QMessageBox::information(
+            this, QStringLiteral("Export imagini"),
             QStringLiteral("Export finalizat: %1 imagini in %2").arg(m_videoExport.total).arg(m_videoExport.directory));
         return;
     }
     const qint64 timestampMs = m_videoExport.pending.first();
-    m_statusLabel->setText(QStringLiteral("Se exporta %1/%2...")
-                               .arg(m_videoExport.total - m_videoExport.pending.size() + 1)
-                               .arg(m_videoExport.total));
+    showLoadingDialog(QStringLiteral("Se exporta %1/%2...")
+                          .arg(m_videoExport.total - m_videoExport.pending.size() + 1)
+                          .arg(m_videoExport.total));
     m_connection.requestHistoryFrame(m_videoExport.streamId, timestampMs);
 }
 
@@ -1625,10 +1960,11 @@ void HistoryView::onToggleRunningApps()
 {
     // Matches History.qml's appButton: closed by default (see the
     // constructor's m_runningAppsList->hide()), arrow flips direction.
-    const bool visible = !m_runningAppsList->isVisible();
+    const bool visible = m_runningAppsList->isHidden();
     m_runningAppsList->setVisible(visible);
-    m_toggleAppsButton->setText(visible ? QStringLiteral("Running applications ▶")
-                                        : QStringLiteral("Running applications ◀"));
+    m_toggleAppsButton->setIcon(QIcon(visible
+        ? QStringLiteral(":/history/video/buttonRunningApp/applications_arrow_right.png")
+        : QStringLiteral(":/history/video/buttonRunningApp/applications_arrow_left.png")));
 }
 
 void HistoryView::onChangeSettingsClicked()
@@ -1744,15 +2080,7 @@ void HistoryView::onChangeSettingsClicked()
                     m_periodEnd = periodEndEdit->date();
                 }
                 m_timeStepMs = timeStepCombo->currentData().toLongLong();
-                // Confirmed in the real viewer's ChartsModel.qml: the
-                // activity chart's own bucket resolution ("granula") is
-                // NOT the raw Time step -- it's `max(timeStep/5, 60s)`,
-                // i.e. never finer than 60 seconds even at Time step=1s.
-                // Using the raw value made every bucket hold at most one
-                // sample at fine time steps, so bars came out binary
-                // (all-or-nothing) instead of a smooth gradient.
-                m_activityBar->setBucketMs(qMax<qint64>(m_timeStepMs / 5, 60000));
-                m_muteButton->setVisible(m_timeStepMs <= 1000);
+                applyTimeStep();
                 if (newDeviceKey != 0 && newDeviceKey != m_currentDeviceKey) {
                     switchDevice(newDeviceKey);
                 } else {
@@ -1772,7 +2100,8 @@ void HistoryView::onDaysReceived(quint32 streamId, const QStringList &days)
     m_allDays = days;
     if (days.isEmpty()) {
         m_dayCombo->clear();
-        m_statusLabel->setText(QStringLiteral("Niciun istoric inregistrat inca pentru acest angajat."));
+        m_statusLabel->setText(QStringLiteral("No information for selected period"));
+        updateStatusVisibility();
         hideLoadingDialog();
         return;
     }
@@ -1792,20 +2121,25 @@ void HistoryView::onDaysReceived(quint32 streamId, const QStringList &days)
 void HistoryView::onFramesReceived(quint32 streamId, const QString &day,
                                    const QList<qint64> &timestamps)
 {
-    Q_UNUSED(day)
     if (streamId != currentStreamId()) {
         return;
     }
     m_timestamps = timestamps;
     m_timeline->setTimestamps(timestamps);
-    m_timeAxis->setRange(timestamps.isEmpty() ? 0 : timestamps.first(),
-                         timestamps.isEmpty() ? 0 : timestamps.last());
+    const auto [dayStart, dayEnd] = dayRangeMs(day);
+    m_timeline->setRange(dayStart, dayEnd);
+    m_timeAxis->setRange(dayStart, dayEnd);
+    m_chart->setRange(dayStart, dayEnd);
     if (timestamps.isEmpty()) {
-        m_statusLabel->setText(QStringLiteral("Nicio captura pentru aceasta zi."));
+        m_statusLabel->setText(QStringLiteral("No information for selected period"));
+        updateStatusVisibility();
+        m_videoStrip->setStreams({});
         hideLoadingDialog();
         return;
     }
     m_statusLabel->clear();
+    updateStatusVisibility();
+    rebuildMonitorStrip();
     hideLoadingDialog();
     requestFrameAt(timestamps.size() - 1);
 }
@@ -1825,15 +2159,21 @@ void HistoryView::onFrameReceived(quint32 streamId, qint64 timestampMs, const QI
         exportNextVideoFrame();
     }
 
-    QLabel *preview = m_monitorPreviewLabels.value(streamId, nullptr);
-    if (!preview) {
-        return; // not one of the current device's monitors
+    if (m_deviceMonitorStreams.value(m_currentDeviceKey).contains(streamId)) {
+        m_videoStrip->setFrame(streamId, image);
     }
-    QPixmap pixmap = QPixmap::fromImage(image);
-    if (preview->width() > 0 && preview->height() > 0) {
-        pixmap = pixmap.scaled(preview->size(), Qt::KeepAspectRatio, Qt::SmoothTransformation);
+}
+
+void HistoryView::onHistoryFrameMissing(quint32 streamId)
+{
+    if (m_videoExport.active && streamId == m_videoExport.streamId && !m_videoExport.pending.isEmpty()) {
+        m_videoExport.pending.removeFirst();
+        exportNextVideoFrame();
     }
-    preview->setPixmap(pixmap);
+    // PlayerVideoFrame.Offline: that screen has nothing near this moment.
+    if (m_deviceMonitorStreams.value(m_currentDeviceKey).contains(streamId)) {
+        m_videoStrip->setOffline(streamId);
+    }
 }
 
 void HistoryView::onActivityReceived(quint32 streamId, const QString &day,
@@ -1844,8 +2184,7 @@ void HistoryView::onActivityReceived(quint32 streamId, const QString &day,
         return;
     }
     m_activitySamples = samples;
-    m_activityBar->setSamples(samples, m_timestamps.first(), m_timestamps.last());
-    refreshViolationsFilter();
+    m_chart->setActivity(samples);
 }
 
 void HistoryView::onAppSegmentsReceived(quint32 streamId, const QString &day,
@@ -1857,66 +2196,11 @@ void HistoryView::onAppSegmentsReceived(quint32 streamId, const QString &day,
     }
     m_appSegments = segments;
     refreshEfficiencyBar();
-    refreshViolationsFilter();
 }
 
 void HistoryView::refreshEfficiencyBar()
 {
-    if (m_timestamps.isEmpty()) {
-        return;
-    }
-    m_efficiencyBar->setSegments(m_appSegments, m_categories, m_timestamps.first(),
-                                 m_timestamps.last());
-}
-
-void HistoryView::refreshViolationsFilter()
-{
-    if (m_timestamps.isEmpty()) {
-        return;
-    }
-    const qint64 rangeStart = m_timestamps.first();
-    const qint64 rangeEnd = m_timestamps.last();
-
-    // Row 1: non-productive app usage -- straight from the same category
-    // data EfficiencyBarWidget already uses, just filtered to one category
-    // and reshaped into (start,end) spans.
-    ViolationRow nonProductive;
-    nonProductive.label = QStringLiteral("Aplicații neproductive");
-    for (const HistoryAppSegment &segment : std::as_const(m_appSegments)) {
-        const QString category = m_categories.value(segment.application, QStringLiteral("none"));
-        if (category == QStringLiteral("unproductive")) {
-            nonProductive.ranges.append({segment.startMs, segment.endMs});
-        }
-    }
-
-    // Row 2: sustained inactivity -- a run of consecutive zero-activity
-    // samples lasting at least kInactivityThresholdMs. HistoryActivitySample
-    // doesn't carry an explicit "no more samples after this" marker, so a
-    // run is closed either by a nonzero sample or by reaching the end of
-    // the list.
-    constexpr qint64 kInactivityThresholdMs = 5 * 60 * 1000;
-    ViolationRow inactivity;
-    inactivity.label = QStringLiteral("Inactivitate");
-    qint64 runStart = -1;
-    qint64 lastZeroTimestamp = -1;
-    for (const HistoryActivitySample &sample : std::as_const(m_activitySamples)) {
-        if (sample.inputEvents <= 0) {
-            if (runStart < 0) {
-                runStart = sample.timestampMs;
-            }
-            lastZeroTimestamp = sample.timestampMs;
-        } else if (runStart >= 0) {
-            if (lastZeroTimestamp - runStart >= kInactivityThresholdMs) {
-                inactivity.ranges.append({runStart, lastZeroTimestamp});
-            }
-            runStart = -1;
-        }
-    }
-    if (runStart >= 0 && lastZeroTimestamp - runStart >= kInactivityThresholdMs) {
-        inactivity.ranges.append({runStart, lastZeroTimestamp});
-    }
-
-    m_violationsFilter->setRows({nonProductive, inactivity}, rangeStart, rangeEnd);
+    m_chart->setEfficiency(m_appSegments, m_categories);
 }
 
 void HistoryView::onRunningAppsReceived(quint32 streamId, const QString &day,
@@ -1954,7 +2238,6 @@ void HistoryView::rebuildRunningAppsList()
                     m_categories[application] = newCategory;
                     m_connection.setAppCategory(streamId, application, newCategory);
                     refreshEfficiencyBar();
-                    refreshViolationsFilter();
                     rebuildRunningAppsList();
                 });
         rowLayout->addWidget(categoryButton);
@@ -1970,7 +2253,6 @@ void HistoryView::onCategoriesReceived(quint32 streamId, const QHash<QString, QS
     }
     m_categories = categories;
     refreshEfficiencyBar();
-    refreshViolationsFilter();
     rebuildRunningAppsList();
 }
 
@@ -2001,42 +2283,26 @@ void HistoryView::onKeystrokesReceived(quint32 streamId, const QString &day,
         m_textLog->setItem(i, 3, new QTableWidgetItem(row.windowTitle));
         m_textLog->setItem(i, 4, new QTableWidgetItem(row.text));
     }
+    const int index = m_timeline->currentIndex();
+    if (index >= 0 && index < m_timestamps.size()) {
+        updateKeystream(m_timestamps.at(index));
+    }
 }
 
-int HistoryView::nearestKeystrokeIndex(qint64 timestampMs) const
+void HistoryView::updateKeystream(qint64 timestampMs)
 {
-    if (m_keystrokeEntries.isEmpty()) {
-        return -1;
+    // History.qml's two Keystreams: events up to historyModel.moment in
+    // white, the ones after it in gray.
+    QString past;
+    QString future;
+    for (const HistoryKeystrokeEntry &entry : std::as_const(m_keystrokeEntries)) {
+        (entry.timestampMs <= timestampMs ? past : future) += entry.text;
     }
-    int closestIndex = 0;
-    qint64 closestDelta = qAbs(m_keystrokeEntries.first().timestampMs - timestampMs);
-    for (int i = 1; i < m_keystrokeEntries.size(); ++i) {
-        const qint64 delta = qAbs(m_keystrokeEntries.at(i).timestampMs - timestampMs);
-        if (delta < closestDelta) {
-            closestDelta = delta;
-            closestIndex = i;
-        }
-    }
-    return closestIndex;
+    m_keystream->setText(past, future);
 }
 
 void HistoryView::updateTextLogHighlight(qint64 timestampMs)
 {
-    const int closestIndex = nearestKeystrokeIndex(timestampMs);
-    if (closestIndex < 0) {
-        m_keylogTicker->clear();
-        return;
-    }
-
-    // Compact ticker under the monitor strip, always kept in sync with the
-    // timeline position regardless of Video/Text mode (item 7: typed text
-    // should line up with what's on screen at that moment).
-    const HistoryKeystrokeEntry &nearest = m_keystrokeEntries.at(closestIndex);
-    m_keylogTicker->setText(QStringLiteral("%1  [%2]  %3")
-                                .arg(QDateTime::fromMSecsSinceEpoch(nearest.timestampMs)
-                                         .toString(QStringLiteral("HH:mm:ss")),
-                                     nearest.windowTitle, nearest.text));
-
     if (!m_textLog->isVisible()) {
         return;
     }
@@ -2070,5 +2336,6 @@ void HistoryView::onHistoryError(quint32 streamId, const QString &message)
         return;
     }
     m_statusLabel->setText(message);
+    updateStatusVisibility();
     hideLoadingDialog();
 }

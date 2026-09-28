@@ -8,6 +8,7 @@
 
 class QComboBox;
 class QDialog;
+class QEvent;
 class QHBoxLayout;
 class QLabel;
 class QListWidget;
@@ -17,105 +18,94 @@ class QResizeEvent;
 class QScrollArea;
 class QTableWidget;
 class QTimer;
+class QWheelEvent;
 
-// Vertical-bar chart of activity, bucketed into fixed-size columns
-// ("pillars", 5 minutes by default -- see setBucketMs, driven by History's
-// "Time step" setting) across [rangeStartMs, rangeEndMs] -- a column's
-// height is how much of that bucket had real input activity (full =
-// continuously active the whole bucket, half = active ~half of it), not
-// normalized to the loudest sample in the set. Also draws a shared yellow
-// "current position" line (see setCurrentPositionMs) kept in sync with
-// TimelineWidget and EfficiencyBarWidget so all three line up visually.
-class ActivityBarWidget final : public QWidget
+// history/video/Header.qml: 24px bar (#3f4047, double lines top/bottom),
+// the employee name centered and "( moment )" 10px to its right.
+class HistoryVideoHeader final : public QWidget
 {
     Q_OBJECT
 
 public:
-    explicit ActivityBarWidget(QWidget *parent = nullptr);
-    void setSamples(const QList<HistoryActivitySample> &samples, qint64 rangeStartMs,
-                    qint64 rangeEndMs);
-    void setCurrentPositionMs(qint64 positionMs);
-    void setBucketMs(qint64 bucketMs);
+    explicit HistoryVideoHeader(QWidget *parent = nullptr);
+    void setName(const QString &name);
+    void setMoment(const QString &moment);
 
 protected:
     void paintEvent(QPaintEvent *event) override;
 
 private:
-    QList<HistoryActivitySample> m_samples;
-    qint64 m_rangeStart = 0;
-    qint64 m_rangeEnd = 0;
-    qint64 m_currentPositionMs = 0;
-    // Default matches the real viewer's activity granula formula
-    // (max(timeStep/5, 60s)) at the default Time step of 5 minutes.
-    qint64 m_bucketMs = 60 * 1000;
+    QString m_name;
+    QString m_moment;
 };
 
-// Horizontal colored segments (green/yellow/red = productive/neutral/
-// unproductive) showing which category of application was active across
-// [rangeStartMs, rangeEndMs]. Draws the same shared "current position" line
-// as ActivityBarWidget/TimelineWidget.
-class EfficiencyBarWidget final : public QWidget
+// history/Video.qml's frame row: every screen of the employee side by side
+// (spacing 30), full height, online frames as wide as their aspect ratio
+// needs, loading/offline ones width/count; centered when narrower than the
+// view, horizontally scrollable otherwise (it lives in a QScrollArea).
+class HistoryVideoStrip final : public QWidget
 {
     Q_OBJECT
 
 public:
-    explicit EfficiencyBarWidget(QWidget *parent = nullptr);
-    void setSegments(const QList<HistoryAppSegment> &segments,
-                     const QHash<QString, QString> &categories, qint64 rangeStartMs,
-                     qint64 rangeEndMs);
-    void setCurrentPositionMs(qint64 positionMs);
+    explicit HistoryVideoStrip(QWidget *parent = nullptr);
+    void setStreams(const QList<quint32> &streamIds);
+    void setAllLoading();
+    void setFrame(quint32 streamId, const QImage &image);
+    void setOffline(quint32 streamId);
+    // The scroll area's usable size -- frames are its height minus 5, and
+    // width/count / centering are relative to its width.
+    void setViewSize(const QSize &size);
+
+signals:
+    void clicked();
 
 protected:
     void paintEvent(QPaintEvent *event) override;
+    void mousePressEvent(QMouseEvent *event) override;
 
 private:
-    QList<HistoryAppSegment> m_segments;
-    QHash<QString, QString> m_categories;
-    qint64 m_rangeStart = 0;
-    qint64 m_rangeEnd = 0;
-    qint64 m_currentPositionMs = 0;
+    enum class Status { Loading, Online, Offline };
+    struct Screen {
+        quint32 streamId = 0;
+        QImage image;
+        Status status = Status::Loading;
+    };
+    QList<QRect> screenRects() const;
+    void relayout();
+
+    QList<Screen> m_screens;
+    QSize m_viewSize;
+    QTimer *m_spinnerTimer = nullptr;
+    int m_spinnerAngle = 0;
 };
 
-// One row of the "violations" filter chart (matches the real Kickidler
-// viewer's FiltersLine.qml: a label + a strip of red blocks wherever that
-// rule was triggered). We have no violation-detection backend, so the rows
-// are derived client-side from data History already has -- see
-// HistoryView::refreshViolationsFilter.
-struct ViolationRow {
-    QString label;
-    QList<QPair<qint64, qint64>> ranges; // [startMs, endMs) spans where triggered
-};
-
-// Multi-row strip chart, one row per ViolationRow, red blocks on a dark
-// track, label at the left of each row. Draws the same shared
-// "current position" line as ActivityBarWidget/EfficiencyBarWidget/TimelineWidget.
-class ViolationsFilterWidget final : public QWidget
+// History.qml's keylogger bar: 30px of keylogger_bg.png with the period's
+// typed text in one line -- what was typed up to the current moment in
+// white, the rest in gray -- centered while it fits.
+class KeystreamBar final : public QWidget
 {
     Q_OBJECT
 
 public:
-    explicit ViolationsFilterWidget(QWidget *parent = nullptr);
-    void setRows(const QList<ViolationRow> &rows, qint64 rangeStartMs, qint64 rangeEndMs);
-    void setCurrentPositionMs(qint64 positionMs);
+    explicit KeystreamBar(QWidget *parent = nullptr);
+    void setText(const QString &past, const QString &future);
 
 protected:
     void paintEvent(QPaintEvent *event) override;
-    QSize sizeHint() const override;
+    void wheelEvent(QWheelEvent *event) override;
 
 private:
-    QList<ViolationRow> m_rows;
-    qint64 m_rangeStart = 0;
-    qint64 m_rangeEnd = 0;
-    qint64 m_currentPositionMs = 0;
+    QString m_past;
+    QString m_future;
+    int m_scroll = 0;
 };
 
-// Replaces a plain QSlider: draws hour-of-day tick labels across
-// [rangeStartMs, rangeEndMs] (closer to the reference UI's timeline) and
-// lets the user click/drag to seek. Selection is still by index into a
-// discrete list of captured-frame timestamps (setTimestamps), same as the
-// slider's [0, count-1] range was, but positioning on screen -- and the
-// yellow current-position line -- uses actual time-of-day, kept in sync with
-// ActivityBarWidget/EfficiencyBarWidget via the same rangeStart/rangeEnd.
+// history/SliderBar.qml: the 4px scrub bar drawn from the original
+// sliderBar/*.png assets (bg_none where nothing was recorded,
+// bg_loaded_cropped where frames exist) plus the 19x19 pick handle.
+// Selection is by index into the captured-frame timestamps; on-screen
+// position is time-of-day across [rangeStart, rangeEnd].
 class TimelineWidget final : public QWidget
 {
     Q_OBJECT
@@ -123,6 +113,11 @@ class TimelineWidget final : public QWidget
 public:
     explicit TimelineWidget(QWidget *parent = nullptr);
     void setTimestamps(const QList<qint64> &timestamps);
+    void setRange(qint64 rangeStartMs, qint64 rangeEndMs);
+    // Marker granularity (History's "Time step") -- SliderBar.qml widens
+    // every recorded range by one marker, and it decides how far apart two
+    // frames may be while still counting as one continuous recorded range.
+    void setStepMs(qint64 stepMs);
     void setCurrentIndex(int index); // does not emit indexSelected
     int currentIndex() const { return m_currentIndex; }
     int count() const { return m_timestamps.size(); }
@@ -134,21 +129,30 @@ protected:
     void paintEvent(QPaintEvent *event) override;
     void mousePressEvent(QMouseEvent *event) override;
     void mouseMoveEvent(QMouseEvent *event) override;
-    QSize sizeHint() const override;
+    void mouseReleaseEvent(QMouseEvent *event) override;
+    void leaveEvent(QEvent *event) override;
 
 private:
     int indexForX(int x) const;
     void seekToX(int x);
+    int xForTime(qint64 timestampMs) const;
+    QRect pickRect() const;
 
     QList<qint64> m_timestamps;
     int m_currentIndex = -1;
+    qint64 m_rangeStart = 0;
+    qint64 m_rangeEnd = 0;
+    qint64 m_stepMs = 5 * 60 * 1000;
+    bool m_pickHovered = false;
+    bool m_pressed = false;
 };
 
-// Purely visual date + hour-tick axis (matches TimeLine.qml) -- lives inside
-// the violation panel, above Activity/Efficiency/the violations rows, all
-// sharing the same width so the yellow current-position line lines up
-// across every one of them. Not interactive (no seeking here; that's
-// TimelineWidget, always visible in the transport row).
+// chart/TimeLine.qml, as History's MultiSessionsSlider uses it: one date
+// ("high") label per calendar day and HH:mm ("low") labels, both drawn as a
+// 1px #54545a tick with the text immediately to its right. Marks are spaced
+// by the raw "Time step" (doubled while there would be over 1000 of them);
+// only every indexVisible-th low label is shown, where indexVisible is how
+// many marks one label's own width spans.
 class TimeAxisWidget final : public QWidget
 {
     Q_OBJECT
@@ -156,16 +160,56 @@ class TimeAxisWidget final : public QWidget
 public:
     explicit TimeAxisWidget(QWidget *parent = nullptr);
     void setRange(qint64 rangeStartMs, qint64 rangeEndMs);
-    void setCurrentPositionMs(qint64 positionMs);
+    void setStepMs(qint64 stepMs);
 
 protected:
     void paintEvent(QPaintEvent *event) override;
-    QSize sizeHint() const override;
 
 private:
     qint64 m_rangeStart = 0;
     qint64 m_rangeEnd = 0;
+    qint64 m_stepMs = 5 * 60 * 1000;
+};
+
+// history/Filters.qml -> utils/Chart.qml with needPlayerLine=true, laid out
+// the way it is inside History's 186px chartsItem: ExtraHeaders labels
+// ("Activity"/"Efficiency") on the left, then over a Grid.qml backdrop the
+// HistoLine activity histogram (#7aa1e2) and the Line.qml productivity row
+// (equal-height stacked category bands per chart step), a double-line
+// separator, the (empty here) filters grid below, and the khaki
+// HistoryPlayerMarkerControl line across the whole chart.
+class HistoryChartWidget final : public QWidget
+{
+    Q_OBJECT
+
+public:
+    explicit HistoryChartWidget(QWidget *parent = nullptr);
+    void setRange(qint64 rangeStartMs, qint64 rangeEndMs);
+    // History's raw "Time step"; the chart's own step is derived from it the
+    // way HistoryTab.qml does (alingStep, at most 60 grid columns).
+    void setStepMs(qint64 stepMs);
+    // x (in this widget) where the grid starts -- History.qml's
+    // labelsAreaLeftMargin, i.e. the width of the button columns.
+    void setGridLeft(int x);
+    void setActivity(const QList<HistoryActivitySample> &samples);
+    void setEfficiency(const QList<HistoryAppSegment> &segments,
+                       const QHash<QString, QString> &categories);
+    void setCurrentPositionMs(qint64 positionMs);
+
+    static qint64 chartStepMs(qint64 rangeMs, qint64 userStepMs);
+
+protected:
+    void paintEvent(QPaintEvent *event) override;
+
+private:
+    QList<HistoryActivitySample> m_samples;
+    QList<HistoryAppSegment> m_segments;
+    QHash<QString, QString> m_categories;
+    qint64 m_rangeStart = 0;
+    qint64 m_rangeEnd = 0;
+    qint64 m_stepMs = 5 * 60 * 1000;
     qint64 m_currentPositionMs = 0;
+    int m_gridLeft = 0;
 };
 
 // The full embedded History page (replaces what used to be a separate
@@ -228,9 +272,10 @@ private slots:
 
 protected:
     void resizeEvent(QResizeEvent *event) override;
+    void paintEvent(QPaintEvent *event) override;
+    bool eventFilter(QObject *watched, QEvent *event) override;
 
 private:
-    void resizeMonitorStripToFit();
     // The streamId used for every non-video History query (days, activity,
     // app segments, running apps, categories, keystrokes) -- the device's
     // first/primary monitor. These values are session-wide already (see
@@ -243,40 +288,33 @@ private:
     void requestFrameAt(int index);
     void refreshDayDependentData();
     void updateTextLogHighlight(qint64 timestampMs);
+    void updateKeystream(qint64 timestampMs);
     void rebuildRunningAppsList();
     void applyPeriodFilter();
-    // Index into m_keystrokeEntries closest to timestampMs, or -1 if empty --
-    // shared by updateTextLogHighlight (Text mode scroll sync) and the
-    // compact keylog ticker under the monitor strip (see m_keylogTicker).
-    int nearestKeystrokeIndex(qint64 timestampMs) const;
+    void onHistoryFrameMissing(quint32 streamId);
+    // History.qml's panelFull: clicking the video hides sliderAndMeta and
+    // chartsItem so the video (and keylogger bar) take the whole page.
+    void togglePanelFull();
+    void updateStatusVisibility();
+    void positionOverlays();
 
     ViewerConnection &m_connection;
 
-    QLabel *m_employeeLabel = nullptr;
     QComboBox *m_dayCombo = nullptr;
-    QLabel *m_timeLabel = nullptr;
 
     QPushButton *m_toggleAppsButton = nullptr;
     QListWidget *m_runningAppsList = nullptr;
 
-    // Every screen of the current device, shown at once, side by side,
-    // scrollable horizontally -- not a single selectable monitor.
-    QWidget *m_videoColumn = nullptr; // wraps the monitor strip + keylog ticker
+    // history/Video.qml: header + the horizontally scrollable row of every
+    // screen of the current device.
+    QWidget *m_videoPanel = nullptr;
+    HistoryVideoHeader *m_videoHeader = nullptr;
     QScrollArea *m_monitorStripArea = nullptr;
-    QWidget *m_monitorStripContainer = nullptr;
-    QHBoxLayout *m_monitorStripLayout = nullptr;
-    QHash<quint32, QLabel *> m_monitorPreviewLabels; // streamId -> its preview QLabel
-    // Compact live keylog line under the monitor strip, time-synced to the
-    // timeline position (item 7: typed text should line up with what's on
-    // screen at that moment) -- not the full scrollable log (m_textLog).
-    QLabel *m_keylogTicker = nullptr;
-    // Grouped keystroke log: real Kickidler keylogger table columns (see
-    // Src/Viewer_SRC/qml_real/.../keylogger/Table.qml) are Date/Pressing
-    // period/Application/Title/Keystrokes; we don't have a separate
-    // "application" field in HistoryKeystrokeEntry so this uses
-    // Date/Period/Window/Keystrokes. Rows are built by grouping consecutive
-    // same-window entries within a gap (see groupKeystrokeEntries in the
-    // .cpp), newest first.
+    HistoryVideoStrip *m_videoStrip = nullptr;
+    KeystreamBar *m_keystream = nullptr;
+    QWidget *m_controlBlock = nullptr;
+    bool m_panelFull = false;
+    bool m_chartOpen = false;
     QTableWidget *m_textLog = nullptr;
 
     // Opens the grouped keylog table (see m_textLog) in a popup dialog --
@@ -295,6 +333,8 @@ private:
     // exists anywhere in this project (PersonalHost/PersonalSubService).
     QPushButton *m_muteButton = nullptr;
     TimelineWidget *m_timeline = nullptr;
+    // Video.qml's centered "excuse" text over the video area
+    // ("No information for selected period", ...).
     QLabel *m_statusLabel = nullptr;
     // utils/LoadingStatusDialog.qml equivalent -- a small floating popup
     // ("Downloading...") instead of just the status label text below the
@@ -306,22 +346,20 @@ private:
     void showLoadingDialog(const QString &message);
     void hideLoadingDialog();
 
-    // "Violation panel": the Activity + Efficiency bars, wrapped together so
-    // they can be hidden/shown as one unit (see onToggleViolationPanel).
+    // History.qml's panelViolation button and the chartsItem it opens.
     QPushButton *m_violationToggleButton = nullptr;
-    QWidget *m_violationPanel = nullptr;
     TimeAxisWidget *m_timeAxis = nullptr;
-    ActivityBarWidget *m_activityBar = nullptr;
-    EfficiencyBarWidget *m_efficiencyBar = nullptr;
-    ViolationsFilterWidget *m_violationsFilter = nullptr;
+    HistoryChartWidget *m_chart = nullptr;
+    // sliderAndMeta's button columns; its width is History.qml's
+    // widthActionButtons, which also decides where the chart grid starts.
+    QWidget *m_leftColumn = nullptr;
+    void applyTimeStep();
 
     QTimer *m_playbackTimer = nullptr;
 
     void refreshEfficiencyBar();
-    // Recomputes m_violationsFilter's rows from m_appSegments/m_categories
-    // (non-productive app usage) and m_activitySamples (sustained
-    // inactivity) -- see ViolationRow.
-    void refreshViolationsFilter();
+    void setPlaying(bool playing);
+    void updateViolationToggleText();
 
     QHash<quint32, QString> m_deviceNames; // deviceKey -> display name ("Employee")
     QHash<quint32, QList<quint32>> m_deviceMonitorStreams; // deviceKey -> its monitor streamIds
@@ -338,8 +376,7 @@ private:
     QStringList m_allDays;
     QDate m_periodStart;
     QDate m_periodEnd;
-    // "Time step" (Change settings dialog): the ActivityBarWidget bucket
-    // width -- see ActivityBarWidget::setBucketMs.
+    // "Time step" (Change settings dialog) -- see applyTimeStep.
     qint64 m_timeStepMs = 5 * 60 * 1000;
 
     QList<qint64> m_timestamps;

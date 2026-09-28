@@ -423,11 +423,15 @@ void ViewerConnection::processHistoryQuery(const ViewerProtocol::Header &header,
         return;
     }
     const QJsonObject object = document.object();
+    const QString action = object.value(QStringLiteral("action")).toString();
     if (object.contains(QStringLiteral("error"))) {
-        emit historyError(header.streamId, object.value(QStringLiteral("error")).toString());
+        if (action == QStringLiteral("getFrame")) {
+            emit historyFrameMissing(header.streamId);
+        } else {
+            emit historyError(header.streamId, object.value(QStringLiteral("error")).toString());
+        }
         return;
     }
-    const QString action = object.value(QStringLiteral("action")).toString();
     if (action == QStringLiteral("listDays")) {
         QStringList days;
         for (const QJsonValue &value : object.value(QStringLiteral("days")).toArray()) {

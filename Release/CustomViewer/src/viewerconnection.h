@@ -86,6 +86,8 @@ signals:
     void historyFramesReceived(quint32 streamId, const QString &day, const QList<qint64> &timestamps);
     void historyFrameReceived(quint32 streamId, qint64 timestampMs, const QImage &image);
     void historyError(quint32 streamId, const QString &message);
+    // A getFrame request had no frame for that screen near that moment.
+    void historyFrameMissing(quint32 streamId);
     void historyActivityReceived(quint32 streamId, const QString &day,
                                  const QList<HistoryActivitySample> &samples);
     void historyAppSegmentsReceived(quint32 streamId, const QString &day,

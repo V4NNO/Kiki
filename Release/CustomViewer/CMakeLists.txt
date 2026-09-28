@@ -29,6 +29,49 @@ qt_add_executable(PersonalScreenViewer WIN32
     src/frameprotocol.h
 )
 
+# Original Kickidler History assets (qml_real/desktop/View/history) and the
+# Roboto faces embedded in the real viewer.exe, so History renders with the
+# exact same images/fonts instead of hand-drawn approximations.
+qt_add_resources(PersonalScreenViewer "history_assets"
+    PREFIX "/"
+    BASE resources
+    FILES
+        resources/fonts/Roboto-Regular.ttf
+        resources/fonts/Roboto-Medium.ttf
+        resources/fonts/Roboto-Bold.ttf
+        resources/history/sliderBar/bg_none.png
+        resources/history/sliderBar/bg_loaded_cropped.png
+        resources/history/sliderBar/bg_online_cropped.png
+        resources/history/sliderBar/pick_normal.png
+        resources/history/sliderBar/pick_hovered.png
+        resources/history/sliderBar/pick_pressed.png
+        resources/history/bg_play.png
+        resources/history/bg_audio.png
+        resources/history/play_normal.png
+        resources/history/play_active.png
+        resources/history/pause_normal.png
+        resources/history/pause_active.png
+        resources/history/volume_on.png
+        resources/history/volume_off.png
+        resources/history/avi_export_normal.png
+        resources/history/avi_export_hovered.png
+        resources/history/avi_export_pressed.png
+        resources/history/speedButton/speed_bg.png
+        resources/history/speedButton/speed_bg_hovered.png
+        resources/history/speedButton/speed_bg_pressed.png
+        resources/history/speedButton/triangle_normal.png
+        resources/history/speedButton/triangle_hovered.png
+        resources/history/speedButton/triangle_pressed.png
+        resources/history/iconButtonViolation/arrow_up.png
+        resources/history/iconButtonViolation/arrow_down.png
+        resources/history/keylogger_bg.png
+        resources/history/big_emptyStream.png
+        resources/history/warning.png
+        resources/history/spinner/spinner.png
+        resources/history/video/buttonRunningApp/applications_arrow_left.png
+        resources/history/video/buttonRunningApp/applications_arrow_right.png
+)
+
 target_link_libraries(PersonalScreenViewer PRIVATE
     Qt6::Core
     Qt6::Gui
