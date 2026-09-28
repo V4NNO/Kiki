@@ -122,10 +122,76 @@ bool HistoryRecorder::start(QString *error)
         "  category TEXT NOT NULL"
         ")"));
 
+    query.exec(QStringLiteral(
+        "CREATE TABLE IF NOT EXISTS app_categories_user ("
+        "  username TEXT NOT NULL,"
+        "  application TEXT NOT NULL,"
+        "  category TEXT NOT NULL,"
+        "  PRIMARY KEY (username, application)"
+        ")"));
+
+    query.exec(QStringLiteral(
+        "CREATE TABLE IF NOT EXISTS stream_ids ("
+        "  username TEXT NOT NULL,"
+        "  monitor_name TEXT NOT NULL,"
+        "  stream_id INTEGER NOT NULL UNIQUE,"
+        "  PRIMARY KEY (username, monitor_name)"
+        ")"));
+
     emit logMessage(QStringLiteral("Istoric activat, rata 1 cadru/%1s per monitor, in %2")
                         .arg(m_minIntervalMs / 1000)
                         .arg(m_historyDir));
     return true;
+}
+
+quint32 HistoryRecorder::stableStreamId(const QString &username, const QString &monitorName)
+{
+    if (!m_database.isOpen()) {
+        return 0;
+    }
+    QSqlQuery query(m_database);
+    query.prepare(QStringLiteral(
+        "SELECT stream_id FROM stream_ids WHERE username = ? AND monitor_name = ?"));
+    query.addBindValue(username);
+    query.addBindValue(monitorName);
+    if (query.exec() && query.next()) {
+        return query.value(0).toUInt();
+    }
+
+    // First time this monitor is seen since stream_ids existed: adopt the id
+    // its most recent recorded history used, so that history stays visible,
+    // unless another monitor already claimed it.
+    quint32 streamId = 0;
+    QSqlQuery previous(m_database);
+    previous.prepare(QStringLiteral(
+        "SELECT monitor_stream_id FROM frames WHERE session_username = ? AND monitor_name = ? "
+        "AND monitor_stream_id NOT IN (SELECT stream_id FROM stream_ids) "
+        "ORDER BY timestamp_ms DESC LIMIT 1"));
+    previous.addBindValue(username);
+    previous.addBindValue(monitorName);
+    if (previous.exec() && previous.next()) {
+        streamId = previous.value(0).toUInt();
+    }
+    if (streamId == 0) {
+        QSqlQuery next(m_database);
+        next.exec(QStringLiteral(
+            "SELECT MAX(COALESCE((SELECT MAX(stream_id) FROM stream_ids), 0),"
+            " COALESCE((SELECT MAX(monitor_stream_id) FROM frames), 0)) + 1"));
+        streamId = next.next() ? next.value(0).toUInt() : 1;
+    }
+
+    QSqlQuery insert(m_database);
+    insert.prepare(QStringLiteral(
+        "INSERT INTO stream_ids (username, monitor_name, stream_id) VALUES (?, ?, ?)"));
+    insert.addBindValue(username);
+    insert.addBindValue(monitorName);
+    insert.addBindValue(streamId);
+    if (!insert.exec()) {
+        emit logMessage(QStringLiteral("Nu am putut salva id-ul stabil pentru %1/%2: %3")
+                            .arg(username, monitorName, insert.lastError().text()));
+        return 0;
+    }
+    return streamId;
 }
 
 void HistoryRecorder::recordFrame(quint32 sessionId, const QString &sessionUsername,
@@ -403,6 +469,61 @@ void HistoryRecorder::setCategory(const QString &application, const QString &cat
         emit logMessage(
             QStringLiteral("Nu am putut salva categoria: %1").arg(query.lastError().text()));
     }
+}
+
+void HistoryRecorder::setEmployeeCategory(const QString &username, const QString &application,
+                                          const QString &category)
+{
+    if (!m_database.isOpen() || username.isEmpty() || application.isEmpty()) {
+        return;
+    }
+    QSqlQuery query(m_database);
+    if (category == QStringLiteral("none")) {
+        query.prepare(QStringLiteral(
+            "DELETE FROM app_categories_user WHERE username = ? AND application = ?"));
+        query.addBindValue(username);
+        query.addBindValue(application);
+    } else {
+        query.prepare(QStringLiteral(
+            "INSERT INTO app_categories_user (username, application, category) VALUES (?, ?, ?) "
+            "ON CONFLICT(username, application) DO UPDATE SET category = excluded.category"));
+        query.addBindValue(username);
+        query.addBindValue(application);
+        query.addBindValue(category);
+    }
+    if (!query.exec()) {
+        emit logMessage(
+            QStringLiteral("Nu am putut salva categoria angajatului: %1").arg(query.lastError().text()));
+    }
+}
+
+QList<QPair<QString, QString>> HistoryRecorder::listEmployeeCategories(const QString &username) const
+{
+    QList<QPair<QString, QString>> categories;
+    if (!m_database.isOpen() || username.isEmpty()) {
+        return categories;
+    }
+    QSqlQuery query(m_database);
+    query.prepare(QStringLiteral(
+        "SELECT application, category FROM app_categories_user WHERE username = ?"));
+    query.addBindValue(username);
+    if (query.exec()) {
+        while (query.next()) {
+            categories.append({query.value(0).toString(), query.value(1).toString()});
+        }
+    }
+    return categories;
+}
+
+QString HistoryRecorder::usernameForStream(quint32 streamId) const
+{
+    if (!m_database.isOpen()) {
+        return {};
+    }
+    QSqlQuery query(m_database);
+    query.prepare(QStringLiteral("SELECT username FROM stream_ids WHERE stream_id = ?"));
+    query.addBindValue(streamId);
+    return query.exec() && query.next() ? query.value(0).toString() : QString();
 }
 
 QString HistoryRecorder::category(const QString &application) const

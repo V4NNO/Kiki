@@ -3,6 +3,7 @@
 #include "viewerconnection.h"
 
 #include <QDate>
+#include <QDialog>
 #include <QHash>
 #include <QWidget>
 
@@ -16,6 +17,8 @@ class QMouseEvent;
 class QPushButton;
 class QResizeEvent;
 class QScrollArea;
+class QScrollBar;
+class QTabBar;
 class QTableWidget;
 class QTimer;
 class QWheelEvent;
@@ -56,6 +59,8 @@ public:
     // The scroll area's usable size -- frames are its height minus 5, and
     // width/count / centering are relative to its width.
     void setViewSize(const QSize &size);
+    // Video.qml's ScrollView flickable: press-and-drag scrolls the row.
+    void setScrollBar(QScrollBar *scrollBar) { m_scrollBar = scrollBar; }
 
 signals:
     void clicked();
@@ -63,6 +68,8 @@ signals:
 protected:
     void paintEvent(QPaintEvent *event) override;
     void mousePressEvent(QMouseEvent *event) override;
+    void mouseMoveEvent(QMouseEvent *event) override;
+    void mouseReleaseEvent(QMouseEvent *event) override;
 
 private:
     enum class Status { Loading, Online, Offline };
@@ -78,6 +85,137 @@ private:
     QSize m_viewSize;
     QTimer *m_spinnerTimer = nullptr;
     int m_spinnerAngle = 0;
+    QScrollBar *m_scrollBar = nullptr;
+    QPoint m_pressGlobal;
+    int m_pressScroll = 0;
+    bool m_dragging = false;
+    bool m_pressed = false;
+};
+
+// History.qml's Running applications `panel` content:
+// utils/sessionInfo/WebPagesAndPrograms.qml -- a "WebPages" and a
+// "Programs" section, one TriLine.qml row each (title, url/executable in its
+// category color, share of the current moment, active marker, and the
+// categorization button on hover).
+class HistoryInfoPanel final : public QWidget
+{
+    Q_OBJECT
+
+public:
+    struct Item {
+        QString resource; // url or executable (TriLine text1)
+        QString title;    // TriLine text3
+        double percent = 0.0;
+        QString category;
+        bool active = false;
+    };
+    explicit HistoryInfoPanel(QWidget *parent = nullptr);
+    void setItems(const QList<Item> &webPages, const QList<Item> &programs);
+
+signals:
+    void categorizationRequested(const QString &resource);
+
+protected:
+    void paintEvent(QPaintEvent *event) override;
+    void mouseMoveEvent(QMouseEvent *event) override;
+    void mousePressEvent(QMouseEvent *event) override;
+    void leaveEvent(QEvent *event) override;
+
+private:
+    struct Row {
+        QRect rect;
+        Item item;
+    };
+    struct Title {
+        QRect rect;
+        QString text;
+    };
+    void relayout();
+    QRect categorizationRect(const Row &row) const;
+
+    QList<Item> m_webPages;
+    QList<Item> m_programs;
+    QList<Row> m_rows;
+    QList<Title> m_titles;
+    QList<int> m_separatorsY;
+    int m_hoveredRow = -1;
+};
+
+// utils/sessionInfo/CategorizationPanel.qml (a GenericBox): "Efficiency
+// <resource>" and one categorizationPanel/Row.qml per level -- the
+// organization, then the employee -- each with Productive / Neutral /
+// Unproductive / Uncategorized, Cancel / OK. The organization row is the
+// global rule, the employee row that employee's own override
+// (Uncategorized = no override, inherit the global one).
+class CategorizationDialog final : public QDialog
+{
+    Q_OBJECT
+
+public:
+    CategorizationDialog(const QString &resource, const QString &globalCategory,
+                         const QString &employeeCategory, const QString &employeeName,
+                         QWidget *parent = nullptr);
+    QString category() const { return m_category; }
+    QString employeeCategory() const { return m_employeeCategory; }
+
+protected:
+    void paintEvent(QPaintEvent *event) override;
+    void mousePressEvent(QMouseEvent *event) override;
+    void mouseMoveEvent(QMouseEvent *event) override;
+
+private:
+    QRect ratingRect(int row, int option) const;
+    QRect cancelRect() const;
+    QRect okRect() const;
+    QRect closeRect() const;
+
+    QString m_title;
+    QString m_employeeName;
+    QString m_category;
+    QString m_employeeCategory;
+    QPoint m_hover;
+};
+
+// utils/HistoryChoicePanel.qml (a GenericBox) in its "add" ("Add history
+// watching") and "change" ("Change range and employee") modes: Employee,
+// Period (TimeRangeReport: kind + a ◀▶ period field) and Time step (with
+// the "no audio" info icon), Cancel / OK. History here works one day at a
+// time, so Day is the only period kind that can be chosen.
+class HistoryChoiceDialog final : public QDialog
+{
+    Q_OBJECT
+
+public:
+    enum class Mode { Add, Change };
+    HistoryChoiceDialog(Mode mode, const QList<QPair<quint32, QString>> &employees, quint32 employee,
+                        const QDate &day, qint64 timeStepMs, QWidget *parent = nullptr);
+    quint32 employee() const { return m_employee; }
+    QDate day() const { return m_day; }
+    qint64 timeStepMs() const { return m_timeStepMs; }
+
+protected:
+    void paintEvent(QPaintEvent *event) override;
+    void mousePressEvent(QMouseEvent *event) override;
+    void mouseMoveEvent(QMouseEvent *event) override;
+    bool event(QEvent *event) override;
+
+private:
+    QRect fieldRect(int row) const;
+    QRect cancelRect() const;
+    QRect okRect() const;
+    QRect closeRect() const;
+    QRect infoRect() const;
+    QRect previousRect() const;
+    QRect nextRect() const;
+    QString employeeName() const;
+    void showMenu(int row);
+
+    QString m_title;
+    QList<QPair<quint32, QString>> m_employees;
+    quint32 m_employee = 0;
+    QDate m_day;
+    qint64 m_timeStepMs = 0;
+    QPoint m_hover;
 };
 
 // History.qml's keylogger bar: 30px of keylogger_bg.png with the period's
@@ -252,8 +390,10 @@ private slots:
                             const QList<HistoryActivitySample> &samples);
     void onAppSegmentsReceived(quint32 streamId, const QString &day,
                                const QList<HistoryAppSegment> &segments);
-    void onRunningAppsReceived(quint32 streamId, const QString &day,
-                               const QList<HistoryAppUsage> &applications);
+    void onWebVisitsReceived(quint32 streamId, const QString &day,
+                             const QList<HistoryAppSegment> &visits);
+    void onCategorizationRequested(const QString &resource);
+    void onEmployeeCategoriesReceived(quint32 streamId, const QHash<QString, QString> &categories);
     void onCategoriesReceived(quint32 streamId, const QHash<QString, QString> &categories);
     void onKeystrokesReceived(quint32 streamId, const QString &day,
                               const QList<HistoryKeystrokeEntry> &entries);
@@ -289,12 +429,39 @@ private:
     void refreshDayDependentData();
     void updateTextLogHighlight(qint64 timestampMs);
     void updateKeystream(qint64 timestampMs);
-    void rebuildRunningAppsList();
-    void applyPeriodFilter();
+    void updateInfoPanel();
+    // Global categories with this employee's own overrides applied.
+    QHash<QString, QString> effectiveCategories() const;
+    // The day the current tab shows ("yyyyMMdd"), shown even when nothing
+    // was recorded that day ("No information for selected period").
+    void selectDay(const QString &day);
+    void showNoData();
+    void jumpTo(quint32 deviceKey, const QString &day);
+
+    // HistoryPanel.qml / ViewerControls/Tabs.qml: one tab per history
+    // watching (employee + day + Time step), "+" opens "Add history
+    // watching", closing asks for confirmation.
+    struct HistoryTab {
+        quint32 deviceKey = 0;
+        QString day;
+        qint64 timeStepMs = 5 * 60 * 1000;
+    };
+    void addHistoryTab(const HistoryTab &tab);
+    void showHistoryTab(int index);
+    void storeCurrentTab();
+    void openAddTabDialog();
+    void closeHistoryTab(int index);
+    void updateHistoryTabText(int index);
+    QList<QPair<quint32, QString>> employeeList() const;
+    QList<HistoryTab> m_historyTabs;
+    QTabBar *m_historyTabBar = nullptr;
+    int m_currentTab = -1;
+    QString m_currentDay;
     void onHistoryFrameMissing(quint32 streamId);
     // History.qml's panelFull: clicking the video hides sliderAndMeta and
     // chartsItem so the video (and keylogger bar) take the whole page.
     void togglePanelFull();
+    void stepMarkers(int markers);
     void updateStatusVisibility();
     void positionOverlays();
 
@@ -303,7 +470,8 @@ private:
     QComboBox *m_dayCombo = nullptr;
 
     QPushButton *m_toggleAppsButton = nullptr;
-    QListWidget *m_runningAppsList = nullptr;
+    QScrollArea *m_infoArea = nullptr;
+    HistoryInfoPanel *m_infoPanel = nullptr;
 
     // history/Video.qml: header + the horizontally scrollable row of every
     // screen of the current device.
@@ -365,23 +533,15 @@ private:
     QHash<quint32, QList<quint32>> m_deviceMonitorStreams; // deviceKey -> its monitor streamIds
     QHash<quint32, QString> m_monitorNames; // streamId -> its own display name
     quint32 m_currentDeviceKey = 0;
-    // Set by openForDevice(), consumed by onDaysReceived() once the day
-    // list for the target device actually arrives (switchDevice() clears
-    // and re-requests it, so the jump can't happen synchronously).
-    QString m_pendingJumpDay;
-
-    // "Period" (Change settings dialog): filters which of m_allDays show up
-    // in m_dayCombo, client-side -- there's no ranged day-list query in the
-    // protocol, so this just narrows the existing day list.
+    // Days with history for the current employee (m_dayCombo's items).
     QStringList m_allDays;
-    QDate m_periodStart;
-    QDate m_periodEnd;
     // "Time step" (Change settings dialog) -- see applyTimeStep.
     qint64 m_timeStepMs = 5 * 60 * 1000;
 
     QList<qint64> m_timestamps;
     QHash<QString, QString> m_categories;
-    QList<HistoryAppUsage> m_runningApps;
+    QHash<QString, QString> m_employeeCategories;
+    QList<HistoryAppSegment> m_webVisits;
     QList<HistoryAppSegment> m_appSegments;
     QList<HistoryActivitySample> m_activitySamples;
     QList<HistoryKeystrokeEntry> m_keystrokeEntries;

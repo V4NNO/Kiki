@@ -66,6 +66,11 @@ public:
     bool start(QString *error);
     bool isValid() const { return m_database.isOpen(); }
 
+    // The persistent stream id for one user's monitor, so the same screen
+    // keeps the same id across grabber reconnects and service restarts (and
+    // its history stays under one id). 0 if the database isn't open.
+    quint32 stableStreamId(const QString &username, const QString &monitorName);
+
     // Rate-limited internally per monitorStreamId; safe to call on every
     // captured frame, most calls will just be dropped.
     void recordFrame(quint32 sessionId, const QString &sessionUsername, quint32 monitorStreamId,
@@ -90,6 +95,13 @@ public:
     void recordKeystroke(quint32 sessionId, const QString &windowTitle, const QString &text);
 
     void setCategory(const QString &application, const QString &category);
+    // One employee's own rule for an application, overriding the global
+    // one; "none" removes it (the employee inherits the global category).
+    void setEmployeeCategory(const QString &username, const QString &application,
+                             const QString &category);
+    QList<QPair<QString, QString>> listEmployeeCategories(const QString &username) const;
+    // The user a persisted stream id belongs to (see stableStreamId).
+    QString usernameForStream(quint32 streamId) const;
 
     // Read side, used to answer viewer HistoryQuery requests. All return
     // empty on failure or when nothing matches; never throw/assert on a

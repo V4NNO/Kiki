@@ -75,7 +75,9 @@ private:
     QTimer m_pollTimer;
     QHash<quint32, SessionEntry> m_sessions; // key: Windows session id
     QHash<quint32, MonitorInfo> m_globalMonitors; // key: global streamId
-    quint32 m_nextGlobalStreamId = 1;
+    // Transient ids (window streams, or no history database) start far above
+    // the persisted per-monitor ids so the two can never collide.
+    quint32 m_nextGlobalStreamId = 1000000;
     // Last count broadcast by AgentServer; re-sent to a session's
     // sub-service as soon as it's discovered so a session that starts up
     // after viewers are already connected doesn't sit at idle FPS.

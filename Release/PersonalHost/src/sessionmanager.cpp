@@ -276,7 +276,20 @@ void SessionManager::onMonitorDiscovered(quint32 sessionId, quint32 localStreamI
     SessionEntry &entry = it.value();
     quint32 globalId = entry.localToGlobal.value(localStreamId, 0);
     if (globalId == 0) {
-        globalId = allocateGlobalStreamId();
+        // Real monitors get the same id every time they're discovered (per
+        // user + monitor name, persisted with the history), so a grabber
+        // reconnect or service restart doesn't hand viewers a brand-new set
+        // of screens with no history behind them. Window streams aren't
+        // recorded and stay on the transient counter.
+        if (!isWindow && m_historyRecorder) {
+            globalId = m_historyRecorder->stableStreamId(entry.username, name);
+            if (m_globalMonitors.contains(globalId)) {
+                globalId = 0; // already live for another session of this user
+            }
+        }
+        if (globalId == 0) {
+            globalId = allocateGlobalStreamId();
+        }
         entry.localToGlobal.insert(localStreamId, globalId);
         // First monitor discovered for this session means its pipe just
         // came up; bring it up to speed on the current viewer count right

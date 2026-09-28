@@ -59,8 +59,13 @@ public:
     void requestHistoryAppSegments(quint32 streamId, const QString &day);
     void requestRunningApplications(quint32 streamId, const QString &day);
     void requestWebPages(quint32 streamId, const QString &day);
+    // Each visit with its time span (HistoryAppSegment, url in application).
+    void requestWebVisits(quint32 streamId, const QString &day);
     void requestCategories(quint32 streamId);
-    void setAppCategory(quint32 streamId, const QString &application, const QString &category);
+    // employeeScope: set that screen's employee's own rule instead of the
+    // global one ("none" then removes the rule).
+    void setAppCategory(quint32 streamId, const QString &application, const QString &category,
+                        bool employeeScope = false);
     void requestKeystrokes(quint32 streamId, const QString &day);
 
 signals:
@@ -98,7 +103,11 @@ signals:
     // is unused (empty) here since web pages aren't categorized.
     void historyWebPagesReceived(quint32 streamId, const QString &day,
                                  const QList<HistoryAppUsage> &pages);
+    void historyWebVisitsReceived(quint32 streamId, const QString &day,
+                                  const QList<HistoryAppSegment> &visits);
     void historyCategoriesReceived(quint32 streamId, const QHash<QString, QString> &categories);
+    // The same reply's per-employee overrides for that screen's employee.
+    void historyEmployeeCategoriesReceived(quint32 streamId, const QHash<QString, QString> &categories);
     void historyKeystrokesReceived(quint32 streamId, const QString &day,
                                    const QList<HistoryKeystrokeEntry> &entries);
 

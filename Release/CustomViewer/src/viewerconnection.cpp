@@ -381,6 +381,13 @@ void ViewerConnection::requestRunningApplications(quint32 streamId, const QStrin
                                  {QStringLiteral("day"), day}});
 }
 
+void ViewerConnection::requestWebVisits(quint32 streamId, const QString &day)
+{
+    sendHistoryQuery(streamId,
+                     QJsonObject{{QStringLiteral("action"), QStringLiteral("listWebVisits")},
+                                 {QStringLiteral("day"), day}});
+}
+
 void ViewerConnection::requestWebPages(quint32 streamId, const QString &day)
 {
     sendHistoryQuery(streamId,
@@ -394,11 +401,15 @@ void ViewerConnection::requestCategories(quint32 streamId)
 }
 
 void ViewerConnection::setAppCategory(quint32 streamId, const QString &application,
-                                      const QString &category)
+                                      const QString &category, bool employeeScope)
 {
-    sendHistoryQuery(streamId, QJsonObject{{QStringLiteral("action"), QStringLiteral("setCategory")},
-                                           {QStringLiteral("application"), application},
-                                           {QStringLiteral("category"), category}});
+    QJsonObject request{{QStringLiteral("action"), QStringLiteral("setCategory")},
+                        {QStringLiteral("application"), application},
+                        {QStringLiteral("category"), category}};
+    if (employeeScope) {
+        request.insert(QStringLiteral("scope"), QStringLiteral("employee"));
+    }
+    sendHistoryQuery(streamId, request);
 }
 
 void ViewerConnection::requestKeystrokes(quint32 streamId, const QString &day)
@@ -466,6 +477,17 @@ void ViewerConnection::processHistoryQuery(const ViewerProtocol::Header &header,
         }
         emit historyAppSegmentsReceived(header.streamId, object.value(QStringLiteral("day")).toString(),
                                         segments);
+    } else if (action == QStringLiteral("listWebVisits")) {
+        QList<HistoryAppSegment> visits;
+        for (const QJsonValue &value : object.value(QStringLiteral("visits")).toArray()) {
+            const QJsonObject entry = value.toObject();
+            visits.append(HistoryAppSegment{
+                entry.value(QStringLiteral("url")).toString(),
+                static_cast<qint64>(entry.value(QStringLiteral("startMs")).toDouble()),
+                static_cast<qint64>(entry.value(QStringLiteral("endMs")).toDouble())});
+        }
+        emit historyWebVisitsReceived(header.streamId, object.value(QStringLiteral("day")).toString(),
+                                      visits);
     } else if (action == QStringLiteral("listRunningApplications")) {
         QList<HistoryAppUsage> applications;
         for (const QJsonValue &value : object.value(QStringLiteral("applications")).toArray()) {
@@ -495,6 +517,13 @@ void ViewerConnection::processHistoryQuery(const ViewerProtocol::Header &header,
                               entry.value(QStringLiteral("category")).toString());
         }
         emit historyCategoriesReceived(header.streamId, categories);
+        QHash<QString, QString> employeeCategories;
+        for (const QJsonValue &value : object.value(QStringLiteral("employeeCategories")).toArray()) {
+            const QJsonObject entry = value.toObject();
+            employeeCategories.insert(entry.value(QStringLiteral("application")).toString(),
+                                      entry.value(QStringLiteral("category")).toString());
+        }
+        emit historyEmployeeCategoriesReceived(header.streamId, employeeCategories);
     } else if (action == QStringLiteral("setCategory")) {
         // Ack-only; the Running Applications panel already updated itself
         // optimistically, nothing further to do here.

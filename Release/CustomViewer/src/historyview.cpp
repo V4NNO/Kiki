@@ -3,6 +3,11 @@
 #include "efficiencycategorybutton.h"
 
 #include <QComboBox>
+#include <QTabBar>
+#include <QToolTip>
+#include <QMenu>
+#include <QHelpEvent>
+#include <QCalendarWidget>
 #include <QDateEdit>
 #include <QDateTime>
 #include <QDialog>
@@ -18,8 +23,11 @@
 #include <QMouseEvent>
 #include <QFontDatabase>
 #include <QPainter>
+#include <QPainterPath>
 #include <QSet>
+#include <QShortcut>
 #include <QAbstractItemView>
+#include <QApplication>
 #include <QHeaderView>
 #include <QPushButton>
 #include <QResizeEvent>
@@ -30,6 +38,7 @@
 #include <QTableWidgetItem>
 #include <QTextStream>
 #include <QTimer>
+#include <QUrl>
 #include <QToolButton>
 #include <QVBoxLayout>
 #include <QWheelEvent>
@@ -44,12 +53,6 @@ namespace {
 // Category display name/color now live in EfficiencyCategoryButton (the one
 // place category-editing UI exists) -- use those instead of duplicating the
 // logic here.
-
-QString formatDuration(qint64 ms)
-{
-    const qint64 totalMinutes = ms / 60000;
-    return QStringLiteral("%1h %2m").arg(totalMinutes / 60).arg(totalMinutes % 60);
-}
 
 // Timeline/Activity/Efficiency/violations all used to span just
 // [first captured timestamp, last captured timestamp], so a device that only
@@ -430,10 +433,14 @@ HistoryVideoStrip::HistoryVideoStrip(QWidget *parent)
 
 void HistoryVideoStrip::setStreams(const QList<quint32> &streamIds)
 {
-    m_screens.clear();
+    // Screens that stay keep what they already show; only new ones load.
+    QList<Screen> screens;
     for (quint32 streamId : streamIds) {
-        m_screens.append({streamId, {}, Status::Loading});
+        const auto existing = std::find_if(m_screens.cbegin(), m_screens.cend(),
+                                           [streamId](const Screen &s) { return s.streamId == streamId; });
+        screens.append(existing != m_screens.cend() ? *existing : Screen{streamId, {}, Status::Loading});
     }
+    m_screens = screens;
     relayout();
 }
 
@@ -567,12 +574,757 @@ void HistoryVideoStrip::paintEvent(QPaintEvent *)
 
 void HistoryVideoStrip::mousePressEvent(QMouseEvent *event)
 {
+    m_pressed = event->button() == Qt::LeftButton;
+    m_dragging = false;
+    m_pressGlobal = event->globalPosition().toPoint();
+    m_pressScroll = m_scrollBar ? m_scrollBar->value() : 0;
+}
+
+void HistoryVideoStrip::mouseMoveEvent(QMouseEvent *event)
+{
+    if (!m_pressed || !m_scrollBar) {
+        return;
+    }
+    const int dx = event->globalPosition().toPoint().x() - m_pressGlobal.x();
+    if (!m_dragging && qAbs(dx) >= QApplication::startDragDistance()) {
+        m_dragging = true;
+        setCursor(Qt::ClosedHandCursor);
+    }
+    if (m_dragging) {
+        m_scrollBar->setValue(m_pressScroll - dx);
+    }
+}
+
+void HistoryVideoStrip::mouseReleaseEvent(QMouseEvent *event)
+{
+    const bool wasDrag = m_dragging;
+    m_pressed = false;
+    m_dragging = false;
+    unsetCursor();
+    if (wasDrag) {
+        return;
+    }
+    // A plain click on a screen is Video.qml's MouseArea -> panelFull.
     for (const QRect &r : screenRects()) {
         if (r.contains(event->pos())) {
             emit clicked();
             return;
         }
     }
+}
+
+namespace {
+// TriLine.qml: 42px rows (content 5px down, 10px in), 1px apart.
+constexpr int kTriLineHeight = 42;
+constexpr int kTriLineSpacing = 1;
+// Info.qml / WebPagesAndPrograms.qml insets inside the 420px panel.
+constexpr int kInfoLeft = 10;
+constexpr int kInfoTop = 10;
+constexpr int kInfoWidth = 400; // panel.width - 20
+
+// ProgressBar { kind: "big" } (compiled C++, measured from a real
+// screenshot): a 78x14 inset pill with the rounded percentage centered.
+constexpr int kProgressWidth = 78;
+constexpr int kProgressHeight = 14;
+
+QFont bigFont() // Fonts.rr_big
+{
+    QFont font(QStringLiteral("Roboto"));
+    font.setPixelSize(14);
+    return font;
+}
+
+QString triLinePercent(double percent)
+{
+    // TriLine.qml's ProgressBar value rounding.
+    if (percent < 1) {
+        return QString::number(std::floor(percent * 100) / 100);
+    }
+    if (percent < 10) {
+        return QString::number(std::floor(percent * 10) / 10);
+    }
+    return QString::number(std::floor(percent));
+}
+}
+
+HistoryInfoPanel::HistoryInfoPanel(QWidget *parent)
+    : QWidget(parent)
+{
+    setMouseTracking(true);
+    relayout();
+}
+
+void HistoryInfoPanel::setItems(const QList<Item> &webPages, const QList<Item> &programs)
+{
+    m_webPages = webPages;
+    m_programs = programs;
+    relayout();
+}
+
+void HistoryInfoPanel::relayout()
+{
+    // WebPagesAndPrograms: Column(spacing 9) { WebPages, Programs }, each a
+    // Column(spacing 10) { centered title, TriLine rows spacing 1 } followed
+    // by an HSeparator.
+    m_rows.clear();
+    m_titles.clear();
+    m_separatorsY.clear();
+    int y = kInfoTop;
+    m_separatorsY.append(0); // Info's own top HSeparator
+    const auto addSection = [&](const QString &title, int height, const QList<Item> &items) {
+        m_titles.append({QRect(kInfoLeft, y, kInfoWidth, height), title});
+        y += height + 10;
+        for (const Item &item : items) {
+            m_rows.append({QRect(kInfoLeft, y, kInfoWidth, kTriLineHeight), item});
+            y += kTriLineHeight + kTriLineSpacing;
+        }
+        m_separatorsY.append(y);
+        y += 9;
+    };
+    addSection(QStringLiteral("Web pages"), 20, m_webPages);
+    addSection(QStringLiteral("Programs"), 20, m_programs);
+    setMinimumHeight(y + kInfoTop);
+    m_hoveredRow = -1;
+    update();
+}
+
+QRect HistoryInfoPanel::categorizationRect(const Row &row) const
+{
+    // CategorizationButton (small, 13x13): 15px left of the ProgressBar,
+    // which sits 10px in from the row's right edge.
+    const int centerY = row.rect.top() + 5 + kTriLineHeight / 2 - 3;
+    return QRect(row.rect.right() - 10 - kProgressWidth - 15 - 13, centerY - 6, 13, 13);
+}
+
+void HistoryInfoPanel::mouseMoveEvent(QMouseEvent *event)
+{
+    int hovered = -1;
+    for (int i = 0; i < m_rows.size(); ++i) {
+        if (m_rows.at(i).rect.adjusted(0, 0, 0, kTriLineSpacing).contains(event->pos())) {
+            hovered = i;
+            break;
+        }
+    }
+    if (hovered != m_hoveredRow) {
+        m_hoveredRow = hovered;
+        update();
+    }
+}
+
+void HistoryInfoPanel::leaveEvent(QEvent *)
+{
+    if (m_hoveredRow != -1) {
+        m_hoveredRow = -1;
+        update();
+    }
+}
+
+void HistoryInfoPanel::mousePressEvent(QMouseEvent *event)
+{
+    // TriLine: clicking the texts or the categorization button opens the
+    // categorization for that resource.
+    if (m_hoveredRow < 0 || m_hoveredRow >= m_rows.size()) {
+        return;
+    }
+    Q_UNUSED(event)
+    emit categorizationRequested(m_rows.at(m_hoveredRow).item.resource);
+}
+
+void HistoryInfoPanel::paintEvent(QPaintEvent *)
+{
+    static const QPixmap activeProgram(QStringLiteral(":/sessionInfo/images/active_program.png"));
+    static const QPixmap categorize(QStringLiteral(":/sessionInfo/categorizationButton/small_normal.png"));
+    QPainter painter(this);
+    // Background { kind: "hatching" }: a real screenshot shows it as a flat
+    // #46474e (the "hatching" is below one level of pixel noise).
+    painter.fillRect(rect(), QColor(0x46, 0x47, 0x4e));
+
+    for (int y : std::as_const(m_separatorsY)) {
+        drawHorizontalSeparator(painter, y == 0 ? 0 : kInfoLeft, y, y == 0 ? width() : kInfoWidth);
+    }
+
+    painter.setPen(Qt::white);
+    painter.setFont(bigFont());
+    for (const Title &title : std::as_const(m_titles)) {
+        painter.drawText(title.rect, Qt::AlignCenter, title.text);
+    }
+
+    const QFont titleFont = bigFont();
+    const QFont resourceFont = mediumFont();
+    const QFontMetrics titleMetrics(titleFont);
+    const QFontMetrics resourceMetrics(resourceFont);
+    for (int i = 0; i < m_rows.size(); ++i) {
+        const Row &row = m_rows.at(i);
+        const QRect &r = row.rect;
+        if (i == m_hoveredRow) {
+            painter.fillRect(r.adjusted(0, 1, 0, 2), QColor(255, 255, 255, 8));
+        }
+        drawHorizontalSeparator(painter, r.left(), r.top(), r.width());
+        drawVerticalSeparator(painter, r.left() + 1, r.top(), r.height() + 2);
+        drawVerticalSeparator(painter, r.right() - 1, r.top(), r.height() + 2);
+
+        const int contentLeft = r.left() + 10;
+        const int centerY = r.top() + 5 + kTriLineHeight / 2;
+        int textLeft = contentLeft + 2;
+        if (row.item.active) {
+            painter.drawPixmap(contentLeft + 2, centerY - 4 - activeProgram.height() / 2, activeProgram);
+            textLeft = contentLeft + 2 + activeProgram.width() + 6;
+        }
+        // Text column: title over resource, spacing 5, centered 3px up.
+        const int textWidth = qMax(10, r.width() - 13 - kProgressWidth - 2 - 64 - (textLeft - contentLeft - 2));
+        const int blockHeight = titleMetrics.height() + 5 + resourceMetrics.height();
+        const int top = centerY - 3 - blockHeight / 2;
+        painter.setFont(titleFont);
+        painter.setPen(Qt::white);
+        painter.drawText(QRect(textLeft, top, textWidth, titleMetrics.height()), Qt::AlignLeft | Qt::AlignVCenter,
+                         titleMetrics.elidedText(row.item.title, Qt::ElideRight, textWidth));
+        painter.setFont(resourceFont);
+        const QString category = row.item.category.isEmpty() ? QStringLiteral("none") : row.item.category;
+        // statusToColor gives the brighter "hovered" EfficiencyColors
+        // variants here (a real screenshot's productive text is #29a16e,
+        // i.e. #28a570, not the #1f8057 chart color); uncategorized is white.
+        static const QHash<QString, QColor> kTextColors = {
+            {QStringLiteral("productive"), QColor(0x28, 0xa5, 0x70)},
+            {QStringLiteral("neutral"), QColor(0xec, 0xbd, 0x0b)},
+            {QStringLiteral("unproductive"), QColor(0xcc, 0x55, 0x4a)},
+        };
+        painter.setPen(kTextColors.value(category, QColor(Qt::white)));
+        painter.drawText(QRect(textLeft, top + titleMetrics.height() + 5, textWidth, resourceMetrics.height()),
+                         Qt::AlignLeft | Qt::AlignVCenter,
+                         resourceMetrics.elidedText(row.item.resource, Qt::ElideRight, textWidth));
+
+        if (i == m_hoveredRow) {
+            painter.drawPixmap(categorizationRect(row).topLeft(), categorize);
+        }
+
+        const QRectF bar(r.right() - 10 - kProgressWidth, centerY - 3 - kProgressHeight / 2.0, kProgressWidth,
+                         kProgressHeight);
+        QPainterPath pill;
+        pill.addRoundedRect(bar, kProgressHeight / 2.0, kProgressHeight / 2.0);
+        painter.save();
+        painter.setRenderHint(QPainter::Antialiasing);
+        painter.setClipPath(pill);
+        // Measured: #43444b body, a 4px inner shadow from the top
+        // (#39393f -> #44454b) and a 2px lighter bottom lip (#4d4e55/#4a4b52).
+        painter.fillRect(bar, QColor(0x43, 0x44, 0x4b));
+        QLinearGradient shadow(bar.topLeft(), QPointF(bar.left(), bar.top() + 4));
+        shadow.setColorAt(0, QColor(0x39, 0x39, 0x3f));
+        shadow.setColorAt(1, QColor(0x44, 0x45, 0x4b));
+        painter.fillRect(QRectF(bar.left(), bar.top(), bar.width(), 4), shadow);
+        painter.fillRect(QRectF(bar.left(), bar.bottom() - 2, bar.width(), 1), QColor(0x4d, 0x4e, 0x55));
+        painter.fillRect(QRectF(bar.left(), bar.bottom() - 1, bar.width(), 1), QColor(0x4a, 0x4b, 0x52));
+        painter.fillRect(QRectF(bar.left(), bar.top(), bar.width() * qBound(0.0, row.item.percent, 100.0) / 100,
+                                bar.height()),
+                         QColor(0x1f, 0x80, 0x57));
+        painter.restore();
+        painter.setPen(Qt::white);
+        QFont percentFont(QStringLiteral("Roboto"));
+        percentFont.setPixelSize(13);
+        painter.setFont(percentFont);
+        painter.drawText(bar, Qt::AlignCenter, triLinePercent(row.item.percent) + QStringLiteral("%"));
+    }
+}
+
+namespace {
+// Measured from a real screenshot of the dialog (695x286).
+constexpr int kDialogWidth = 695;
+constexpr int kDialogHeight = 286;
+constexpr int kDialogRowCenter0 = 71;
+constexpr double kDialogRowPitch = 23.5;
+// RatingButtons option x positions (text starts) -- 10px after Row.qml's
+// 220px name column.
+constexpr int kRatingX[] = {274, 341, 389, 471};
+const QString kRatingCategories[] = {QStringLiteral("productive"), QStringLiteral("neutral"),
+                                     QStringLiteral("unproductive"), QStringLiteral("none")};
+const QString kRatingLabels[] = {QStringLiteral("Productive"), QStringLiteral("Neutral"),
+                                 QStringLiteral("Unproductive"), QStringLiteral("Uncategorized")};
+
+QFont ratingFont()
+{
+    QFont font(QStringLiteral("Roboto"));
+    font.setPixelSize(12);
+    return font;
+}
+}
+
+CategorizationDialog::CategorizationDialog(const QString &resource, const QString &globalCategory,
+                                           const QString &employeeCategory, const QString &employeeName,
+                                           QWidget *parent)
+    : QDialog(parent, Qt::FramelessWindowHint | Qt::Dialog)
+    , m_employeeName(employeeName)
+    , m_category(globalCategory.isEmpty() ? QStringLiteral("none") : globalCategory)
+    , m_employeeCategory(employeeCategory.isEmpty() ? QStringLiteral("none") : employeeCategory)
+{
+    // mask: a web page is categorized by its site, a program by itself.
+    const QUrl url(resource);
+    m_title = QStringLiteral("Efficiency %1").arg(url.isValid() && !url.host().isEmpty() ? url.host() : resource);
+    setModal(true);
+    setFixedSize(kDialogWidth, kDialogHeight);
+    setMouseTracking(true);
+}
+
+QRect CategorizationDialog::ratingRect(int row, int option) const
+{
+    const QFontMetrics metrics(ratingFont());
+    const int centerY = qRound(kDialogRowCenter0 + row * kDialogRowPitch);
+    return QRect(kRatingX[option], centerY - 9, metrics.horizontalAdvance(kRatingLabels[option]), 18);
+}
+
+QRect CategorizationDialog::cancelRect() const
+{
+    return QRect(286, 238, 56, 26);
+}
+
+QRect CategorizationDialog::okRect() const
+{
+    return QRect(354, 238, 56, 26);
+}
+
+QRect CategorizationDialog::closeRect() const
+{
+    return QRect(width() - 26, 8, 20, 20);
+}
+
+void CategorizationDialog::mouseMoveEvent(QMouseEvent *event)
+{
+    m_hover = event->pos();
+    update();
+}
+
+void CategorizationDialog::mousePressEvent(QMouseEvent *event)
+{
+    if (closeRect().contains(event->pos()) || cancelRect().contains(event->pos())) {
+        reject();
+        return;
+    }
+    if (okRect().contains(event->pos())) {
+        accept();
+        return;
+    }
+    for (int row = 0; row < 2; ++row) {
+        for (int option = 0; option < 4; ++option) {
+            if (ratingRect(row, option).contains(event->pos())) {
+                (row == 0 ? m_category : m_employeeCategory) = kRatingCategories[option];
+                update();
+                return;
+            }
+        }
+    }
+}
+
+void CategorizationDialog::paintEvent(QPaintEvent *)
+{
+    static const QPixmap indent(QStringLiteral(":/sessionInfo/categorizationPanel/indent.png"));
+    static const QPixmap multiuser(QStringLiteral(":/sessionInfo/categorizationPanel/multiuser_on.png"));
+    static const QPixmap user(QStringLiteral(":/sessionInfo/categorizationPanel/user_on.png"));
+    QPainter painter(this);
+
+    // Background { kind: "hatching" }, measured pixel-exact from the real
+    // dialog: a 3px diagonal pattern, color by (x + y) mod 3.
+    static const QImage hatch = [] {
+        QImage tile(3, 3, QImage::Format_RGB32);
+        const QRgb colors[] = {qRgb(0x48, 0x49, 0x51), qRgb(0x47, 0x48, 0x4f), qRgb(0x48, 0x49, 0x50)};
+        for (int y = 0; y < 3; ++y) {
+            for (int x = 0; x < 3; ++x) {
+                tile.setPixel(x, y, colors[(x + y) % 3]);
+            }
+        }
+        return tile;
+    }();
+    painter.fillRect(rect(), QBrush(hatch));
+    painter.setPen(QColor(0x62, 0x62, 0x6a));
+    painter.drawRect(rect().adjusted(0, 0, -1, -1));
+
+    // Title (Fonts.rb_big_b area): white, 23px in; close cross top-right.
+    painter.setPen(Qt::white);
+    painter.setFont(bigFont());
+    painter.drawText(QRect(23, 12, width() - 60, 24), Qt::AlignLeft | Qt::AlignVCenter, m_title);
+    painter.setPen(QPen(closeRect().contains(m_hover) ? QColor(Qt::white) : QColor(0xbf, 0xbf, 0xc0), 1.6));
+    painter.setRenderHint(QPainter::Antialiasing);
+    painter.drawLine(QPointF(674, 13), QPointF(682, 22));
+    painter.drawLine(QPointF(682, 13), QPointF(674, 22));
+    painter.setRenderHint(QPainter::Antialiasing, false);
+    drawHorizontalSeparator(painter, 1, 39, width() - 2);
+
+    // Rows: name column (icons + text, 220px), then the rating options.
+    const QString names[] = {QStringLiteral("All employees"), m_employeeName};
+    const QFont nameFont = bigFont();
+    const QFontMetrics nameMetrics(nameFont);
+    for (int row = 0; row < 2; ++row) {
+        const int centerY = qRound(kDialogRowCenter0 + row * kDialogRowPitch);
+        const bool readOnly = false;
+        int x = 23;
+        if (row > 0) {
+            painter.drawPixmap(x, centerY - 6, indent);
+            x += 11 + 10;
+        }
+        const QPixmap &icon = row == 0 ? multiuser : user;
+        painter.drawPixmap(x + (11 - icon.width()) / 2, centerY - icon.height() / 2, icon);
+        x += 11 + 10;
+        painter.setFont(nameFont);
+        painter.setPen(readOnly ? QColor(Qt::gray) : QColor(Qt::white));
+        const int nameWidth = 274 - 10 - x;
+        painter.drawText(QRect(x, centerY - 11, nameWidth, 20), Qt::AlignLeft | Qt::AlignVCenter,
+                         nameMetrics.elidedText(names[row], Qt::ElideRight, nameWidth));
+
+        // RatingButtons: selected option in its (hovered) category color,
+        // Uncategorized selected in white, the rest #a3a6a9.
+        const QString selected = row == 0 ? m_category : m_employeeCategory;
+        painter.setFont(ratingFont());
+        for (int option = 0; option < 4; ++option) {
+            QColor color(0xa3, 0xa6, 0xa9);
+            if (kRatingCategories[option] == selected) {
+                static const QColor kSelected[] = {QColor(0x28, 0xa5, 0x70), QColor(0xec, 0xbd, 0x0b),
+                                                   QColor(0xcc, 0x55, 0x4a), QColor(Qt::white)};
+                color = kSelected[option];
+            } else if (!readOnly && ratingRect(row, option).contains(m_hover)) {
+                color = QColor(Qt::white);
+            }
+            if (readOnly) {
+                color = color.darker(130);
+            }
+            painter.setPen(color);
+            painter.drawText(ratingRect(row, option), Qt::AlignLeft | Qt::AlignVCenter, kRatingLabels[option]);
+        }
+    }
+
+    // Cancel (Button) / OK (GreenButton), centered at the bottom.
+    painter.setRenderHint(QPainter::Antialiasing);
+    painter.setPen(Qt::NoPen);
+    painter.setBrush(cancelRect().contains(m_hover) ? QColor(0x4b, 0x4c, 0x53) : QColor(0x42, 0x43, 0x49));
+    painter.drawRoundedRect(cancelRect(), 4, 4);
+    painter.setBrush(okRect().contains(m_hover) ? QColor(0x23, 0xb4, 0x76) : QColor(0x1e, 0xa1, 0x68));
+    painter.drawRoundedRect(okRect(), 4, 4);
+    painter.setPen(Qt::white);
+    painter.setFont(ratingFont());
+    painter.drawText(cancelRect(), Qt::AlignCenter, QStringLiteral("Cancel"));
+    painter.drawText(okRect(), Qt::AlignCenter, QStringLiteral("OK"));
+}
+
+namespace {
+// Measured from real screenshots of the dialog (449x292): fields 23px tall
+// (HistoryChoicePanel's perdiodKind/perdiodValue), 20px apart, 87px in.
+constexpr int kChoiceWidth = 449;
+constexpr int kChoiceHeight = 292;
+constexpr int kChoiceFieldX = 87;
+constexpr int kChoiceFieldTop = 63;
+constexpr int kChoiceFieldPitch = 43;
+constexpr int kChoiceFieldHeight = 23;
+constexpr int kChoiceFieldWidth = 340;
+constexpr int kChoiceStepWidth = 160;
+const QColor kChoiceFieldText(0x7d, 0x7e, 0x83);
+
+const QList<qint64> kTimeSteps = {1000,      5000,      10000,     20000,       30000,      60000,
+                                  5 * 60000, 10 * 60000, 20 * 60000, 30 * 60000, 3600000, 2 * 3600000};
+
+QString timeStepText(qint64 ms)
+{
+    // TimeStepComboBox's "N second(s)" / "N minute(s)" / "N hour(s)".
+    if (ms >= 3600000 && ms % 3600000 == 0) {
+        return QStringLiteral("%1 hour(s)").arg(ms / 3600000);
+    }
+    if (ms >= 60000 && ms % 60000 == 0) {
+        return QStringLiteral("%1 minute(s)").arg(ms / 60000);
+    }
+    return QStringLiteral("%1 second(s)").arg(ms / 1000);
+}
+
+QFont choiceLabelFont() // Fonts.rb_medium_b -- renders as regular weight in real screenshots
+{
+    QFont font(QStringLiteral("Roboto"));
+    font.setPixelSize(12);
+    return font;
+}
+
+// GenericBox's Background { kind: "hatching" } as seen in this dialog.
+QBrush choiceHatch()
+{
+    static const QImage tile = [] {
+        QImage image(3, 3, QImage::Format_RGB32);
+        const QRgb colors[] = {qRgb(0x49, 0x4a, 0x52), qRgb(0x47, 0x48, 0x50), qRgb(0x47, 0x48, 0x4f)};
+        for (int y = 0; y < 3; ++y) {
+            for (int x = 0; x < 3; ++x) {
+                image.setPixel(x, y, colors[(x + y) % 3]);
+            }
+        }
+        return image;
+    }();
+    return QBrush(tile);
+}
+
+QString styledMenuSheet()
+{
+    return QStringLiteral(
+        "QMenu { background: #45464d; color: white; border: 1px solid #414248; padding: 2px; font-family: Roboto; font-size: 12px; }"
+        "QMenu::item { padding: 4px 14px; }"
+        "QMenu::item:selected { background: #5a5b63; }"
+        "QMenu::item:disabled { color: #7d7e83; }");
+}
+}
+
+HistoryChoiceDialog::HistoryChoiceDialog(Mode mode, const QList<QPair<quint32, QString>> &employees,
+                                         quint32 employee, const QDate &day, qint64 timeStepMs,
+                                         QWidget *parent)
+    : QDialog(parent, Qt::FramelessWindowHint | Qt::Dialog)
+    , m_title(mode == Mode::Add ? QStringLiteral("Add history watching")
+                                : QStringLiteral("Change range and employee"))
+    , m_employees(employees)
+    , m_employee(employee)
+    , m_day(day.isValid() ? day : QDate::currentDate())
+    , m_timeStepMs(timeStepMs)
+{
+    setModal(true);
+    setFixedSize(kChoiceWidth, kChoiceHeight);
+    setMouseTracking(true);
+}
+
+QRect HistoryChoiceDialog::fieldRect(int row) const
+{
+    return QRect(kChoiceFieldX, kChoiceFieldTop + row * kChoiceFieldPitch,
+                 row == 3 ? kChoiceStepWidth : kChoiceFieldWidth, kChoiceFieldHeight);
+}
+
+QRect HistoryChoiceDialog::cancelRect() const
+{
+    return QRect(161, 246, 57, 25);
+}
+
+QRect HistoryChoiceDialog::okRect() const
+{
+    return QRect(229, 246, 57, 25);
+}
+
+QRect HistoryChoiceDialog::closeRect() const
+{
+    return QRect(width() - 26, 8, 20, 20);
+}
+
+QRect HistoryChoiceDialog::infoRect() const
+{
+    // Row { spacing: 10 } after the 160px TimeStepComboBox.
+    const QRect step = fieldRect(3);
+    return QRect(step.right() + 1 + 10, step.center().y() - 12, 24, 24);
+}
+
+QRect HistoryChoiceDialog::previousRect() const
+{
+    const QRect field = fieldRect(2);
+    return QRect(field.right() - 24, field.top(), 11, field.height());
+}
+
+QRect HistoryChoiceDialog::nextRect() const
+{
+    const QRect field = fieldRect(2);
+    return QRect(field.right() - 13, field.top(), 11, field.height());
+}
+
+QString HistoryChoiceDialog::employeeName() const
+{
+    for (const auto &entry : m_employees) {
+        if (entry.first == m_employee) {
+            return entry.second;
+        }
+    }
+    return {};
+}
+
+bool HistoryChoiceDialog::event(QEvent *event)
+{
+    if (event->type() == QEvent::ToolTip) {
+        const auto *help = static_cast<QHelpEvent *>(event);
+        if (m_timeStepMs != 1000 && infoRect().contains(help->pos())) {
+            QToolTip::showText(help->globalPos(), QStringLiteral("No audio will be downloaded for this step"), this);
+        } else {
+            QToolTip::hideText();
+        }
+        return true;
+    }
+    return QDialog::event(event);
+}
+
+void HistoryChoiceDialog::mouseMoveEvent(QMouseEvent *event)
+{
+    m_hover = event->pos();
+    update();
+}
+
+void HistoryChoiceDialog::showMenu(int row)
+{
+    QMenu menu(this);
+    menu.setStyleSheet(styledMenuSheet());
+    menu.setMinimumWidth(fieldRect(row).width());
+    if (row == 0) {
+        for (const auto &entry : m_employees) {
+            menu.addAction(entry.second)->setData(entry.first);
+        }
+    } else if (row == 1) {
+        // TimeRangeReport's kinds; only Day is supported by this History.
+        const QString kinds[] = {QStringLiteral("Day"), QStringLiteral("Week"), QStringLiteral("Month"),
+                                 QStringLiteral("Quarter"), QStringLiteral("Arbitrary period")};
+        for (const QString &kind : kinds) {
+            QAction *action = menu.addAction(kind);
+            action->setEnabled(kind == kinds[0]);
+        }
+    } else if (row == 3) {
+        for (qint64 step : kTimeSteps) {
+            menu.addAction(timeStepText(step))->setData(step);
+        }
+    }
+    const QAction *chosen = menu.exec(mapToGlobal(fieldRect(row).bottomLeft() + QPoint(0, 1)));
+    if (!chosen || !chosen->data().isValid()) {
+        return;
+    }
+    if (row == 0) {
+        m_employee = chosen->data().toUInt();
+    } else if (row == 3) {
+        m_timeStepMs = chosen->data().toLongLong();
+    }
+    update();
+}
+
+void HistoryChoiceDialog::mousePressEvent(QMouseEvent *event)
+{
+    const QPoint pos = event->pos();
+    if (closeRect().contains(pos) || cancelRect().contains(pos)) {
+        reject();
+        return;
+    }
+    if (okRect().contains(pos)) {
+        if (m_employee == 0) {
+            QMessageBox::warning(this, QStringLiteral("Error"), QStringLiteral("No selected employee"));
+            return;
+        }
+        accept();
+        return;
+    }
+    // SpinTextField: ◀ goes one period back, ▶ forward (not past today).
+    if (previousRect().contains(pos)) {
+        m_day = m_day.addDays(-1);
+        update();
+        return;
+    }
+    if (nextRect().contains(pos)) {
+        if (m_day < QDate::currentDate()) {
+            m_day = m_day.addDays(1);
+            update();
+        }
+        return;
+    }
+    for (int row : {0, 1, 3}) {
+        if (fieldRect(row).contains(pos)) {
+            showMenu(row);
+            return;
+        }
+    }
+    if (fieldRect(2).contains(pos)) {
+        auto *popup = new QCalendarWidget;
+        popup->setWindowFlags(Qt::Popup);
+        popup->setAttribute(Qt::WA_DeleteOnClose);
+        popup->setMaximumDate(QDate::currentDate());
+        popup->setSelectedDate(m_day);
+        connect(popup, &QCalendarWidget::clicked, this, [this, popup](const QDate &date) {
+            m_day = date;
+            popup->close();
+            update();
+        });
+        popup->move(mapToGlobal(fieldRect(2).bottomLeft() + QPoint(0, 1)));
+        popup->show();
+    }
+}
+
+void HistoryChoiceDialog::paintEvent(QPaintEvent *)
+{
+    static const QPixmap triangle(QStringLiteral(":/history/speedButton/triangle_normal.png"));
+    static const QPixmap info(QStringLiteral(":/history/info.png"));
+    QPainter painter(this);
+    painter.fillRect(rect(), choiceHatch());
+    painter.setPen(QColor(0x62, 0x62, 0x6a));
+    painter.drawRect(rect().adjusted(0, 0, -1, -1));
+
+    painter.setPen(Qt::white);
+    painter.setFont(bigFont());
+    painter.drawText(QRect(22, 12, width() - 60, 24), Qt::AlignLeft | Qt::AlignVCenter, m_title);
+    painter.setRenderHint(QPainter::Antialiasing);
+    painter.setPen(QPen(closeRect().contains(m_hover) ? QColor(Qt::white) : QColor(0xbf, 0xbf, 0xc0), 1.6));
+    painter.drawLine(QPointF(width() - 20, 13), QPointF(width() - 12, 21));
+    painter.drawLine(QPointF(width() - 12, 13), QPointF(width() - 20, 21));
+    painter.setRenderHint(QPainter::Antialiasing, false);
+    drawHorizontalSeparator(painter, 1, 39, width() - 2);
+
+    // Grid labels (rowSpacing 20, columnSpacing 5).
+    painter.setFont(choiceLabelFont());
+    painter.setPen(Qt::white);
+    const QPair<int, QString> labels[] = {{0, QStringLiteral("Employee:")},
+                                          {1, QStringLiteral("Period:")},
+                                          {3, QStringLiteral("Time step:")}};
+    for (const auto &label : labels) {
+        const QRect field = fieldRect(label.first);
+        painter.drawText(QRect(21, field.top(), kChoiceFieldX - 21, field.height()),
+                         Qt::AlignLeft | Qt::AlignVCenter, label.second);
+    }
+
+    // Fields: #45464d, a 2-line top edge and 1px sides, no bottom edge.
+    for (int row = 0; row < 4; ++row) {
+        const QRect r = fieldRect(row);
+        painter.fillRect(r, QColor(0x45, 0x46, 0x4d));
+        painter.fillRect(QRect(r.left(), r.top(), r.width(), 1), QColor(0x38, 0x39, 0x3f));
+        painter.fillRect(QRect(r.left(), r.top() + 1, r.width(), 1), QColor(0x41, 0x42, 0x48));
+        painter.fillRect(QRect(r.left(), r.top(), 1, r.height()), QColor(0x41, 0x42, 0x48));
+        painter.fillRect(QRect(r.right(), r.top(), 1, r.height()), QColor(0x41, 0x42, 0x48));
+    }
+    painter.setFont(mediumFont());
+    const QFontMetrics metrics(mediumFont());
+    const auto drawFieldText = [&](int row, int inset, const QColor &color, const QString &text, int reserve) {
+        const QRect r = fieldRect(row).adjusted(inset, 1, -reserve, 0);
+        painter.setPen(color);
+        painter.drawText(r, Qt::AlignLeft | Qt::AlignVCenter, metrics.elidedText(text, Qt::ElideRight, r.width()));
+    };
+    drawFieldText(0, 6, kChoiceFieldText, employeeName(), 24);
+    drawFieldText(1, 12, kChoiceFieldText, QStringLiteral("Day"), 24);
+    drawFieldText(2, 5, kChoiceFieldText, QLocale(QLocale::English).toString(m_day, QStringLiteral("M/d/yyyy")), 30);
+    drawFieldText(3, 12, Qt::white, timeStepText(m_timeStepMs), 24);
+
+    // Search magnifier (SearchTextField), combo triangles, ◀▶ spin arrows.
+    painter.setRenderHint(QPainter::Antialiasing);
+    const QRect search = fieldRect(0);
+    painter.setPen(QPen(kChoiceFieldText, 1.6));
+    painter.setBrush(Qt::NoBrush);
+    painter.drawEllipse(QPointF(search.right() - 9.5, search.top() + 10), 3.6, 3.6);
+    painter.drawLine(QPointF(search.right() - 12.2, search.top() + 12.8), QPointF(search.right() - 15.5, search.top() + 16));
+    painter.setRenderHint(QPainter::Antialiasing, false);
+    for (int row : {1, 3}) {
+        const QRect r = fieldRect(row);
+        painter.drawPixmap(r.right() - 19, r.center().y() - 2, triangle);
+    }
+    painter.setRenderHint(QPainter::Antialiasing);
+    painter.setPen(Qt::NoPen);
+    const QRect previous = previousRect();
+    const QRect next = nextRect();
+    painter.setBrush(QColor(0xc8, 0xc8, 0xc8));
+    painter.drawPolygon(QPolygonF({QPointF(previous.left() + 1, previous.center().y() + 0.5),
+                                   QPointF(previous.left() + 6, previous.center().y() - 3.5),
+                                   QPointF(previous.left() + 6, previous.center().y() + 4.5)}));
+    painter.setBrush(m_day < QDate::currentDate() ? QColor(0xc8, 0xc8, 0xc8) : QColor(0x6f, 0x70, 0x76));
+    painter.drawPolygon(QPolygonF({QPointF(next.left() + 7, next.center().y() + 0.5),
+                                   QPointF(next.left() + 2, next.center().y() - 3.5),
+                                   QPointF(next.left() + 2, next.center().y() + 4.5)}));
+    painter.setRenderHint(QPainter::Antialiasing, false);
+
+    if (m_timeStepMs != 1000) {
+        painter.drawPixmap(infoRect().topLeft(), info);
+    }
+
+    // Cancel (Button) / OK (GreenButton).
+    painter.setRenderHint(QPainter::Antialiasing);
+    painter.setPen(Qt::NoPen);
+    painter.setBrush(cancelRect().contains(m_hover) ? QColor(0x4b, 0x4c, 0x53) : QColor(0x42, 0x43, 0x49));
+    painter.drawRoundedRect(cancelRect(), 4, 4);
+    painter.setBrush(okRect().contains(m_hover) ? QColor(0x23, 0xb4, 0x76) : QColor(0x1e, 0xa1, 0x68));
+    painter.drawRoundedRect(okRect(), 4, 4);
+    painter.setPen(Qt::white);
+    painter.setFont(mediumFont());
+    painter.drawText(cancelRect(), Qt::AlignCenter, QStringLiteral("Cancel"));
+    painter.drawText(okRect(), Qt::AlignCenter, QStringLiteral("OK"));
 }
 
 KeystreamBar::KeystreamBar(QWidget *parent)
@@ -1158,6 +1910,59 @@ HistoryView::HistoryView(ViewerConnection &connection, QWidget *parent)
     // No page margins: videoCell/keylogger/sliderAndMeta/chartsItem span
     // the page edge to edge and carry their own insets (History.qml).
     root->setContentsMargins(0, 0, 0, 0);
+
+    // HistoryPanel.qml: a 37px strip with ViewerControls/Tabs.qml
+    // right-aligned in it -- the "+" button, the tabs (at most 200px each,
+    // closable, draggable), then the left/right buttons.
+    auto *tabStrip = new QFrame(this);
+    tabStrip->setObjectName(QStringLiteral("subbar"));
+    tabStrip->setFixedHeight(37);
+    auto *tabRow = new QHBoxLayout(tabStrip);
+    tabRow->setContentsMargins(0, 0, 3, 0);
+    tabRow->setSpacing(3);
+    tabRow->addStretch(1);
+    auto *addTabButton = new QToolButton(tabStrip);
+    addTabButton->setObjectName(QStringLiteral("plus"));
+    addTabButton->setText(QStringLiteral("+"));
+    addTabButton->setToolTip(QStringLiteral("Add history watching"));
+    connect(addTabButton, &QToolButton::clicked, this, &HistoryView::openAddTabDialog);
+    tabRow->addWidget(addTabButton);
+    tabRow->addSpacing(5);
+    m_historyTabBar = new QTabBar(tabStrip);
+    m_historyTabBar->setObjectName(QStringLiteral("tabs"));
+    m_historyTabBar->setExpanding(false);
+    m_historyTabBar->setTabsClosable(true);
+    m_historyTabBar->setMovable(true);
+    m_historyTabBar->setElideMode(Qt::ElideRight);
+    m_historyTabBar->setStyleSheet(QStringLiteral("QTabBar#tabs::tab { max-width: 200px; }"));
+    connect(m_historyTabBar, &QTabBar::currentChanged, this, &HistoryView::showHistoryTab);
+    connect(m_historyTabBar, &QTabBar::tabCloseRequested, this, &HistoryView::closeHistoryTab);
+    connect(m_historyTabBar, &QTabBar::tabMoved, this, [this](int from, int to) {
+        m_historyTabs.move(from, to);
+        if (m_currentTab == from) {
+            m_currentTab = to;
+        } else if (from < m_currentTab && to >= m_currentTab) {
+            --m_currentTab;
+        } else if (from > m_currentTab && to <= m_currentTab) {
+            ++m_currentTab;
+        }
+    });
+    tabRow->addWidget(m_historyTabBar);
+    const auto addArrow = [&](Qt::ArrowType direction, int step) {
+        auto *arrow = new QToolButton(tabStrip);
+        arrow->setObjectName(QStringLiteral("plus"));
+        arrow->setArrowType(direction);
+        connect(arrow, &QToolButton::clicked, this, [this, step] {
+            const int target = m_historyTabBar->currentIndex() + step;
+            if (target >= 0 && target < m_historyTabBar->count()) {
+                m_historyTabBar->setCurrentIndex(target);
+            }
+        });
+        tabRow->addWidget(arrow);
+    };
+    addArrow(Qt::LeftArrow, -1);
+    addArrow(Qt::RightArrow, 1);
+    root->addWidget(tabStrip);
     // History.qml's panelViolation toggle button is anchored directly to
     // the bottom edge of the same container the slider lives in (bottomMargin
     // -5, i.e. no gap at all, even slightly overlapping) -- root's spacing
@@ -1178,8 +1983,7 @@ HistoryView::HistoryView(ViewerConnection &connection, QWidget *parent)
         "QScrollBar::handle:horizontal { background: #5a5b63; border-radius: 4px; min-width: 30px; }"
         "QScrollBar::add-line:horizontal, QScrollBar::sub-line:horizontal { width: 0; }"
         "QScrollBar::add-page:horizontal, QScrollBar::sub-page:horizontal { background: none; }"
-        "QListWidget#historyApps { background: #3f4047; border-left: 2px solid #43444c;"
-        " border-right: 2px solid #43444c; color: white; }"));
+        "QScrollArea#historyApps { border-left: 2px solid #43444c; border-right: 2px solid #43444c; }"));
     auto *videoLayout = new QVBoxLayout(m_videoPanel);
     videoLayout->setContentsMargins(0, 0, 0, 0);
     videoLayout->setSpacing(0);
@@ -1196,16 +2000,24 @@ HistoryView::HistoryView(ViewerConnection &connection, QWidget *parent)
     m_monitorStripArea->viewport()->setAutoFillBackground(false);
     m_monitorStripArea->viewport()->installEventFilter(this);
     m_videoStrip = new HistoryVideoStrip;
+    m_videoStrip->setScrollBar(m_monitorStripArea->horizontalScrollBar());
     m_monitorStripArea->setWidget(m_videoStrip);
     connect(m_videoStrip, &HistoryVideoStrip::clicked, this, &HistoryView::togglePanelFull);
     videoBody->addWidget(m_monitorStripArea, 1);
     // Running applications panel: 420px wide on the video's right edge,
     // below the header (History.qml `panel`), closed by default.
-    m_runningAppsList = new QListWidget(m_videoPanel);
-    m_runningAppsList->setObjectName(QStringLiteral("historyApps"));
-    m_runningAppsList->setFixedWidth(420);
-    m_runningAppsList->hide();
-    videoBody->addWidget(m_runningAppsList);
+    // 2px #43444c lines left/right, WebPagesAndPrograms scrolling inside.
+    m_infoArea = new QScrollArea(m_videoPanel);
+    m_infoArea->setObjectName(QStringLiteral("historyApps"));
+    m_infoArea->setFixedWidth(420);
+    m_infoArea->setWidgetResizable(true);
+    m_infoArea->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
+    m_infoPanel = new HistoryInfoPanel;
+    m_infoArea->setWidget(m_infoPanel);
+    connect(m_infoPanel, &HistoryInfoPanel::categorizationRequested, this,
+            &HistoryView::onCategorizationRequested);
+    m_infoArea->hide();
+    videoBody->addWidget(m_infoArea);
     videoLayout->addLayout(videoBody, 1);
 
     // Video.qml's "excuse", centered over the video area (Fonts.rr_xtra).
@@ -1229,7 +2041,15 @@ HistoryView::HistoryView(ViewerConnection &connection, QWidget *parent)
     // (topMargin 30 / rightMargin 5, less the Button's own -5 margins),
     // opacity 0.8 -- see positionOverlays().
     m_toggleAppsButton = new QPushButton(QStringLiteral("Running applications"), this);
-    m_toggleAppsButton->setObjectName(QStringLiteral("flatButton"));
+    m_toggleAppsButton->setObjectName(QStringLiteral("historyAppsButton"));
+    // Controls Button, measured from a real screenshot: #6b6d79 (seen as
+    // #63656f through the 0.8 opacity), 25px tall, flush under the video
+    // header against its right edge, rounded bottom-left corner.
+    m_toggleAppsButton->setFixedHeight(25);
+    m_toggleAppsButton->setStyleSheet(QStringLiteral(
+        "QPushButton#historyAppsButton { background: #6b6d79; color: white; border: none;"
+        " border-bottom-left-radius: 5px; font-family: Roboto; font-size: 12px; padding: 0 10px; }"
+        "QPushButton#historyAppsButton:hover { background: #757783; }"));
     m_toggleAppsButton->setIcon(
         QIcon(QStringLiteral(":/history/video/buttonRunningApp/applications_arrow_left.png")));
     m_toggleAppsButton->setIconSize(QSize(8, 14));
@@ -1275,7 +2095,7 @@ HistoryView::HistoryView(ViewerConnection &connection, QWidget *parent)
     m_changeSettingsButton->setFixedSize(140, 25);
     connect(m_changeSettingsButton, &QPushButton::clicked, this, &HistoryView::onChangeSettingsClicked);
     // Not shown -- day/period selection lives in the "Change settings"
-    // dialog; m_dayCombo stays alive for applyPeriodFilter/onDayChanged.
+    // dialog; m_dayCombo stays alive for selectDay/onDayChanged.
     m_dayCombo = new QComboBox(this);
     m_dayCombo->hide();
 
@@ -1450,6 +2270,19 @@ HistoryView::HistoryView(ViewerConnection &connection, QWidget *parent)
     m_playbackTimer->setInterval(800);
     connect(m_playbackTimer, &QTimer::timeout, this, &HistoryView::onPlaybackTick);
 
+    // SliderBar.qml's rewind actions (Left/Right = one marker, Ctrl = ten)
+    // and History.qml's stopPlay (Space).
+    const auto addShortcut = [this](const QKeySequence &keys, auto slot) {
+        auto *shortcut = new QShortcut(keys, this);
+        shortcut->setContext(Qt::WidgetWithChildrenShortcut);
+        connect(shortcut, &QShortcut::activated, this, slot);
+    };
+    addShortcut(QKeySequence(Qt::Key_Right), [this] { stepMarkers(1); });
+    addShortcut(QKeySequence(Qt::CTRL | Qt::Key_Right), [this] { stepMarkers(10); });
+    addShortcut(QKeySequence(Qt::Key_Left), [this] { stepMarkers(-1); });
+    addShortcut(QKeySequence(Qt::CTRL | Qt::Key_Left), [this] { stepMarkers(-10); });
+    addShortcut(QKeySequence(Qt::Key_Space), [this] { onPlayClicked(); });
+
     connect(m_dayCombo, &QComboBox::currentIndexChanged, this, &HistoryView::onDayChanged);
 
     connect(&m_connection, &ViewerConnection::historyDaysReceived, this, &HistoryView::onDaysReceived);
@@ -1461,10 +2294,12 @@ HistoryView::HistoryView(ViewerConnection &connection, QWidget *parent)
             &HistoryView::onActivityReceived);
     connect(&m_connection, &ViewerConnection::historyAppSegmentsReceived, this,
             &HistoryView::onAppSegmentsReceived);
-    connect(&m_connection, &ViewerConnection::historyRunningApplicationsReceived, this,
-            &HistoryView::onRunningAppsReceived);
+    connect(&m_connection, &ViewerConnection::historyWebVisitsReceived, this,
+            &HistoryView::onWebVisitsReceived);
     connect(&m_connection, &ViewerConnection::historyCategoriesReceived, this,
             &HistoryView::onCategoriesReceived);
+    connect(&m_connection, &ViewerConnection::historyEmployeeCategoriesReceived, this,
+            &HistoryView::onEmployeeCategoriesReceived);
     connect(&m_connection, &ViewerConnection::historyKeystrokesReceived, this,
             &HistoryView::onKeystrokesReceived);
     connect(&m_connection, &ViewerConnection::historyError, this, &HistoryView::onHistoryError);
@@ -1476,31 +2311,40 @@ void HistoryView::setDevices(const QHash<quint32, QString> &deviceNames,
                              const QHash<quint32, QList<quint32>> &deviceMonitorStreams,
                              const QHash<quint32, QString> &monitorNames)
 {
+    const QList<quint32> previousStreams = m_deviceMonitorStreams.value(m_currentDeviceKey);
     m_deviceNames = deviceNames;
     m_deviceMonitorStreams = deviceMonitorStreams;
     m_monitorNames = monitorNames;
 
-    if (m_currentDeviceKey != 0 && deviceNames.contains(m_currentDeviceKey)) {
-        // Still a known device -- just refresh the strip in case its
-        // monitor list changed (a screen was added/removed).
-        rebuildMonitorStrip();
+    if (m_historyTabs.isEmpty()) {
+        // First device list: start with one tab for the first employee, today.
+        if (!deviceNames.isEmpty()) {
+            addHistoryTab({deviceNames.cbegin().key(), QDate::currentDate().toString(QStringLiteral("yyyyMMdd")),
+                           m_timeStepMs});
+        }
         return;
     }
-    // Either nothing selected yet, or the previously selected device is
-    // gone -- fall back to whichever device comes first.
-    m_currentDeviceKey = deviceNames.isEmpty() ? 0 : deviceNames.cbegin().key();
-    if (m_currentDeviceKey != 0) {
-        switchDevice(m_currentDeviceKey);
+    for (int i = 0; i < m_historyTabs.size(); ++i) {
+        updateHistoryTabText(i);
+    }
+    if (m_currentDeviceKey != 0 && deviceNames.contains(m_currentDeviceKey)) {
+        // The list is re-sent on every live update, so only act when this
+        // employee's screens actually changed -- and then fetch the current
+        // moment for them, instead of leaving new ones loading.
+        if (deviceMonitorStreams.value(m_currentDeviceKey) != previousStreams) {
+            rebuildMonitorStrip();
+            requestFrameAt(m_timeline->currentIndex());
+        }
     }
 }
 
 void HistoryView::activate()
 {
-    if (m_activated || m_currentDeviceKey == 0) {
+    if (m_activated || m_currentTab < 0) {
         return;
     }
     m_activated = true;
-    switchDevice(m_currentDeviceKey);
+    showHistoryTab(m_currentTab);
 }
 
 void HistoryView::showLoadingDialog(const QString &message)
@@ -1521,18 +2365,176 @@ void HistoryView::openForDevice(quint32 deviceKey, const QString &day)
 {
     const QString targetDay =
         day.isEmpty() ? QDate::currentDate().toString(QStringLiteral("yyyyMMdd")) : day;
-    if (deviceKey != m_currentDeviceKey || m_dayCombo->count() == 0) {
-        m_pendingJumpDay = targetDay;
-        m_activated = true;
+    m_activated = true;
+    // Like GoToHistoryDialog: the current tab if it's already this
+    // employee, otherwise a new tab for them.
+    if (m_currentTab >= 0 && m_historyTabs.at(m_currentTab).deviceKey == deviceKey) {
+        m_historyTabs[m_currentTab].day = targetDay;
+        jumpTo(deviceKey, targetDay);
+        return;
+    }
+    addHistoryTab({deviceKey, targetDay, m_timeStepMs});
+}
+
+void HistoryView::jumpTo(quint32 deviceKey, const QString &day)
+{
+    m_currentDay = day;
+    if (deviceKey != m_currentDeviceKey || m_allDays.isEmpty()) {
         switchDevice(deviceKey);
         return;
     }
-    // Already on this device with days loaded -- jump immediately instead
-    // of waiting for a days response that isn't coming.
-    const int index = m_dayCombo->findText(targetDay);
-    if (index >= 0) {
+    selectDay(day);
+}
+
+void HistoryView::selectDay(const QString &day)
+{
+    m_currentDay = day;
+    const int index = m_dayCombo->findText(day);
+    if (index < 0) {
+        showNoData();
+        return;
+    }
+    if (index == m_dayCombo->currentIndex()) {
+        onDayChanged(index);
+    } else {
         m_dayCombo->setCurrentIndex(index);
     }
+}
+
+void HistoryView::showNoData()
+{
+    m_playbackTimer->stop();
+    setPlaying(false);
+    m_dayCombo->blockSignals(true);
+    m_dayCombo->setCurrentIndex(-1);
+    m_dayCombo->blockSignals(false);
+    m_timestamps.clear();
+    m_timeline->setTimestamps({});
+    const auto [dayStart, dayEnd] = dayRangeMs(m_currentDay);
+    m_timeline->setRange(dayStart, dayEnd);
+    m_timeAxis->setRange(dayStart, dayEnd);
+    m_chart->setRange(dayStart, dayEnd);
+    m_chart->setActivity({});
+    m_chart->setEfficiency({}, m_categories);
+    m_videoStrip->setStreams({});
+    m_videoHeader->setMoment(QString());
+    m_keystream->setText(QString(), QString());
+    m_infoPanel->setItems({}, {});
+    m_statusLabel->setText(QStringLiteral("No information for selected period"));
+    updateStatusVisibility();
+}
+
+QList<QPair<quint32, QString>> HistoryView::employeeList() const
+{
+    QList<QPair<quint32, QString>> employees;
+    for (auto it = m_deviceNames.cbegin(); it != m_deviceNames.cend(); ++it) {
+        employees.append({it.key(), it.value()});
+    }
+    std::sort(employees.begin(), employees.end(),
+              [](const auto &a, const auto &b) { return a.second.localeAwareCompare(b.second) < 0; });
+    return employees;
+}
+
+void HistoryView::updateHistoryTabText(int index)
+{
+    if (index < 0 || index >= m_historyTabs.size()) {
+        return;
+    }
+    const quint32 deviceKey = m_historyTabs.at(index).deviceKey;
+    const QString name = m_deviceNames.value(deviceKey, QStringLiteral("Employee %1").arg(deviceKey));
+    m_historyTabBar->setTabText(index, name);
+    m_historyTabBar->setTabToolTip(index, name);
+}
+
+void HistoryView::storeCurrentTab()
+{
+    if (m_currentTab < 0 || m_currentTab >= m_historyTabs.size()) {
+        return;
+    }
+    m_historyTabs[m_currentTab] = {m_currentDeviceKey, m_currentDay, m_timeStepMs};
+}
+
+void HistoryView::addHistoryTab(const HistoryTab &tab)
+{
+    storeCurrentTab();
+    m_historyTabs.append(tab);
+    const QSignalBlocker blocker(m_historyTabBar);
+    m_historyTabBar->addTab(QString());
+    updateHistoryTabText(m_historyTabs.size() - 1);
+    m_historyTabBar->setCurrentIndex(m_historyTabs.size() - 1);
+    m_currentTab = m_historyTabs.size() - 1;
+    if (m_activated) {
+        showHistoryTab(m_currentTab);
+    }
+}
+
+void HistoryView::showHistoryTab(int index)
+{
+    if (index < 0 || index >= m_historyTabs.size()) {
+        return;
+    }
+    if (index != m_currentTab) {
+        storeCurrentTab();
+        m_currentTab = index;
+    }
+    if (!m_activated) {
+        return;
+    }
+    const HistoryTab tab = m_historyTabs.at(index);
+    m_timeStepMs = tab.timeStepMs;
+    applyTimeStep();
+    // A different tab can be the same employee: force the reload so the
+    // day/step of this tab are the ones shown.
+    m_allDays.clear();
+    jumpTo(tab.deviceKey, tab.day);
+}
+
+void HistoryView::openAddTabDialog()
+{
+    HistoryChoiceDialog dialog(HistoryChoiceDialog::Mode::Add, employeeList(), 0, QDate::currentDate(),
+                               m_timeStepMs, this);
+    dialog.move(mapToGlobal(rect().center()) - QPoint(dialog.width() / 2, dialog.height() / 2));
+    if (dialog.exec() != QDialog::Accepted) {
+        return;
+    }
+    m_activated = true;
+    addHistoryTab({dialog.employee(), dialog.day().toString(QStringLiteral("yyyyMMdd")), dialog.timeStepMs()});
+}
+
+void HistoryView::closeHistoryTab(int index)
+{
+    if (index < 0 || index >= m_historyTabs.size()) {
+        return;
+    }
+    // Tabs.qml's ConfirmBox.
+    const QString name = m_historyTabBar->tabText(index);
+    if (QMessageBox::question(this, QStringLiteral("Close tab"),
+                              QStringLiteral("Close tab confirm \u00AB%1\u00BB").arg(name))
+        != QMessageBox::Yes) {
+        return;
+    }
+    storeCurrentTab();
+    m_historyTabs.removeAt(index);
+    {
+        const QSignalBlocker blocker(m_historyTabBar);
+        m_historyTabBar->removeTab(index);
+    }
+    if (m_historyTabs.isEmpty()) {
+        m_currentTab = -1;
+        m_currentDeviceKey = 0;
+        m_currentDay.clear();
+        showNoData();
+        // HistoryPanel.openPanelName(): with no tabs left, ask for one.
+        openAddTabDialog();
+        return;
+    }
+    m_currentTab = -1;
+    const int next = qMin(index, int(m_historyTabs.size()) - 1);
+    {
+        const QSignalBlocker blocker(m_historyTabBar);
+        m_historyTabBar->setCurrentIndex(next);
+    }
+    showHistoryTab(next);
 }
 
 quint32 HistoryView::currentStreamId() const
@@ -1556,8 +2558,11 @@ void HistoryView::positionOverlays()
     m_videoStrip->setViewSize(QSize(m_monitorStripArea->viewport()->width(),
                                     m_monitorStripArea->height() - scrollbarHeight));
     m_statusLabel->setGeometry(m_monitorStripArea->rect().adjusted(20, 0, -20, 0));
+    // Right edge 1px inside the video's right border, top on the header's
+    // last line (videoCell 7px inset + 24px header - 1).
     const QSize hint = m_toggleAppsButton->sizeHint();
-    m_toggleAppsButton->setGeometry(width() - hint.width(), 25, hint.width(), hint.height());
+    const QRect video(m_videoPanel->mapTo(this, QPoint(0, 0)), m_videoPanel->size());
+    m_toggleAppsButton->setGeometry(video.right() - hint.width(), video.top() + 24 - 1, hint.width(), 25);
     m_toggleAppsButton->raise();
 }
 
@@ -1597,22 +2602,21 @@ void HistoryView::switchDevice(quint32 deviceKey)
 
     m_dayCombo->clear();
     m_allDays.clear();
-    m_periodStart = QDate();
-    m_periodEnd = QDate();
     m_timestamps.clear();
     m_timeline->setTimestamps({});
     m_timeline->setRange(0, 0);
     m_timeAxis->setRange(0, 0);
     m_chart->setRange(0, 0);
     m_chart->setActivity({});
+    m_employeeCategories.clear();
     m_chart->setEfficiency({}, m_categories);
     m_videoHeader->setMoment(QString());
     m_keystream->setText(QString(), QString());
-    m_runningApps.clear();
+    m_webVisits.clear();
     m_appSegments.clear();
     m_activitySamples.clear();
     m_keystrokeEntries.clear();
-    m_runningAppsList->clear();
+    m_infoPanel->setItems({}, {});
     m_textLog->setRowCount(0);
 
     const quint32 streamId = currentStreamId();
@@ -1624,29 +2628,6 @@ void HistoryView::switchDevice(quint32 deviceKey)
     showLoadingDialog(QStringLiteral("Downloading..."));
     m_connection.requestHistoryDays(streamId);
     m_connection.requestCategories(streamId);
-}
-
-void HistoryView::applyPeriodFilter()
-{
-    m_dayCombo->blockSignals(true);
-    const QString previousDay = m_dayCombo->currentText();
-    m_dayCombo->clear();
-    for (const QString &day : std::as_const(m_allDays)) {
-        const QDate date = QDate::fromString(day, QStringLiteral("yyyyMMdd"));
-        if (m_periodStart.isValid() && date.isValid() && date < m_periodStart) {
-            continue;
-        }
-        if (m_periodEnd.isValid() && date.isValid() && date > m_periodEnd) {
-            continue;
-        }
-        m_dayCombo->addItem(day);
-    }
-    const int found = m_dayCombo->findText(previousDay);
-    m_dayCombo->setCurrentIndex(found >= 0 ? found : (m_dayCombo->count() > 0 ? 0 : -1));
-    m_dayCombo->blockSignals(false);
-    if (m_dayCombo->currentIndex() >= 0) {
-        refreshDayDependentData();
-    }
 }
 
 void HistoryView::onDayChanged(int index)
@@ -1676,13 +2657,36 @@ void HistoryView::refreshDayDependentData()
     m_connection.requestHistoryFrames(streamId, day);
     m_connection.requestHistoryActivity(streamId, day);
     m_connection.requestHistoryAppSegments(streamId, day);
-    m_connection.requestRunningApplications(streamId, day);
+    m_connection.requestWebVisits(streamId, day);
     m_connection.requestKeystrokes(streamId, day);
 }
 
 void HistoryView::onTimelineMoved(int index)
 {
     requestFrameAt(index);
+}
+
+void HistoryView::stepMarkers(int markers)
+{
+    // One marker = one Time step. Like setOnlineMarkerForRewind, a target
+    // with nothing recorded jumps to the next recorded frame after it
+    // (Right) or the last one before it (Left), clamped at the ends.
+    const int current = m_timeline->currentIndex();
+    if (current < 0 || current >= m_timestamps.size()) {
+        return;
+    }
+    const qint64 target = m_timestamps.at(current) + markers * m_timeStepMs;
+    int next = current;
+    if (markers > 0) {
+        const auto it = std::lower_bound(m_timestamps.cbegin(), m_timestamps.cend(), target);
+        next = it == m_timestamps.cend() ? m_timestamps.size() - 1 : int(it - m_timestamps.cbegin());
+    } else {
+        const auto it = std::upper_bound(m_timestamps.cbegin(), m_timestamps.cend(), target);
+        next = it == m_timestamps.cbegin() ? 0 : int(it - m_timestamps.cbegin()) - 1;
+    }
+    if (next != current) {
+        requestFrameAt(next);
+    }
 }
 
 void HistoryView::requestFrameAt(int index)
@@ -1706,6 +2710,7 @@ void HistoryView::requestFrameAt(int index)
     updateTextLogHighlight(timestampMs);
     updateKeystream(timestampMs);
     m_timeline->setCurrentIndex(index);
+    updateInfoPanel();
     m_chart->setCurrentPositionMs(timestampMs);
 }
 
@@ -1960,8 +2965,8 @@ void HistoryView::onToggleRunningApps()
 {
     // Matches History.qml's appButton: closed by default (see the
     // constructor's m_runningAppsList->hide()), arrow flips direction.
-    const bool visible = m_runningAppsList->isHidden();
-    m_runningAppsList->setVisible(visible);
+    const bool visible = m_infoArea->isHidden();
+    m_infoArea->setVisible(visible);
     m_toggleAppsButton->setIcon(QIcon(visible
         ? QStringLiteral(":/history/video/buttonRunningApp/applications_arrow_right.png")
         : QStringLiteral(":/history/video/buttonRunningApp/applications_arrow_left.png")));
@@ -1969,127 +2974,21 @@ void HistoryView::onToggleRunningApps()
 
 void HistoryView::onChangeSettingsClicked()
 {
-    // Employee/Period/Time step -- NOT a category editor (that moved to
-    // EfficiencyCategoryButton, used directly in the Running Applications
-    // list and in DeviceDetailView's Programs/Web pages panel, so there is
-    // exactly one place category gets edited).
-    auto *dialog = new QDialog(this);
-    dialog->setWindowTitle(QStringLiteral("Change range and employee"));
-    dialog->setAttribute(Qt::WA_DeleteOnClose);
-    dialog->setMinimumWidth(380);
-    auto *layout = new QVBoxLayout(dialog);
-
-    auto *description = new QLabel(QStringLiteral("Change range and employee"), dialog);
-    description->setStyleSheet(QStringLiteral("font-weight: 700;"));
-    layout->addWidget(description);
-
-    auto *form = new QFormLayout;
-
-    auto *employeeCombo = new QComboBox(dialog);
-    for (auto it = m_deviceNames.cbegin(); it != m_deviceNames.cend(); ++it) {
-        employeeCombo->addItem(it.value(), it.key());
+    HistoryChoiceDialog dialog(HistoryChoiceDialog::Mode::Change, employeeList(), m_currentDeviceKey,
+                               QDate::fromString(m_currentDay, QStringLiteral("yyyyMMdd")), m_timeStepMs,
+                               this);
+    dialog.move(mapToGlobal(rect().center()) - QPoint(dialog.width() / 2, dialog.height() / 2));
+    if (dialog.exec() != QDialog::Accepted) {
+        return;
     }
-    const int currentEmployeeIndex = employeeCombo->findData(m_currentDeviceKey);
-    if (currentEmployeeIndex >= 0) {
-        employeeCombo->setCurrentIndex(currentEmployeeIndex);
+    m_timeStepMs = dialog.timeStepMs();
+    applyTimeStep();
+    const QString day = dialog.day().toString(QStringLiteral("yyyyMMdd"));
+    if (m_currentTab >= 0) {
+        m_historyTabs[m_currentTab] = {dialog.employee(), day, m_timeStepMs};
+        updateHistoryTabText(m_currentTab);
     }
-    form->addRow(QStringLiteral("Employee:"), employeeCombo);
-
-    // Period has two modes in the real Kickidler viewer (HistoryChoicePanel.qml,
-    // panelState.type: "recent" or "custom") -- a quick relative range (last
-    // day/week/month/...) or an explicit date range. Mirrored here as a kind
-    // selector that swaps which value editor is visible.
-    auto *periodKindCombo = new QComboBox(dialog);
-    periodKindCombo->addItem(QStringLiteral("Recent"), QStringLiteral("recent"));
-    periodKindCombo->addItem(QStringLiteral("Custom"), QStringLiteral("custom"));
-    form->addRow(QStringLiteral("Period:"), periodKindCombo);
-
-    auto *recentRangeCombo = new QComboBox(dialog);
-    recentRangeCombo->addItem(QStringLiteral("Last day"), QStringLiteral("d"));
-    recentRangeCombo->addItem(QStringLiteral("Last week"), QStringLiteral("w"));
-    recentRangeCombo->addItem(QStringLiteral("Last month"), QStringLiteral("m"));
-    recentRangeCombo->addItem(QStringLiteral("Last quarter"), QStringLiteral("q"));
-    recentRangeCombo->addItem(QStringLiteral("Last year"), QStringLiteral("y"));
-
-    auto *periodRow = new QWidget(dialog);
-    auto *periodLayout = new QHBoxLayout(periodRow);
-    periodLayout->setContentsMargins(0, 0, 0, 0);
-    auto *periodStartEdit = new QDateEdit(m_periodStart.isValid() ? m_periodStart : QDate::currentDate(),
-                                          periodRow);
-    periodStartEdit->setCalendarPopup(true);
-    auto *periodEndEdit = new QDateEdit(m_periodEnd.isValid() ? m_periodEnd : QDate::currentDate(),
-                                        periodRow);
-    periodEndEdit->setCalendarPopup(true);
-    auto *periodDash = new QLabel(QStringLiteral("—"), periodRow);
-    periodLayout->addWidget(recentRangeCombo);
-    periodLayout->addWidget(periodStartEdit);
-    periodLayout->addWidget(periodDash);
-    periodLayout->addWidget(periodEndEdit);
-    form->addRow(QString(), periodRow);
-
-    auto updatePeriodRowVisibility = [periodKindCombo, recentRangeCombo, periodStartEdit,
-                                      periodEndEdit, periodDash]() {
-        const bool recent = periodKindCombo->currentData().toString() == QStringLiteral("recent");
-        recentRangeCombo->setVisible(recent);
-        periodStartEdit->setVisible(!recent);
-        periodEndEdit->setVisible(!recent);
-        periodDash->setVisible(!recent);
-    };
-    connect(periodKindCombo, &QComboBox::currentIndexChanged, dialog, updatePeriodRowVisibility);
-    updatePeriodRowVisibility();
-
-    auto *timeStepCombo = new QComboBox(dialog);
-    const QList<QPair<QString, qint64>> timeSteps = {
-        {QStringLiteral("1 second"), 1000}, {QStringLiteral("5 seconds"), 5000},
-        {QStringLiteral("10 seconds"), 10000}, {QStringLiteral("20 seconds"), 20000},
-        {QStringLiteral("30 seconds"), 30000}, {QStringLiteral("1 minute"), 60000},
-        {QStringLiteral("5 minutes"), 5 * 60000}, {QStringLiteral("10 minutes"), 10 * 60000},
-        {QStringLiteral("20 minutes"), 20 * 60000}, {QStringLiteral("30 minutes"), 30 * 60000},
-        {QStringLiteral("1 hour"), 3600000}, {QStringLiteral("2 hours"), 2 * 3600000},
-    };
-    for (const auto &step : timeSteps) {
-        timeStepCombo->addItem(step.first, step.second);
-    }
-    const int currentStepIndex = timeStepCombo->findData(m_timeStepMs);
-    timeStepCombo->setCurrentIndex(currentStepIndex >= 0 ? currentStepIndex : 6 /* 5 minutes */);
-    form->addRow(QStringLiteral("Time step:"), timeStepCombo);
-
-    layout->addLayout(form);
-    auto *buttons = new QDialogButtonBox(QDialogButtonBox::Ok | QDialogButtonBox::Cancel, dialog);
-    connect(buttons, &QDialogButtonBox::rejected, dialog, &QDialog::close);
-    connect(buttons, &QDialogButtonBox::accepted, this,
-            [this, dialog, employeeCombo, periodKindCombo, recentRangeCombo, periodStartEdit,
-             periodEndEdit, timeStepCombo]() {
-                const quint32 newDeviceKey = employeeCombo->currentData().toUInt();
-                if (periodKindCombo->currentData().toString() == QStringLiteral("recent")) {
-                    m_periodEnd = QDate::currentDate();
-                    const QString recentType = recentRangeCombo->currentData().toString();
-                    if (recentType == QStringLiteral("d")) {
-                        m_periodStart = m_periodEnd.addDays(-1);
-                    } else if (recentType == QStringLiteral("w")) {
-                        m_periodStart = m_periodEnd.addDays(-7);
-                    } else if (recentType == QStringLiteral("m")) {
-                        m_periodStart = m_periodEnd.addMonths(-1);
-                    } else if (recentType == QStringLiteral("q")) {
-                        m_periodStart = m_periodEnd.addMonths(-3);
-                    } else {
-                        m_periodStart = m_periodEnd.addYears(-1);
-                    }
-                } else {
-                    m_periodStart = periodStartEdit->date();
-                    m_periodEnd = periodEndEdit->date();
-                }
-                m_timeStepMs = timeStepCombo->currentData().toLongLong();
-                applyTimeStep();
-                if (newDeviceKey != 0 && newDeviceKey != m_currentDeviceKey) {
-                    switchDevice(newDeviceKey);
-                } else {
-                    applyPeriodFilter();
-                }
-                dialog->close();
-            });
-    layout->addWidget(buttons);
-    dialog->show();
+    jumpTo(dialog.employee(), day);
 }
 
 void HistoryView::onDaysReceived(quint32 streamId, const QStringList &days)
@@ -2098,24 +2997,17 @@ void HistoryView::onDaysReceived(quint32 streamId, const QStringList &days)
         return;
     }
     m_allDays = days;
-    if (days.isEmpty()) {
+    hideLoadingDialog();
+    {
+        const QSignalBlocker blocker(m_dayCombo);
         m_dayCombo->clear();
-        m_statusLabel->setText(QStringLiteral("No information for selected period"));
-        updateStatusVisibility();
-        hideLoadingDialog();
-        return;
+        m_dayCombo->addItems(days);
+        m_dayCombo->setCurrentIndex(-1);
     }
     m_statusLabel->clear();
-    hideLoadingDialog();
-    applyPeriodFilter();
-
-    if (!m_pendingJumpDay.isEmpty()) {
-        const int index = m_dayCombo->findText(m_pendingJumpDay);
-        if (index >= 0) {
-            m_dayCombo->setCurrentIndex(index);
-        }
-        m_pendingJumpDay.clear();
-    }
+    updateStatusVisibility();
+    selectDay(m_currentDay.isEmpty() ? QDate::currentDate().toString(QStringLiteral("yyyyMMdd"))
+                                     : m_currentDay);
 }
 
 void HistoryView::onFramesReceived(quint32 streamId, const QString &day,
@@ -2196,54 +3088,109 @@ void HistoryView::onAppSegmentsReceived(quint32 streamId, const QString &day,
     }
     m_appSegments = segments;
     refreshEfficiencyBar();
+    updateInfoPanel();
 }
 
 void HistoryView::refreshEfficiencyBar()
 {
-    m_chart->setEfficiency(m_appSegments, m_categories);
+    m_chart->setEfficiency(m_appSegments, effectiveCategories());
 }
 
-void HistoryView::onRunningAppsReceived(quint32 streamId, const QString &day,
-                                        const QList<HistoryAppUsage> &applications)
+void HistoryView::onWebVisitsReceived(quint32 streamId, const QString &day,
+                                      const QList<HistoryAppSegment> &visits)
 {
     Q_UNUSED(day)
     if (streamId != currentStreamId()) {
         return;
     }
-    m_runningApps = applications;
-    rebuildRunningAppsList();
+    m_webVisits = visits;
+    updateInfoPanel();
 }
 
-void HistoryView::rebuildRunningAppsList()
+void HistoryView::updateInfoPanel()
 {
-    m_runningAppsList->clear();
-    const quint32 streamId = currentStreamId();
-    for (const HistoryAppUsage &usage : std::as_const(m_runningApps)) {
-        const QString category = m_categories.value(
-            usage.application, usage.category.isEmpty() ? QStringLiteral("none") : usage.category);
-        auto *item = new QListWidgetItem(m_runningAppsList);
-        auto *row = new QWidget(m_runningAppsList);
-        auto *rowLayout = new QHBoxLayout(row);
-        rowLayout->setContentsMargins(4, 2, 4, 2);
-        auto *label = new QLabel(QStringLiteral("%1  —  %2")
-                                     .arg(usage.application, formatDuration(usage.totalMs)),
-                                 row);
-        label->setStyleSheet(QStringLiteral("color: %1;")
-                                 .arg(EfficiencyCategoryButton::color(category).name()));
-        rowLayout->addWidget(label, 1);
-        auto *categoryButton = new EfficiencyCategoryButton(category, row);
-        const QString application = usage.application;
-        connect(categoryButton, &EfficiencyCategoryButton::categoryChanged, this,
-                [this, streamId, application](const QString &newCategory) {
-                    m_categories[application] = newCategory;
-                    m_connection.setAppCategory(streamId, application, newCategory);
-                    refreshEfficiencyBar();
-                    rebuildRunningAppsList();
-                });
-        rowLayout->addWidget(categoryButton);
-        item->setSizeHint(row->sizeHint());
-        m_runningAppsList->setItemWidget(item, row);
+    // infoFrame for the current marker: what was used during this Time step,
+    // each resource's share of it, and which one was in use at the moment.
+    const int index = m_timeline->currentIndex();
+    if (index < 0 || index >= m_timestamps.size()) {
+        m_infoPanel->setItems({}, {});
+        return;
     }
+    const qint64 moment = m_timestamps.at(index);
+    const auto [dayStart, dayEnd] = dayRangeMs(m_dayCombo->currentText());
+    Q_UNUSED(dayEnd)
+    const qint64 step = qMax<qint64>(1000, m_timeStepMs);
+    const qint64 windowStart = dayStart + (moment - dayStart) / step * step;
+    const qint64 windowEnd = windowStart + step;
+    const QHash<QString, QString> categories = effectiveCategories();
+    const auto build = [&](const QList<HistoryAppSegment> &segments) {
+        QHash<QString, qint64> usedMs;
+        QString active;
+        qint64 totalMs = 0;
+        for (const HistoryAppSegment &segment : segments) {
+            const qint64 overlap = qMin(segment.endMs, windowEnd) - qMax(segment.startMs, windowStart);
+            if (overlap > 0) {
+                usedMs[segment.application] += overlap;
+                totalMs += overlap;
+            }
+            if (segment.startMs <= moment && moment < segment.endMs) {
+                active = segment.application;
+            }
+        }
+        QList<HistoryInfoPanel::Item> items;
+        for (auto it = usedMs.cbegin(); it != usedMs.cend(); ++it) {
+            items.append({it.key(), QStringLiteral("No title"), 100.0 * it.value() / qMax<qint64>(1, totalMs),
+                          categories.value(it.key()), it.key() == active});
+        }
+        std::sort(items.begin(), items.end(), [](const HistoryInfoPanel::Item &a, const HistoryInfoPanel::Item &b) {
+            return a.percent > b.percent;
+        });
+        return items;
+    };
+    m_infoPanel->setItems(build(m_webVisits), build(m_appSegments));
+}
+
+void HistoryView::onCategorizationRequested(const QString &resource)
+{
+    CategorizationDialog dialog(resource, m_categories.value(resource), m_employeeCategories.value(resource),
+                                m_deviceNames.value(m_currentDeviceKey), this);
+    dialog.move(mapToGlobal(rect().center()) - QPoint(dialog.width() / 2, dialog.height() / 2));
+    if (dialog.exec() != QDialog::Accepted) {
+        return;
+    }
+    if (dialog.category() != m_categories.value(resource, QStringLiteral("none"))) {
+        m_categories[resource] = dialog.category();
+        m_connection.setAppCategory(currentStreamId(), resource, dialog.category());
+    }
+    if (dialog.employeeCategory() != m_employeeCategories.value(resource, QStringLiteral("none"))) {
+        if (dialog.employeeCategory() == QStringLiteral("none")) {
+            m_employeeCategories.remove(resource);
+        } else {
+            m_employeeCategories[resource] = dialog.employeeCategory();
+        }
+        m_connection.setAppCategory(currentStreamId(), resource, dialog.employeeCategory(), true);
+    }
+    refreshEfficiencyBar();
+    updateInfoPanel();
+}
+
+QHash<QString, QString> HistoryView::effectiveCategories() const
+{
+    QHash<QString, QString> categories = m_categories;
+    for (auto it = m_employeeCategories.cbegin(); it != m_employeeCategories.cend(); ++it) {
+        categories.insert(it.key(), it.value());
+    }
+    return categories;
+}
+
+void HistoryView::onEmployeeCategoriesReceived(quint32 streamId, const QHash<QString, QString> &categories)
+{
+    if (streamId != currentStreamId()) {
+        return;
+    }
+    m_employeeCategories = categories;
+    refreshEfficiencyBar();
+    updateInfoPanel();
 }
 
 void HistoryView::onCategoriesReceived(quint32 streamId, const QHash<QString, QString> &categories)
@@ -2253,7 +3200,7 @@ void HistoryView::onCategoriesReceived(quint32 streamId, const QHash<QString, QS
     }
     m_categories = categories;
     refreshEfficiencyBar();
-    rebuildRunningAppsList();
+    updateInfoPanel();
 }
 
 void HistoryView::onKeystrokesReceived(quint32 streamId, const QString &day,

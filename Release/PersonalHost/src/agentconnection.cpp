@@ -405,6 +405,18 @@ void AgentConnection::handleHistoryQuery(const ViewerProtocol::Header &header, c
                 QJsonObject{{QStringLiteral("action"), action},
                             {QStringLiteral("day"), day},
                             {QStringLiteral("pages"), array}});
+    } else if (action == QStringLiteral("listWebVisits")) {
+        const QString day = request.value(QStringLiteral("day")).toString();
+        QJsonArray array;
+        for (const WebVisit &visit : m_historyRecorder->listWebVisits(monitorStreamId, day)) {
+            array.append(QJsonObject{{QStringLiteral("url"), visit.url},
+                                     {QStringLiteral("startMs"), visit.startMs},
+                                     {QStringLiteral("endMs"), visit.endMs}});
+        }
+        sendJson(ViewerProtocol::MessageType::HistoryQuery, monitorStreamId,
+                QJsonObject{{QStringLiteral("action"), action},
+                            {QStringLiteral("day"), day},
+                            {QStringLiteral("visits"), array}});
     } else if (action == QStringLiteral("listCategories")) {
         QJsonArray array;
         const auto categories = m_historyRecorder->listCategories();
@@ -412,13 +424,26 @@ void AgentConnection::handleHistoryQuery(const ViewerProtocol::Header &header, c
             array.append(QJsonObject{{QStringLiteral("application"), entry.first},
                                      {QStringLiteral("category"), entry.second}});
         }
+        // This screen's employee's own overrides, alongside the global ones.
+        QJsonArray employeeArray;
+        const QString username = m_historyRecorder->usernameForStream(monitorStreamId);
+        for (const auto &entry : m_historyRecorder->listEmployeeCategories(username)) {
+            employeeArray.append(QJsonObject{{QStringLiteral("application"), entry.first},
+                                             {QStringLiteral("category"), entry.second}});
+        }
         sendJson(ViewerProtocol::MessageType::HistoryQuery, monitorStreamId,
                 QJsonObject{{QStringLiteral("action"), action},
-                            {QStringLiteral("categories"), array}});
+                            {QStringLiteral("categories"), array},
+                            {QStringLiteral("employeeCategories"), employeeArray}});
     } else if (action == QStringLiteral("setCategory")) {
         const QString application = request.value(QStringLiteral("application")).toString();
         const QString category = request.value(QStringLiteral("category")).toString();
-        m_historyRecorder->setCategory(application, category);
+        if (request.value(QStringLiteral("scope")).toString() == QStringLiteral("employee")) {
+            m_historyRecorder->setEmployeeCategory(m_historyRecorder->usernameForStream(monitorStreamId),
+                                                   application, category);
+        } else {
+            m_historyRecorder->setCategory(application, category);
+        }
         sendJson(ViewerProtocol::MessageType::HistoryQuery, monitorStreamId,
                 QJsonObject{{QStringLiteral("action"), action},
                             {QStringLiteral("application"), application},

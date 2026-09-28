@@ -67,9 +67,17 @@ qt_add_resources(PersonalScreenViewer "history_assets"
         resources/history/keylogger_bg.png
         resources/history/big_emptyStream.png
         resources/history/warning.png
+        resources/history/info.png
         resources/history/spinner/spinner.png
         resources/history/video/buttonRunningApp/applications_arrow_left.png
         resources/history/video/buttonRunningApp/applications_arrow_right.png
+        resources/sessionInfo/images/active_program.png
+        resources/sessionInfo/categorizationButton/small_normal.png
+        resources/sessionInfo/categorizationButton/small_hovered.png
+        resources/sessionInfo/categorizationButton/small_pressed.png
+        resources/sessionInfo/categorizationPanel/indent.png
+        resources/sessionInfo/categorizationPanel/multiuser_on.png
+        resources/sessionInfo/categorizationPanel/user_on.png
 )
 
 target_link_libraries(PersonalScreenViewer PRIVATE
