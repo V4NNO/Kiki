@@ -27,6 +27,7 @@ public:
     void broadcastFrame(quint32 streamId, const QImage &image);
     void broadcastMetadata(quint32 streamId, const QString &application, const QString &idleText);
     void broadcastMonitorList(const QList<MonitorInfo> &monitors);
+    void broadcastStreamClosed(quint32 streamId);
 
     // Applied to every connection adopted from here on; existing
     // connections at the time of the call are updated too.

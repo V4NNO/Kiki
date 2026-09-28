@@ -37,6 +37,11 @@ public:
     void setMonitors(const QList<MonitorInfo> &monitors);
     void pushFrame(quint32 streamId, const QImage &image);
     void pushMetadata(quint32 streamId, const QString &application, const QString &idleText);
+    // See MessageType::StreamClosed -- tells this viewer to drop the stream
+    // outright, instead of waiting to notice it stopped getting frames
+    // (which, for a WindowListCapture window stream, never happens on its
+    // own once it's backgrounded -- see SessionManager::onStreamClosed).
+    void pushStreamClosed(quint32 streamId);
     void sendGoodbyeAndClose();
 
     // Optional; when unset, HistoryQuery requests just get an error JSON

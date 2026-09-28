@@ -58,7 +58,6 @@ private slots:
                         const QString &idleText);
     void selectMonitor(quint32 streamId);
     void showMonitorFullScreen(quint32 streamId);
-    void saveSnapshot();
     void showProtocolError(const QString &message);
 
     void showTrackerPage();
@@ -95,13 +94,17 @@ private slots:
     void setSimpleMode(bool simple);
     void openDeviceDetail(quint32 sessionKey);
     void closeDeviceDetail();
-    void pruneStaleWindowStreams();
+    // ViewerConnection::monitorClosed -- removes a window stream (and its
+    // MonitorWidget) for good; see the member comment on
+    // m_deviceWindowStreams for why this replaced a frame-staleness guess.
+    void removeWindowStream(quint32 streamId);
 
 private:
     void buildInterface();
     void applyStyle();
     void clearMonitors();
     void relayoutCurrentTab();
+    void removeTile(quint32 tileId);
     // Column count for the current tracker grid width -- matches the real
     // Kickidler viewer's TrackerGridsPanel (extracted QML: `property int
     // columns: layoutIsVertical ? 3 : 4`, then grown via
@@ -120,6 +123,11 @@ private:
     // Tells every tile (across all tabs) of this device which streams it
     // can show via its video selector -- see DeviceTileWidget::setAvailableStreams.
     void refreshTileStreamsForDevice(quint32 deviceKey);
+    // If this device's Programs page is the one currently open, pushes its
+    // current m_deviceWindowStreams list to it -- Windows.qml's window list
+    // is live (windows open/close continuously), not a snapshot taken once
+    // when the page was opened. No-op for any other device.
+    void refreshOpenDeviceWindowPreviews(quint32 deviceKey);
 
 protected:
     void resizeEvent(QResizeEvent *event) override;
@@ -144,7 +152,6 @@ protected:
     QCheckBox *m_tlsCheck = nullptr;
     QDialog *m_settingsDialog = nullptr;
     QPushButton *m_connectButton = nullptr;
-    QPushButton *m_snapshotButton = nullptr;
     QLabel *m_statusLabel = nullptr;
     QLabel *m_agentLabel = nullptr; // utils/NoEmployeesAssignedInformer.qml equivalent
     // utils/NoCNodeConnectionBlocker.qml / NoEmployeesAssignedInformer.qml
@@ -185,6 +192,13 @@ protected:
     // tiles) a given streamId belongs to, for the tile video selector --
     // covers both monitor and window streams.
     QHash<quint32, quint32> m_streamDeviceKey; // key: streamId -> deviceKey
+    // deviceKey -> {foreground application, idle text} from its primary
+    // stream's metadata, and the categories that color the tiles.
+    QHash<quint32, QPair<QString, QString>> m_deviceActivity;
+    QHash<QString, QString> m_globalCategories;
+    QHash<quint32, QHash<QString, QString>> m_deviceEmployeeCategories;
+    QString deviceCategory(quint32 deviceKey, const QString &application) const;
+    void refreshTileActivity(quint32 deviceKey);
     // Keyed by tileId (NOT deviceKey) -- the same device can now be added to
     // a tab more than once (each add gets its own tile instance), so a
     // device-keyed cache can't tell two occurrences of the same device
@@ -196,16 +210,16 @@ protected:
     // window on that machine -- not counted among its "monitors"
     // (m_deviceMonitorStreams), just their own MonitorWidgets (still owned
     // by m_monitors) shown on the Programs sub-tab of the detail page.
-    // Windows come and go a lot more than monitors do, so these are pruned
-    // by m_windowStreamPruneTimer once a stream stops receiving frames
-    // (WindowListCapture stops sending for a window as soon as it notices
-    // it closed -- see windowlistcapture.cpp).
+    // Windows come and go a lot more than monitors do; removeWindowStream()
+    // drops one for good the moment ViewerConnection::monitorClosed says
+    // it's actually closed (StreamClosed on the wire) -- not by guessing
+    // from missing frames, since a backgrounded window's frame never
+    // updates again on its own even while it's still open (see
+    // windowlistcapture.cpp).
     QHash<quint32, QList<quint32>> m_deviceWindowStreams; // key: deviceKey
     QSet<quint32> m_windowStreamIds; // fast "is this streamId a window preview" check
-    QHash<quint32, qint64> m_windowStreamLastFrameMs;
-    QTimer *m_windowStreamPruneTimer = nullptr;
     // Device whose detail page is currently open, if any -- see
-    // pruneStaleWindowStreams().
+    // refreshOpenDeviceWindowPreviews().
     quint32 m_openDeviceKey = 0;
 
     struct TrackerTab {

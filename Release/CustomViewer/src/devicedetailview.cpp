@@ -1,6 +1,6 @@
 #include "devicedetailview.h"
 
-#include "efficiencycategorybutton.h"
+#include "historyview.h"
 #include "monitorwidget.h"
 #include "viewerconnection.h"
 
@@ -27,147 +27,364 @@
 #include <QTimer>
 #include <QVBoxLayout>
 
+#include <QEnterEvent>
+#include <QFontMetrics>
+#include <QPixmap>
+
+#include <algorithm>
 #include <utility>
 
 namespace {
-QString formatDuration(qint64 ms)
+
+QPixmap acAsset(const QString &path)
 {
-    const qint64 totalMinutes = ms / 60000;
-    const qint64 hours = totalMinutes / 60;
-    const qint64 minutes = totalMinutes % 60;
-    if (hours > 0) {
-        return QStringLiteral("%1h %2m").arg(hours).arg(minutes);
-    }
-    if (minutes > 0) {
-        return QStringLiteral("%1m").arg(minutes);
-    }
-    return QStringLiteral("<1m");
+    return QPixmap(QStringLiteral(":/activeCell/") + path);
 }
 
-// Builds a "heading + rows container" section used both in the compact
-// side panel and the bigger standalone Programs page; returns the
-// QVBoxLayout callers should feed rows into.
-QVBoxLayout *buildUsageSection(QWidget *parent, QVBoxLayout *parentLayout, const QString &heading)
+// A horizontal 3-slice of a BorderImage: fixed-width left/right caps, the
+// middle stretched -- used for the button and pick-bar backgrounds, whose
+// QML borders are horizontal only (height is left at the source height).
+void draw3Slice(QPainter &painter, const QRect &target, const QPixmap &pixmap, int left, int right)
 {
-    auto *headingLabel = new QLabel(heading, parent);
-    headingLabel->setStyleSheet(QStringLiteral("color: #9fa5ae; font-weight: 700; letter-spacing: 1px;"));
-    parentLayout->addWidget(headingLabel);
-    auto *container = new QWidget(parent);
-    auto *layout = new QVBoxLayout(container);
-    layout->setContentsMargins(0, 0, 0, 0);
-    layout->setSpacing(8);
-    parentLayout->addWidget(container);
-    return layout;
-}
-}
-
-UsagePercentRow::UsagePercentRow(const QString &title, const QString &subtitle, double fraction,
-                                 QWidget *parent)
-    : QWidget(parent), m_title(title), m_subtitle(subtitle), m_fraction(qBound(0.0, fraction, 1.0))
-{
-}
-
-void UsagePercentRow::paintEvent(QPaintEvent *event)
-{
-    Q_UNUSED(event)
-    QPainter painter(this);
-    painter.setRenderHint(QPainter::Antialiasing);
-
-    painter.setPen(QColor(225, 231, 235));
-    painter.setFont(QFont(QStringLiteral("Segoe UI"), 9));
-    const QString percentText = QStringLiteral("%1%").arg(m_fraction * 100.0, 0, 'f', 1);
-    const int percentWidth = 46;
-    painter.drawText(QRect(0, 2, width() - percentWidth, 16), Qt::AlignLeft | Qt::AlignVCenter,
-                     painter.fontMetrics().elidedText(m_title, Qt::ElideRight,
-                                                       width() - percentWidth - 4));
-    painter.setPen(QColor(33, 183, 128));
-    painter.drawText(QRect(width() - percentWidth, 2, percentWidth, 16),
-                     Qt::AlignRight | Qt::AlignVCenter, percentText);
-
-    painter.setPen(QColor(158, 164, 173));
-    painter.setFont(QFont(QStringLiteral("Segoe UI"), 8));
-    painter.drawText(QRect(0, 19, width(), 14), Qt::AlignLeft | Qt::AlignVCenter,
-                     painter.fontMetrics().elidedText(m_subtitle, Qt::ElideRight, width()));
-
-    const QRect barRect(0, 37, width(), 4);
-    painter.setPen(Qt::NoPen);
-    painter.setBrush(QColor(62, 64, 73));
-    painter.drawRoundedRect(barRect, 2, 2);
-    if (m_fraction > 0.0) {
-        painter.setBrush(QColor(29, 160, 111));
-        painter.drawRoundedRect(QRect(barRect.x(), barRect.y(),
-                                      qMax(3, static_cast<int>(barRect.width() * m_fraction)),
-                                      barRect.height()),
-                                2, 2);
-    }
-}
-
-QSize UsagePercentRow::sizeHint() const
-{
-    return QSize(260, 44);
-}
-
-TriLineWidget::TriLineWidget(QWidget *parent) : QWidget(parent)
-{
-    setFixedHeight(28);
-}
-
-void TriLineWidget::setFractions(double productive, double neutral, double unproductive, double none)
-{
-    m_productive = qBound(0.0, productive, 1.0);
-    m_neutral = qBound(0.0, neutral, 1.0);
-    m_unproductive = qBound(0.0, unproductive, 1.0);
-    m_none = qBound(0.0, none, 1.0);
-    update();
-}
-
-void TriLineWidget::paintEvent(QPaintEvent *event)
-{
-    Q_UNUSED(event)
-    QPainter painter(this);
-    const QRect barRect(0, 16, width(), 8);
-    painter.setPen(Qt::NoPen);
-    painter.setBrush(QColor(0x3e, 0x40, 0x49));
-    painter.drawRoundedRect(barRect, 3, 3);
-
-    const double total = m_productive + m_neutral + m_unproductive + m_none;
-    if (total <= 0.0) {
-        painter.setPen(QColor(0x6f, 0x74, 0x7d));
-        painter.setFont(QFont(QStringLiteral("Segoe UI"), 8));
-        painter.drawText(rect(), Qt::AlignLeft | Qt::AlignTop, QStringLiteral("Fara date inca astazi."));
+    if (pixmap.isNull() || target.width() <= 0) {
         return;
     }
+    const int h = pixmap.height();
+    left = qMin(left, target.width() / 2);
+    right = qMin(right, target.width() - left);
+    painter.drawPixmap(QRect(target.left(), target.top(), left, target.height()), pixmap,
+                       QRect(0, 0, left, h));
+    painter.drawPixmap(QRect(target.right() - right + 1, target.top(), right, target.height()),
+                       pixmap, QRect(pixmap.width() - right, 0, right, h));
+    painter.drawPixmap(QRect(target.left() + left, target.top(), target.width() - left - right,
+                             target.height()),
+                       pixmap, QRect(left, 0, pixmap.width() - left - right, h));
+}
 
-    int x = barRect.x();
-    const struct { double fraction; QColor color; } segments[] = {
-        {m_productive, EfficiencyCategoryButton::color(QStringLiteral("productive"))},
-        {m_neutral, EfficiencyCategoryButton::color(QStringLiteral("neutral"))},
-        {m_unproductive, EfficiencyCategoryButton::color(QStringLiteral("unproductive"))},
-        {m_none, EfficiencyCategoryButton::color(QStringLiteral("none"))},
-    };
-    for (const auto &segment : segments) {
-        if (segment.fraction <= 0.0) {
-            continue;
-        }
-        const int segmentWidth = qMax(1, static_cast<int>(barRect.width() * segment.fraction));
-        painter.setBrush(segment.color);
-        painter.drawRect(QRect(x, barRect.y(), segmentWidth, barRect.height()));
-        x += segmentWidth;
+QFont robotoBold(int px)
+{
+    QFont f(QStringLiteral("Roboto"));
+    f.setPixelSize(px);
+    f.setBold(true);
+    return f;
+}
+
+} // namespace
+
+// Controls/BackButton.qml (Button.qml + arrow.png): button/*.png BorderImage
+// (border 10) with the arrow icon and white "Back" (Fonts.rr_medium_b).
+class BackButton final : public QPushButton
+{
+public:
+    explicit BackButton(QWidget *parent) : QPushButton(parent)
+    {
+        setCursor(Qt::PointingHandCursor);
+        setFixedHeight(23);
+        m_normal = acAsset(QStringLiteral("button/normal.png"));
+        m_hover = acAsset(QStringLiteral("button/hover.png"));
+        m_press = acAsset(QStringLiteral("button/press.png"));
+        m_arrow = acAsset(QStringLiteral("arrow.png"));
+        m_font = robotoBold(12);
+        const int textW = QFontMetrics(m_font).horizontalAdvance(tr("Back"));
+        setFixedWidth(m_arrow.width() + 6 + textW + 24);
     }
 
-    painter.setPen(QColor(0xc9, 0xcd, 0xd3));
-    painter.setFont(QFont(QStringLiteral("Segoe UI"), 8));
-    painter.drawText(QRect(0, 0, width(), 14), Qt::AlignLeft | Qt::AlignTop,
-                     QStringLiteral("Productiv %1%  ·  Neutru %2%  ·  Neproductiv %3%")
-                         .arg(m_productive * 100.0, 0, 'f', 0)
-                         .arg(m_neutral * 100.0, 0, 'f', 0)
-                         .arg(m_unproductive * 100.0, 0, 'f', 0));
-}
+protected:
+    void paintEvent(QPaintEvent *) override
+    {
+        QPainter painter(this);
+        const QPixmap &bg = isDown() ? m_press : (m_hovered ? m_hover : m_normal);
+        draw3Slice(painter, rect(), bg, 10, 10);
+        const int textW = QFontMetrics(m_font).horizontalAdvance(tr("Back"));
+        const int content = m_arrow.width() + 6 + textW;
+        const int x = (width() - content) / 2;
+        painter.drawPixmap(x, (height() - m_arrow.height()) / 2, m_arrow);
+        painter.setFont(m_font);
+        painter.setPen(QColor(0xf7, 0xf7, 0xf7));
+        painter.drawText(QRect(x + m_arrow.width() + 6, 0, textW + 2, height()),
+                         Qt::AlignLeft | Qt::AlignVCenter, tr("Back"));
+    }
+    void enterEvent(QEnterEvent *event) override
+    {
+        m_hovered = true;
+        update();
+        QPushButton::enterEvent(event);
+    }
+    void leaveEvent(QEvent *event) override
+    {
+        m_hovered = false;
+        update();
+        QPushButton::leaveEvent(event);
+    }
 
-QSize TriLineWidget::sizeHint() const
+private:
+    QPixmap m_normal, m_hover, m_press, m_arrow;
+    QFont m_font;
+    bool m_hovered = false;
+};
+
+// Widgets/TabView.qml's MultiSwitch: a thin bar (multiSwitch/bg.png, border 4)
+// with the pick handle (pick_normal.png) centered over the current tab, and a
+// row of icon+label tabs below it. Active/hovered tab shows the "_on" icon and
+// white text; others the "_off" icon and #b7b7b7 text (MultiSwitch.qml).
+class DetailTabSwitch final : public QWidget
 {
-    return QSize(260, 28);
-}
+    Q_OBJECT
+
+public:
+    explicit DetailTabSwitch(QWidget *parent) : QWidget(parent)
+    {
+        m_bar = acAsset(QStringLiteral("multiSwitch/bg.png"));
+        m_pick = acAsset(QStringLiteral("multiSwitch/pick_normal.png"));
+        m_font = QFont(QStringLiteral("Roboto"));
+        m_font.setPixelSize(11);
+        setMouseTracking(true);
+        setCursor(Qt::PointingHandCursor);
+    }
+
+    void addTab(const QString &text, const QString &onIcon, const QString &offIcon,
+                bool selectable = true)
+    {
+        m_tabs.append({text, acAsset(onIcon), acAsset(offIcon), selectable});
+        updateGeometry();
+        update();
+    }
+    int currentIndex() const { return m_current; }
+    void setCurrentIndex(int index)
+    {
+        if (index < 0 || index >= m_tabs.size() || index == m_current) {
+            return;
+        }
+        m_current = index;
+        update();
+    }
+
+signals:
+    void currentChanged(int index);
+
+protected:
+    QSize sizeHint() const override { return QSize(totalWidth(), 34); }
+    QSize minimumSizeHint() const override { return sizeHint(); }
+
+    void paintEvent(QPaintEvent *) override
+    {
+        QPainter painter(this);
+        painter.setRenderHint(QPainter::SmoothPixmapTransform);
+        const QList<int> edges = tabEdges();
+        // The pick bar, vertically centered on the 19px pick handle.
+        draw3Slice(painter, QRect(0, m_pick.height() / 2 - 2, width(), 4), m_bar, 4, 4);
+        if (m_current >= 0 && m_current + 1 < edges.size()) {
+            const int cx = (edges[m_current] + edges[m_current + 1]) / 2;
+            painter.drawPixmap(cx - m_pick.width() / 2, 0, m_pick);
+        }
+        painter.setFont(m_font);
+        const QFontMetrics metrics(m_font);
+        const int rowTop = m_pick.height();
+        const int rowHeight = height() - rowTop;
+        for (int i = 0; i < m_tabs.size(); ++i) {
+            const Tab &tab = m_tabs.at(i);
+            const bool lit = i == m_current || i == m_hover;
+            const QPixmap &icon = lit ? tab.on : tab.off;
+            const int textW = metrics.horizontalAdvance(tab.text);
+            const int content = icon.width() + 5 + textW;
+            const int startX = edges[i] + (edges[i + 1] - edges[i] - content) / 2;
+            painter.drawPixmap(startX, rowTop + (rowHeight - icon.height()) / 2, icon);
+            painter.setPen(lit ? QColor(Qt::white) : QColor(0xb7, 0xb7, 0xb7));
+            painter.drawText(QRect(startX + icon.width() + 5, rowTop, textW + 2, rowHeight),
+                             Qt::AlignLeft | Qt::AlignVCenter, tab.text);
+        }
+    }
+
+    void mousePressEvent(QMouseEvent *event) override
+    {
+        const int index = tabAt(event->pos().x());
+        if (index >= 0 && m_tabs.at(index).selectable && index != m_current) {
+            m_current = index;
+            update();
+            emit currentChanged(index);
+        }
+    }
+    void mouseMoveEvent(QMouseEvent *event) override
+    {
+        const int index = tabAt(event->pos().x());
+        if (index != m_hover) {
+            m_hover = index;
+            update();
+        }
+    }
+    void leaveEvent(QEvent *) override
+    {
+        if (m_hover != -1) {
+            m_hover = -1;
+            update();
+        }
+    }
+
+private:
+    struct Tab {
+        QString text;
+        QPixmap on;
+        QPixmap off;
+        bool selectable = true;
+    };
+    int tabWidth(const Tab &tab) const
+    {
+        return QFontMetrics(m_font).horizontalAdvance(tab.text)
+            + (tab.on.isNull() ? 0 : tab.on.width() + 5) + 16;
+    }
+    int totalWidth() const
+    {
+        int width = 0;
+        for (const Tab &tab : m_tabs) {
+            width += tabWidth(tab);
+        }
+        return width;
+    }
+    QList<int> tabEdges() const
+    {
+        QList<int> edges;
+        int x = 0;
+        for (const Tab &tab : m_tabs) {
+            edges.append(x);
+            x += tabWidth(tab);
+        }
+        edges.append(x);
+        return edges;
+    }
+    int tabAt(int x) const
+    {
+        const QList<int> edges = tabEdges();
+        for (int i = 0; i + 1 < edges.size(); ++i) {
+            if (x >= edges[i] && x < edges[i + 1]) {
+                return i;
+            }
+        }
+        return -1;
+    }
+
+    QList<Tab> m_tabs;
+    int m_current = 0;
+    int m_hover = -1;
+    QPixmap m_bar;
+    QPixmap m_pick;
+    QFont m_font;
+};
+
+// StatusUser.qml: info_bg.png BorderImage (border 5) with the warning icon and
+// "Not active: HH:MM:SS" (or "Active"), width = content + 20, left margin 10.
+class StatusUserBox final : public QWidget
+{
+public:
+    explicit StatusUserBox(QWidget *parent) : QWidget(parent)
+    {
+        m_bg = acAsset(QStringLiteral("StatusUser/info_bg.png"));
+        m_notActive = acAsset(QStringLiteral("StatusUser/info_not_active.png"));
+        m_active = acAsset(QStringLiteral("StatusUser/info_active.png"));
+        m_font = QFont(QStringLiteral("Roboto"));
+        m_font.setPixelSize(12);
+        setFixedHeight(28);
+        hide();
+    }
+
+    // idleText is metadataChanged's raw string ("Idle hh:mm:ss" / "Locked
+    // hh:mm:ss" / empty). Empty means the session is active.
+    void setIdle(const QString &idleText)
+    {
+        m_active_ = idleText.isEmpty();
+        m_text = m_active_ ? tr("Active")
+                           : tr("Not active: %1").arg(idleText.section(QLatin1Char(' '), 1));
+        const QPixmap &icon = m_active_ ? m_active : m_notActive;
+        setFixedWidth(icon.width() + 10 + QFontMetrics(m_font).horizontalAdvance(m_text) + 20);
+        update();
+        show();
+    }
+
+protected:
+    void paintEvent(QPaintEvent *) override
+    {
+        QPainter painter(this);
+        draw3Slice(painter, rect(), m_bg, 5, 5);
+        const QPixmap &icon = m_active_ ? m_active : m_notActive;
+        painter.drawPixmap(10, (height() - icon.height()) / 2, icon);
+        painter.setFont(m_font);
+        painter.setPen(Qt::white);
+        painter.drawText(QRect(10 + icon.width() + 10, 0, width(), height()),
+                         Qt::AlignLeft | Qt::AlignVCenter, m_text);
+    }
+
+private:
+    QPixmap m_bg, m_notActive, m_active;
+    QString m_text;
+    QFont m_font;
+    bool m_active_ = true;
+};
+
+// utils/StatusIcon.qml, typeSize "big": #45464d background (Video.qml),
+// tracker/statusIcon/big_<kind>.png centered with a 10px gap, then the
+// kind's text (18pt bold #38373d, word-wrapped). Shown instead of the video
+// whenever there's nothing live to display (Windows.qml's instantStatusIcon).
+class BigStatusIcon final : public QWidget
+{
+public:
+    explicit BigStatusIcon(QWidget *parent) : QWidget(parent) {}
+
+    void setKind(const QString &kind)
+    {
+        if (m_kind == kind) {
+            return;
+        }
+        m_kind = kind;
+        m_icon = kind.isEmpty() ? QPixmap()
+                                : QPixmap(QStringLiteral(":/tracker/statusIcon/big_%1.png").arg(kind));
+        update();
+    }
+
+protected:
+    void paintEvent(QPaintEvent *) override
+    {
+        QPainter painter(this);
+        painter.fillRect(rect(), QColor(0x45, 0x46, 0x4d));
+        if (m_icon.isNull()) {
+            return;
+        }
+        const QString text = kindText(m_kind);
+        QFont font(QStringLiteral("Roboto"));
+        font.setPixelSize(24);
+        font.setBold(true);
+        const QRect textArea(20, 0, width() - 40, 1000);
+        const QRect textBounds =
+            text.isEmpty() ? QRect() : QFontMetrics(font).boundingRect(textArea, Qt::TextWordWrap, text);
+        const int totalHeight = m_icon.height() + (text.isEmpty() ? 0 : 10 + textBounds.height());
+        int y = (height() - totalHeight) / 2;
+        painter.drawPixmap((width() - m_icon.width()) / 2, y, m_icon);
+        y += m_icon.height() + 10;
+        if (!text.isEmpty()) {
+            painter.setFont(font);
+            painter.setPen(QColor(0x38, 0x37, 0x3d));
+            painter.drawText(QRect(20, y, width() - 40, textBounds.height()),
+                             Qt::AlignHCenter | Qt::TextWordWrap, text);
+        }
+    }
+
+private:
+    // utils/StatusIcon.qml's text switch, for the kinds this page can show.
+    static QString kindText(const QString &kind)
+    {
+        if (kind == QStringLiteral("offline")) {
+            return QStringLiteral("Offline");
+        }
+        if (kind == QStringLiteral("noSessions")) {
+            return QStringLiteral("No session");
+        }
+        if (kind == QStringLiteral("emptyStream")) {
+            return QStringLiteral("No video");
+        }
+        return QString();
+    }
+
+    QString m_kind;
+    QPixmap m_icon;
+};
 
 DeviceDetailView::DeviceDetailView(ViewerConnection &connection, QWidget *parent)
     : QWidget(parent), m_connection(connection)
@@ -176,52 +393,35 @@ DeviceDetailView::DeviceDetailView(ViewerConnection &connection, QWidget *parent
     root->setContentsMargins(0, 0, 0, 0);
     root->setSpacing(0);
 
+    // TabView.qml: the whole page sits on a grayHatching background.
+    setObjectName(QStringLiteral("detailView"));
+    setAttribute(Qt::WA_StyledBackground);
+    setStyleSheet(QStringLiteral(
+        "QWidget#detailView { background-image: url(:/activeCell/grayHatching.png); }"));
+
+    // TabView.qml topLine: 27px, Back, 20px, caption, 20px, MultiSwitch,
+    // 20px, headerZone (fills to the right); topMargin 17.
     auto *headerRow = new QWidget(this);
     headerRow->setObjectName(QStringLiteral("detailHeader"));
     auto *headerLayout = new QHBoxLayout(headerRow);
-    headerLayout->setContentsMargins(10, 8, 10, 8);
-    auto *backButton = new QPushButton(QStringLiteral("←  Back"), headerRow);
-    backButton->setObjectName(QStringLiteral("flatButton"));
+    headerLayout->setContentsMargins(27, 17, 20, 7);
+    headerLayout->setSpacing(0);
+    auto *backButton = new BackButton(headerRow);
     connect(backButton, &QPushButton::clicked, this, &DeviceDetailView::backRequested);
+    headerLayout->addWidget(backButton, 0, Qt::AlignVCenter);
+    headerLayout->addSpacing(20);
+    // caption: Fonts.rb_big_b (Roboto Bold ~11pt), white.
     m_nameLabel = new QLabel(headerRow);
-    m_nameLabel->setStyleSheet(QStringLiteral("font-size: 12pt; font-weight: 700; padding-left: 10px;"));
+    m_nameLabel->setFont(robotoBold(15));
+    m_nameLabel->setStyleSheet(QStringLiteral("color: white;"));
     m_nameLabel->setToolTip(QStringLiteral("Dublu-click pentru a redenumi (doar local, in Viewer)"));
     m_nameLabel->installEventFilter(this); // catches the double-click, see eventFilter()
-    headerLayout->addWidget(backButton);
-    headerLayout->addWidget(m_nameLabel);
+    headerLayout->addWidget(m_nameLabel, 0, Qt::AlignVCenter);
+    headerLayout->addSpacing(20);
 
-    // SessionPicker.qml equivalent -- see the member comment in the header
-    // for why this is a single disabled entry rather than a real picker.
-    m_sessionPicker = new QComboBox(headerRow);
-    m_sessionPicker->setFixedWidth(160);
-    m_sessionPicker->addItem(QStringLiteral("Sesiune principala"));
-    m_sessionPicker->setEnabled(false);
-    m_sessionPicker->setToolTip(
-        QStringLiteral("O singura sesiune per device -- grabber-ul nu raporteaza inca "
-                       "mai multe sesiuni simultane ale aceluiasi angajat."));
-    headerLayout->addSpacing(10);
-    headerLayout->addWidget(m_sessionPicker);
+    m_tabSwitch = new DetailTabSwitch(headerRow);
+    headerLayout->addWidget(m_tabSwitch, 0, Qt::AlignVCenter);
     headerLayout->addStretch();
-
-    m_goToHistoryButton = new QPushButton(QStringLiteral("Go to History"), headerRow);
-    m_goToHistoryButton->setObjectName(QStringLiteral("flatButton"));
-    connect(m_goToHistoryButton, &QPushButton::clicked, this, [this]() {
-        emit goToHistoryRequested(m_sessionKey);
-    });
-    headerLayout->addWidget(m_goToHistoryButton);
-
-    // StatusUser.qml equivalent -- moved here from the stats panel (see the
-    // member comment). ViolationsTimer.qml equivalent sits right next to it
-    // in the real header too, hence the pairing here.
-    m_statusUserLabel = new QLabel(headerRow);
-    m_statusUserLabel->setStyleSheet(QStringLiteral("color: #f2a4a4; padding: 0 8px; font-weight: 600;"));
-    m_statusUserLabel->hide();
-    headerLayout->addWidget(m_statusUserLabel);
-    m_violationsTimerLabel = new QLabel(QStringLiteral("Violari: —"), headerRow);
-    m_violationsTimerLabel->setStyleSheet(QStringLiteral("color: #6f747d; padding: 0 8px;"));
-    m_violationsTimerLabel->setToolTip(
-        QStringLiteral("Nu exista un motor de violari/reguli in grabber inca."));
-    headerLayout->addWidget(m_violationsTimerLabel);
     root->addWidget(headerRow);
 
     // Left content area: Programs / Monitors / Keylogger each swap what's
@@ -233,7 +433,12 @@ DeviceDetailView::DeviceDetailView(ViewerConnection &connection, QWidget *parent
     auto *monitorsPage = new QWidget(m_leftStack);
     auto *monitorsPageLayout = new QVBoxLayout(monitorsPage);
     monitorsPageLayout->setContentsMargins(0, 0, 0, 0);
-    auto *scroll = new QScrollArea(monitorsPage);
+    // Windows.qml's instantStatusIcon: the big StatusIcon replaces the video
+    // entirely (rather than being drawn per-monitor) whenever the session
+    // has no live video to show at all -- offline, no session, or simply no
+    // monitor streams reported yet.
+    m_monitorInnerStack = new QStackedWidget(monitorsPage);
+    auto *scroll = new QScrollArea(m_monitorInnerStack);
     scroll->setWidgetResizable(true);
     scroll->setFrameShape(QFrame::NoFrame);
     m_monitorContainer = new QWidget(scroll);
@@ -241,8 +446,12 @@ DeviceDetailView::DeviceDetailView(ViewerConnection &connection, QWidget *parent
     m_monitorLayout->setContentsMargins(6, 6, 6, 6);
     m_monitorLayout->setSpacing(6);
     scroll->setWidget(m_monitorContainer);
-    monitorsPageLayout->addWidget(scroll);
+    m_monitorInnerStack->addWidget(scroll);
+    m_monitorStatusIcon = new BigStatusIcon(m_monitorInnerStack);
+    m_monitorInnerStack->addWidget(m_monitorStatusIcon);
+    monitorsPageLayout->addWidget(m_monitorInnerStack);
     m_leftStack->addWidget(monitorsPage);
+    m_monitorsPage = monitorsPage;
 
     // Live preview of every currently open window on the device -- same
     // PrintWindow-based technique confirmed present in the reference
@@ -268,6 +477,7 @@ DeviceDetailView::DeviceDetailView(ViewerConnection &connection, QWidget *parent
     windowsScroll->setWidget(m_windowsContainer);
     programsPageLayout->addWidget(windowsScroll);
     m_leftStack->addWidget(programsPage);
+    m_programsPage = programsPage;
 
     // keylogger/Toolbar.qml + keylogger/Table.qml equivalent. The real
     // toolbar also has Web pages/Programs/Both scope buttons and an
@@ -309,33 +519,25 @@ DeviceDetailView::DeviceDetailView(ViewerConnection &connection, QWidget *parent
     keyloggerLayout->addWidget(m_keyloggerTable, 1);
     m_leftStack->addWidget(keyloggerPage);
 
-    auto *subNav = new QWidget(this);
-    auto *subNavLayout = new QHBoxLayout(subNav);
-    subNavLayout->setContentsMargins(10, 0, 10, 4);
-    m_programsTabButton = new QPushButton(QStringLiteral("Programs"), subNav);
-    m_monitorsTabButton = new QPushButton(QStringLiteral("Monitors"), subNav);
-    auto *violationsTabButton = new QPushButton(QStringLiteral("Violations"), subNav);
-    violationsTabButton->setObjectName(QStringLiteral("navButton"));
-    violationsTabButton->setEnabled(false); // no violation-detection feature exists
-    m_keyloggerTabButton = new QPushButton(QStringLiteral("Keylogger"), subNav);
-    connect(m_programsTabButton, &QPushButton::clicked, this,
-            [this, programsPage] { switchSubTab(programsPage, m_programsTabButton); });
-    connect(m_monitorsTabButton, &QPushButton::clicked, this,
-            [this, monitorsPage] { switchSubTab(monitorsPage, m_monitorsTabButton); });
-    connect(m_keyloggerTabButton, &QPushButton::clicked, this,
-            [this, keyloggerPage] { switchSubTab(keyloggerPage, m_keyloggerTabButton); });
-    subNavLayout->addWidget(m_programsTabButton);
-    subNavLayout->addWidget(m_monitorsTabButton);
-    subNavLayout->addWidget(violationsTabButton);
-    subNavLayout->addWidget(m_keyloggerTabButton);
-    subNavLayout->addStretch();
-    root->addWidget(subNav);
-    switchSubTab(monitorsPage, m_monitorsTabButton);
+    // TrackerQuadratorActiveCell.qml's tab order: Programs, Monitors,
+    // Violations (shown but not selectable -- no violation engine here),
+    // Keylogger. Default is Monitors (currentIndex 1, WOOS-616).
+    m_tabSwitch->addTab(QStringLiteral("Programs"), QStringLiteral("tabs/windows_on.png"),
+                        QStringLiteral("tabs/windows_off.png"));
+    m_tabSwitch->addTab(QStringLiteral("Monitors"), QStringLiteral("tabs/monitor_on.png"),
+                        QStringLiteral("tabs/monitor_off.png"));
+    m_tabSwitch->addTab(QStringLiteral("Violations"), QStringLiteral("tabs/filters_on.png"),
+                        QStringLiteral("tabs/filters_off.png"), false);
+    m_tabSwitch->addTab(QStringLiteral("Keylogger"), QStringLiteral("tabs/keylogger_on.png"),
+                        QStringLiteral("tabs/keylogger_off.png"));
+    connect(m_tabSwitch, &DetailTabSwitch::currentChanged, this, &DeviceDetailView::switchSubTab);
 
+    // Windows.qml's Row: 30px, the video (2/3 of the width), 25px,
+    // SessionInfo (width/3 - 85, see resizeEvent), 30px.
     auto *content = new QWidget(this);
     auto *contentLayout = new QHBoxLayout(content);
-    contentLayout->setContentsMargins(0, 0, 0, 0);
-    contentLayout->setSpacing(0);
+    contentLayout->setContentsMargins(30, 0, 30, 0);
+    contentLayout->setSpacing(25);
 
     // Matches the real viewer's Windows.qml: a compact keylog ticker sits
     // directly under the video on both Monitors and Programs (hidden for
@@ -345,44 +547,61 @@ DeviceDetailView::DeviceDetailView(ViewerConnection &connection, QWidget *parent
     leftColumnLayout->setContentsMargins(0, 0, 0, 0);
     leftColumnLayout->setSpacing(2);
     leftColumnLayout->addWidget(m_leftStack, 1);
+    // Windows.qml's keylogger BorderImage: 25px, keylogger_bg.png tiled,
+    // right-aligned white text (Fonts.rr_medium).
     m_keylogTicker = new QLabel(leftColumn);
-    m_keylogTicker->setFixedHeight(24);
-    m_keylogTicker->setAlignment(Qt::AlignCenter);
-    m_keylogTicker->setStyleSheet(QStringLiteral("color: #9fa5ae; background: #24272e;"));
+    m_keylogTicker->setFixedHeight(25);
+    m_keylogTicker->setAlignment(Qt::AlignRight | Qt::AlignVCenter);
+    m_keylogTicker->setContentsMargins(10, 0, 10, 0);
+    QFont tickerFont(QStringLiteral("Roboto"));
+    tickerFont.setPixelSize(12);
+    m_keylogTicker->setFont(tickerFont);
+    m_keylogTicker->setStyleSheet(QStringLiteral(
+        "color: white; background-image: url(:/activeCell/keylogger_bg.png);"
+        " background-repeat: repeat;"));
     leftColumnLayout->addWidget(m_keylogTicker);
     contentLayout->addWidget(leftColumn, 1);
 
-    auto *statsPanel = new QWidget(content);
-    statsPanel->setFixedWidth(300);
-    statsPanel->setObjectName(QStringLiteral("statsPanel"));
-    auto *statsLayout = new QVBoxLayout(statsPanel);
-    statsLayout->setContentsMargins(12, 12, 12, 12);
-    statsLayout->setSpacing(14);
-
-    // SessionInfo.qml's TriLine equivalent -- aggregate today's Programs +
-    // Web pages split by efficiency category, above the two lists below.
-    m_triLine = new TriLineWidget(statsPanel);
-    statsLayout->addWidget(m_triLine);
-
-    m_webPagesLayout = buildUsageSection(statsPanel, statsLayout, QStringLiteral("Web pages"));
-    m_programsLayout = buildUsageSection(statsPanel, statsLayout, QStringLiteral("Programs"));
-
-    statsLayout->addStretch();
-    contentLayout->addWidget(statsPanel);
+    // Right column: the StatusUser box on top (right-aligned), the
+    // SessionInfo panel below -- as Windows.qml stacks them.
+    m_rightColumn = new QWidget(content);
+    auto *rightLayout = new QVBoxLayout(m_rightColumn);
+    rightLayout->setContentsMargins(0, 0, 0, 0);
+    rightLayout->setSpacing(6);
+    m_statusUser = new StatusUserBox(m_rightColumn);
+    rightLayout->addWidget(m_statusUser, 0, Qt::AlignRight);
+    m_infoArea = new QScrollArea(m_rightColumn);
+    m_infoArea->setFrameShape(QFrame::NoFrame);
+    m_infoArea->setWidgetResizable(true);
+    m_infoArea->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
+    m_infoArea->setStyleSheet(QStringLiteral("background: transparent;"));
+    m_infoPanel = new HistoryInfoPanel;
+    m_infoArea->setWidget(m_infoPanel);
+    connect(m_infoPanel, &HistoryInfoPanel::categorizationRequested, this,
+            &DeviceDetailView::onCategorizationRequested);
+    rightLayout->addWidget(m_infoArea, 1);
+    contentLayout->addWidget(m_rightColumn);
     root->addWidget(content, 1);
 
+    // Default to Monitors (WOOS-616) now that the ticker exists.
+    m_tabSwitch->setCurrentIndex(1);
+    switchSubTab(1);
+
     connect(&m_connection, &ViewerConnection::metadataChanged, this,
-            [this](quint32 streamId, const QString &, const QString &idleText) {
+            [this](quint32 streamId, const QString &application, const QString &idleText) {
                 if (streamId != m_primaryStreamId) {
                     return;
                 }
+                if (application != m_activeApplication) {
+                    m_activeApplication = application;
+                    updateInfoPanel();
+                }
+                // StatusUser.qml shows the box only while idle/locked
+                // (runTimer4LockSaver); an active session hides it.
                 if (idleText.isEmpty()) {
-                    m_statusUserLabel->hide();
+                    m_statusUser->hide();
                 } else {
-                    const QString suffix = idleText.startsWith(QStringLiteral("Idle "))
-                        ? idleText.mid(5) : idleText;
-                    m_statusUserLabel->setText(QStringLiteral("● Not active: %1").arg(suffix));
-                    m_statusUserLabel->show();
+                    m_statusUser->setIdle(idleText);
                 }
             });
     connect(&m_connection, &ViewerConnection::historyRunningApplicationsReceived, this,
@@ -392,9 +611,7 @@ DeviceDetailView::DeviceDetailView(ViewerConnection &connection, QWidget *parent
                     return;
                 }
                 m_lastPrograms = applications;
-                rebuildUsageSection(m_programsLayout, applications,
-                                   QStringLiteral("Fara date inca astazi."), 8);
-                refreshTriLine();
+                updateInfoPanel();
             });
     connect(&m_connection, &ViewerConnection::historyWebPagesReceived, this,
             [this](quint32 streamId, const QString &day, const QList<HistoryAppUsage> &pages) {
@@ -403,9 +620,7 @@ DeviceDetailView::DeviceDetailView(ViewerConnection &connection, QWidget *parent
                     return;
                 }
                 m_lastWebPages = pages;
-                rebuildUsageSection(m_webPagesLayout, pages,
-                                   QStringLiteral("Fara navigare inca astazi."), 8);
-                refreshTriLine();
+                updateInfoPanel();
             });
     connect(&m_connection, &ViewerConnection::historyCategoriesReceived, this,
             [this](quint32 streamId, const QHash<QString, QString> &categories) {
@@ -413,7 +628,15 @@ DeviceDetailView::DeviceDetailView(ViewerConnection &connection, QWidget *parent
                     return;
                 }
                 m_categories = categories;
-                refreshTriLine();
+                updateInfoPanel();
+            });
+    connect(&m_connection, &ViewerConnection::historyEmployeeCategoriesReceived, this,
+            [this](quint32 streamId, const QHash<QString, QString> &categories) {
+                if (streamId != m_primaryStreamId) {
+                    return;
+                }
+                m_employeeCategories = categories;
+                updateInfoPanel();
             });
     connect(&m_connection, &ViewerConnection::historyKeystrokesReceived, this,
             [this](quint32 streamId, const QString &day, const QList<HistoryKeystrokeEntry> &entries) {
@@ -439,30 +662,26 @@ DeviceDetailView::DeviceDetailView(ViewerConnection &connection, QWidget *parent
     connect(m_refreshTimer, &QTimer::timeout, this, &DeviceDetailView::refreshStats);
 }
 
-void DeviceDetailView::switchSubTab(QWidget *page, QPushButton *activeButton)
+void DeviceDetailView::switchSubTab(int index)
 {
+    // Tab index -> stacked page. Violations (2) has no page and isn't
+    // selectable, so it never reaches here.
+    QWidget *page = m_monitorsPage;
+    if (index == 0) {
+        page = m_programsPage;
+    } else if (index == 3) {
+        page = m_keyloggerPage;
+    }
     m_leftStack->setCurrentWidget(page);
-    // m_keylogTicker doesn't exist yet the first time this runs (called
-    // from the constructor, before the content/stats-panel section below
-    // creates it) -- guard instead of reordering construction.
+    // The keylog ticker sits under the video on Programs/Monitors only; the
+    // Keylogger tab shows the full log instead.
     if (m_keylogTicker) {
         m_keylogTicker->setVisible(page != m_keyloggerPage);
     }
     // A hidden QStackedWidget page's children don't necessarily get a real
     // layout pass (container width can stay stale/zero) until the page is
-    // actually made current -- same reasoning as the deferred call in
-    // showDevice(), but that one only runs once, before the user has ever
-    // switched to "Programs", so its container was never really sized.
+    // actually made current.
     QTimer::singleShot(0, this, &DeviceDetailView::resizeMonitorsToFit);
-    for (QPushButton *button : {m_programsTabButton, m_monitorsTabButton, m_keyloggerTabButton}) {
-        if (!button) {
-            continue;
-        }
-        button->setObjectName(button == activeButton ? QStringLiteral("navActive")
-                                                      : QStringLiteral("navButton"));
-        style()->unpolish(button);
-        style()->polish(button);
-    }
 }
 
 void DeviceDetailView::showDevice(quint32 sessionKey, const QString &displayName,
@@ -475,15 +694,9 @@ void DeviceDetailView::showDevice(quint32 sessionKey, const QString &displayName
 
     m_currentMonitors = monitors;
     layoutPreviewWidgets(m_monitorLayout, m_monitorContainer, monitors);
+    updateMonitorStatusIcon();
 
-    m_currentWindowPreviews = windowPreviews;
-    layoutPreviewWidgets(m_windowsLayout, m_windowsContainer, windowPreviews);
-    m_programsPlaceholder->setVisible(windowPreviews.isEmpty());
-    if (windowPreviews.isEmpty()) {
-        // layoutPreviewWidgets() cleared the layout, including the
-        // placeholder -- put it back since there's nothing else to show.
-        m_windowsLayout->addWidget(m_programsPlaceholder);
-    }
+    refreshWindowPreviews(windowPreviews);
 
     // m_monitorContainer's/m_windowsContainer's width isn't reliable yet
     // here -- this page may not have been shown/laid out for real by
@@ -494,16 +707,32 @@ void DeviceDetailView::showDevice(quint32 sessionKey, const QString &displayName
     // layout pass.
     QTimer::singleShot(0, this, &DeviceDetailView::resizeMonitorsToFit);
 
-    m_statusUserLabel->hide();
+    m_statusUser->hide();
     m_keystrokeEntries.clear();
     m_keystrokesLoaded = false;
     rebuildKeyloggerTable();
     m_keylogTicker->setText(QStringLiteral("Se incarca..."));
     m_lastPrograms.clear();
     m_lastWebPages.clear();
-    m_triLine->setFractions(0, 0, 0, 0);
-    switchSubTab(m_leftStack->widget(0), m_monitorsTabButton);
+    m_employeeCategories.clear();
+    m_activeApplication.clear();
+    updateInfoPanel();
+    m_tabSwitch->setCurrentIndex(1);
+    switchSubTab(1);
     refreshStats();
+}
+
+void DeviceDetailView::refreshWindowPreviews(const QList<MonitorWidget *> &windowPreviews)
+{
+    m_currentWindowPreviews = windowPreviews;
+    layoutPreviewWidgets(m_windowsLayout, m_windowsContainer, windowPreviews);
+    m_programsPlaceholder->setVisible(windowPreviews.isEmpty());
+    if (windowPreviews.isEmpty()) {
+        // layoutPreviewWidgets() cleared the layout, including the
+        // placeholder -- put it back since there's nothing else to show.
+        m_windowsLayout->addWidget(m_programsPlaceholder);
+    }
+    resizeMonitorsToFit();
 }
 
 void DeviceDetailView::setDisplayName(const QString &displayName)
@@ -511,9 +740,41 @@ void DeviceDetailView::setDisplayName(const QString &displayName)
     m_nameLabel->setText(displayName);
 }
 
+void DeviceDetailView::setSessionState(const QString &state)
+{
+    m_sessionState = state;
+    updateMonitorStatusIcon();
+}
+
+void DeviceDetailView::updateMonitorStatusIcon()
+{
+    // Same kind mapping DeviceTileWidget::statusKind() uses, minus "lock"
+    // (a locked session still has a real, if frozen, video frame to show --
+    // Windows.qml only swaps in the big icon for kinds where there's
+    // nothing to draw at all).
+    QString kind;
+    if (m_sessionState == QStringLiteral("disconnected")) {
+        kind = QStringLiteral("offline");
+    } else if (m_sessionState == QStringLiteral("idle") || m_sessionState == QStringLiteral("other")) {
+        kind = QStringLiteral("noSessions");
+    } else if (m_currentMonitors.isEmpty()) {
+        kind = QStringLiteral("emptyStream");
+    }
+    if (!m_monitorInnerStack) {
+        return;
+    }
+    if (kind.isEmpty()) {
+        m_monitorInnerStack->setCurrentIndex(0);
+    } else {
+        m_monitorStatusIcon->setKind(kind);
+        m_monitorInnerStack->setCurrentIndex(1);
+    }
+}
+
 void DeviceDetailView::resizeEvent(QResizeEvent *event)
 {
     QWidget::resizeEvent(event);
+    m_rightColumn->setFixedWidth(qMax(200, width() / 3 - 85));
     resizeMonitorsToFit();
 }
 
@@ -584,88 +845,55 @@ void DeviceDetailView::refreshStats()
     m_connection.requestCategories(m_primaryStreamId);
 }
 
-void DeviceDetailView::rebuildUsageSection(QVBoxLayout *sectionLayout,
-                                           const QList<HistoryAppUsage> &entries,
-                                           const QString &emptyText, int maxRows)
+void DeviceDetailView::updateInfoPanel()
 {
-    QLayoutItem *item = nullptr;
-    while ((item = sectionLayout->takeAt(0)) != nullptr) {
-        delete item->widget();
-        delete item;
+    // Today's totals per resource, each resource's share of them; the
+    // application currently in front is the active one.
+    QHash<QString, QString> categories = m_categories;
+    for (auto it = m_employeeCategories.cbegin(); it != m_employeeCategories.cend(); ++it) {
+        categories.insert(it.key(), it.value());
     }
-    if (entries.isEmpty()) {
-        auto *empty = new QLabel(emptyText, sectionLayout->parentWidget());
-        empty->setStyleSheet(QStringLiteral("color: #6f747d;"));
-        sectionLayout->addWidget(empty);
-        return;
-    }
-    qint64 totalMs = 0;
-    for (const HistoryAppUsage &entry : entries) {
-        totalMs += entry.totalMs;
-    }
-    const quint32 streamId = m_primaryStreamId;
-    int shown = 0;
-    for (const HistoryAppUsage &entry : entries) {
-        if (shown++ >= maxRows) {
-            break;
+    const auto build = [&](const QList<HistoryAppUsage> &entries, bool matchActive) {
+        qint64 totalMs = 0;
+        for (const HistoryAppUsage &entry : entries) {
+            totalMs += entry.totalMs;
         }
-        const double fraction = totalMs > 0 ? static_cast<double>(entry.totalMs) / totalMs : 0.0;
-
-        auto *rowContainer = new QWidget(sectionLayout->parentWidget());
-        auto *rowLayout = new QHBoxLayout(rowContainer);
-        rowLayout->setContentsMargins(0, 0, 0, 0);
-        rowLayout->setSpacing(4);
-
-        auto *row = new UsagePercentRow(entry.application, formatDuration(entry.totalMs), fraction,
-                                        rowContainer);
-        rowLayout->addWidget(row, 1);
-
-        const QString initialCategory = m_categories.value(
-            entry.application, entry.category.isEmpty() ? QStringLiteral("none") : entry.category);
-        auto *categoryButton = new EfficiencyCategoryButton(initialCategory, rowContainer);
-        const QString application = entry.application;
-        connect(categoryButton, &EfficiencyCategoryButton::categoryChanged, this,
-                [this, streamId, application](const QString &newCategory) {
-                    m_categories[application] = newCategory;
-                    m_connection.setAppCategory(streamId, application, newCategory);
-                });
-        rowLayout->addWidget(categoryButton, 0, Qt::AlignTop);
-
-        sectionLayout->addWidget(rowContainer);
-    }
+        QList<HistoryInfoPanel::Item> items;
+        for (const HistoryAppUsage &entry : entries) {
+            items.append({entry.application, QStringLiteral("No title"),
+                          100.0 * entry.totalMs / qMax<qint64>(1, totalMs),
+                          categories.value(entry.application, entry.category),
+                          matchActive && entry.application == m_activeApplication});
+        }
+        std::sort(items.begin(), items.end(), [](const HistoryInfoPanel::Item &a, const HistoryInfoPanel::Item &b) {
+            return a.percent > b.percent;
+        });
+        return items;
+    };
+    m_infoPanel->setItems(build(m_lastWebPages, false), build(m_lastPrograms, true));
 }
 
-void DeviceDetailView::refreshTriLine()
+void DeviceDetailView::onCategorizationRequested(const QString &resource)
 {
-    qint64 productiveMs = 0;
-    qint64 neutralMs = 0;
-    qint64 unproductiveMs = 0;
-    qint64 noneMs = 0;
-    qint64 totalMs = 0;
-    for (const QList<HistoryAppUsage> *list : {&m_lastPrograms, &m_lastWebPages}) {
-        for (const HistoryAppUsage &entry : *list) {
-            const QString category = m_categories.value(
-                entry.application, entry.category.isEmpty() ? QStringLiteral("none") : entry.category);
-            totalMs += entry.totalMs;
-            if (category == QStringLiteral("productive")) {
-                productiveMs += entry.totalMs;
-            } else if (category == QStringLiteral("unproductive")) {
-                unproductiveMs += entry.totalMs;
-            } else if (category == QStringLiteral("neutral")) {
-                neutralMs += entry.totalMs;
-            } else {
-                noneMs += entry.totalMs;
-            }
-        }
-    }
-    if (totalMs <= 0) {
-        m_triLine->setFractions(0, 0, 0, 0);
+    CategorizationDialog dialog(resource, m_categories.value(resource), m_employeeCategories.value(resource),
+                                m_nameLabel->text(), this);
+    dialog.move(mapToGlobal(rect().center()) - QPoint(dialog.width() / 2, dialog.height() / 2));
+    if (dialog.exec() != QDialog::Accepted) {
         return;
     }
-    m_triLine->setFractions(static_cast<double>(productiveMs) / totalMs,
-                           static_cast<double>(neutralMs) / totalMs,
-                           static_cast<double>(unproductiveMs) / totalMs,
-                           static_cast<double>(noneMs) / totalMs);
+    if (dialog.category() != m_categories.value(resource, QStringLiteral("none"))) {
+        m_categories[resource] = dialog.category();
+        m_connection.setAppCategory(m_primaryStreamId, resource, dialog.category());
+    }
+    if (dialog.employeeCategory() != m_employeeCategories.value(resource, QStringLiteral("none"))) {
+        if (dialog.employeeCategory() == QStringLiteral("none")) {
+            m_employeeCategories.remove(resource);
+        } else {
+            m_employeeCategories[resource] = dialog.employeeCategory();
+        }
+        m_connection.setAppCategory(m_primaryStreamId, resource, dialog.employeeCategory(), true);
+    }
+    updateInfoPanel();
 }
 
 void DeviceDetailView::rebuildKeyloggerTable()
@@ -750,3 +978,6 @@ bool DeviceDetailView::eventFilter(QObject *watched, QEvent *event)
     }
     return QWidget::eventFilter(watched, event);
 }
+
+// DetailTabSwitch declares Q_OBJECT in this .cpp, so AUTOMOC needs this.
+#include "devicedetailview.moc"

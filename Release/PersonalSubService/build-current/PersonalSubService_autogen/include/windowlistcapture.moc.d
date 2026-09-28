@@ -4,6 +4,7 @@ C:/Users/IonSacaliuc/OneDrive\ -\ Utilities\ One\ Inc/Desktop/SCRIPTS/KickDecomp
   C:/Qt/6.11.2/mingw_64/include/QtCore/QHash \
   C:/Qt/6.11.2/mingw_64/include/QtCore/QObject \
   C:/Qt/6.11.2/mingw_64/include/QtCore/QSet \
+  C:/Qt/6.11.2/mingw_64/include/QtCore/QStringList \
   C:/Qt/6.11.2/mingw_64/include/QtCore/QThread \
   C:/Qt/6.11.2/mingw_64/include/QtCore/QTimer \
   C:/Qt/6.11.2/mingw_64/include/QtCore/q17memory.h \

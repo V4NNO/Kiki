@@ -3,6 +3,7 @@
 #include <QDateTime>
 #include <QHash>
 #include <QSet>
+#include <QStringList>
 #include <QTimer>
 
 #ifdef Q_OS_WIN
@@ -160,6 +161,7 @@ public slots:
 
 signals:
     void windowDiscovered(quint32 streamId, const QString &title);
+    void windowClosed(quint32 streamId);
     void frameCaptured(quint32 streamId, const QImage &image);
     void logMessage(const QString &message);
 
@@ -167,8 +169,14 @@ private slots:
     void tick()
     {
         if (isSessionLocked()) {
+            if (!m_loggedLockedOnce) {
+                m_loggedLockedOnce = true;
+                emit logMessage(QStringLiteral(
+                    "[windowlist] sesiunea pare blocata (OpenInputDesktop a esuat) -- nu enumar ferestre."));
+            }
             return;
         }
+        m_loggedLockedOnce = false;
         m_seenThisTick.clear();
         m_foregroundHwnd = GetForegroundWindow();
         EnumWindows(&Worker::enumProc, reinterpret_cast<LPARAM>(this));
@@ -178,12 +186,27 @@ private slots:
         // (see MainWindow's stale-window-stream timer).
         for (auto it = m_streamIds.begin(); it != m_streamIds.end();) {
             if (!m_seenThisTick.contains(it.key())) {
+                emit windowClosed(it.value());
                 m_lastCapturedMs.remove(it.key());
                 m_loggedFailures.remove(it.key());
                 it = m_streamIds.erase(it);
             } else {
                 ++it;
             }
+        }
+        // Diagnostic: says out loud how many windows this tick actually
+        // tracked, whenever that count changes -- so "why don't I see all my
+        // windows" is answerable from subservice.log alone (see main.cpp's
+        // printLine), without needing a debugger attached to this process.
+        if (m_streamIds.size() != m_lastLoggedCount) {
+            m_lastLoggedCount = m_streamIds.size();
+            QStringList titles;
+            for (auto it = m_streamIds.cbegin(); it != m_streamIds.cend(); ++it) {
+                titles << windowTitle(it.key());
+            }
+            emit logMessage(QStringLiteral("[windowlist] urmaresc %1 fereastra(e): %2")
+                                .arg(m_streamIds.size())
+                                .arg(titles.join(QStringLiteral(" | "))));
         }
     }
 
@@ -288,6 +311,8 @@ private:
     QSet<HWND> m_loggedFailures;
     HWND m_foregroundHwnd = nullptr;
     quint32 m_nextOffset = 0;
+    int m_lastLoggedCount = -1;
+    bool m_loggedLockedOnce = false;
 };
 
 #else
@@ -301,6 +326,7 @@ public slots:
     void init() {}
 signals:
     void windowDiscovered(quint32 streamId, const QString &title);
+    void windowClosed(quint32 streamId);
     void frameCaptured(quint32 streamId, const QImage &image);
     void logMessage(const QString &message);
 };
@@ -315,6 +341,7 @@ WindowListCapture::WindowListCapture(QObject *parent)
     connect(&m_thread, &QThread::started, m_worker, &Worker::init);
     connect(&m_thread, &QThread::finished, m_worker, &QObject::deleteLater);
     connect(m_worker, &Worker::windowDiscovered, this, &WindowListCapture::windowDiscovered);
+    connect(m_worker, &Worker::windowClosed, this, &WindowListCapture::windowClosed);
     connect(m_worker, &Worker::frameCaptured, this, &WindowListCapture::frameCaptured);
     connect(m_worker, &Worker::logMessage, this, &WindowListCapture::logMessage);
 }

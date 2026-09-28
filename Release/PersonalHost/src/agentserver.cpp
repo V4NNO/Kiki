@@ -159,6 +159,15 @@ void AgentServer::broadcastMetadata(quint32 streamId, const QString &application
     }
 }
 
+void AgentServer::broadcastStreamClosed(quint32 streamId)
+{
+    for (AgentConnection *connection : std::as_const(m_connections)) {
+        if (connection->isAuthenticated()) {
+            connection->pushStreamClosed(streamId);
+        }
+    }
+}
+
 void AgentServer::broadcastMonitorList(const QList<MonitorInfo> &monitors)
 {
     m_monitors = monitors;

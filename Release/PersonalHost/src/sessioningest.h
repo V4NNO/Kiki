@@ -46,6 +46,11 @@ signals:
     void metadataChanged(quint32 sessionId, quint32 localStreamId, const QString &application,
                          const QString &idleText, int inputEvents, const QString &url);
     void keystrokeReceived(quint32 sessionId, const QString &windowTitle, const QString &text);
+    // See MessageType::StreamClosed -- the authoritative "this window
+    // stream is gone" signal, forwarded as-is with the local streamId
+    // (SessionManager resolves it to the global one, same as everywhere
+    // else here).
+    void streamClosed(quint32 sessionId, quint32 localStreamId);
     void ingestDisconnected(quint32 sessionId);
     // Emitted once the connect retries are exhausted; SessionManager treats
     // this as "the sub-service never came up" and gives up on the session.

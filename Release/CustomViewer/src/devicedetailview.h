@@ -7,6 +7,14 @@
 
 struct HistoryAppUsage;
 struct HistoryKeystrokeEntry;
+class HistoryInfoPanel;
+// Defined in devicedetailview.cpp -- the TabView MultiSwitch strip, the
+// StatusUser box, and the big offline/no-session placeholder, all
+// custom-painted from the original viewer.exe assets.
+class DetailTabSwitch;
+class StatusUserBox;
+class BigStatusIcon;
+class QScrollArea;
 class ViewerConnection;
 class MonitorWidget;
 class QComboBox;
@@ -17,54 +25,6 @@ class QPushButton;
 class QStackedWidget;
 class QTableWidget;
 class QTimer;
-
-// One row in the live Programs/Web pages panel: a title, a muted subtitle,
-// and a thin proportional percent bar -- same visual idea as
-// ActivityBarWidget/EfficiencyBarWidget in historyview.cpp, just for a
-// single value instead of a timeline.
-class UsagePercentRow final : public QWidget
-{
-    Q_OBJECT
-
-public:
-    UsagePercentRow(const QString &title, const QString &subtitle, double fraction,
-                    QWidget *parent = nullptr);
-
-protected:
-    void paintEvent(QPaintEvent *event) override;
-    QSize sizeHint() const override;
-
-private:
-    QString m_title;
-    QString m_subtitle;
-    double m_fraction = 0.0; // 0..1
-};
-
-// SessionInfo.qml's TriLine equivalent -- a single stacked bar showing
-// today's aggregate Programs+WebPages time split by efficiency category
-// (productive/neutral/unproductive/none), using the same colors as
-// EfficiencyCategoryButton. The real TriLine is a per-row indicator; this
-// is the aggregate summary version shown once above the two usage lists.
-class TriLineWidget final : public QWidget
-{
-    Q_OBJECT
-
-public:
-    explicit TriLineWidget(QWidget *parent = nullptr);
-
-    // Fractions must sum to <= 1.0 (the remainder, if any, is not painted).
-    void setFractions(double productive, double neutral, double unproductive, double none);
-
-protected:
-    void paintEvent(QPaintEvent *event) override;
-    QSize sizeHint() const override;
-
-private:
-    double m_productive = 0.0;
-    double m_neutral = 0.0;
-    double m_unproductive = 0.0;
-    double m_none = 0.0;
-};
 
 // Kickidler-style device detail page: "<- Back" + device name, a sub-nav row
 // (Programs/Monitors/Keylogger are wired to real content; Violations stays
@@ -97,6 +57,16 @@ public:
     void showDevice(quint32 sessionKey, const QString &displayName, quint32 primaryStreamId,
                     const QList<MonitorWidget *> &monitors,
                     const QList<MonitorWidget *> &windowPreviews);
+    // Windows.qml's "Programs" list is live -- WindowListCapture discovers
+    // and closes window streams continuously, not just at the moment this
+    // page was opened. MainWindow calls this whenever this device's window
+    // stream set changes while its Programs page is the one currently open,
+    // instead of leaving it a frozen snapshot from showDevice().
+    void refreshWindowPreviews(const QList<MonitorWidget *> &windowPreviews);
+    // PersonalHost's WTS session state ("active"/"connected"/"disconnected"/
+    // "idle"/"other") -- drives the big StatusIcon placeholder on Monitors
+    // (Windows.qml's instantStatusIcon), same mapping as DeviceTileWidget.
+    void setSessionState(const QString &state);
     void activate();  // called when this page becomes visible
     void deactivate(); // called when navigating away
     // Updates just the header caption -- used after a rename (see
@@ -126,17 +96,17 @@ protected:
 
 private:
     void refreshStats();
-    // entries carry the category straight from the server (HistoryAppUsage)
-    // as a fallback, but m_categories (kept in sync with the SAME
-    // setAppCategory/requestCategories calls HistoryView uses) always wins
-    // once the user has changed something -- see EfficiencyCategoryButton.
-    void rebuildUsageSection(QVBoxLayout *sectionLayout, const QList<HistoryAppUsage> &entries,
-                             const QString &emptyText, int maxRows);
-    void refreshTriLine();
+    // utils/SessionInfo.qml -> WebPagesAndPrograms: the same TriLine rows
+    // and CategorizationPanel History uses.
+    void updateInfoPanel();
+    void onCategorizationRequested(const QString &resource);
     void rebuildKeyloggerTable();
     void filterKeyloggerTable();
     void resizeMonitorsToFit();
-    void switchSubTab(QWidget *page, QPushButton *activeButton);
+    // index into the tab strip: 0 Programs, 1 Monitors, 2 Violations
+    // (ignored), 3 Keylogger.
+    void switchSubTab(int index);
+    void updateMonitorStatusIcon();
     static void layoutPreviewWidgets(QVBoxLayout *layout, QWidget *container,
                                      const QList<MonitorWidget *> &widgets);
     static void resizePreviewWidgetsToFit(QWidget *container, const QList<MonitorWidget *> &widgets);
@@ -146,27 +116,22 @@ private:
     quint32 m_primaryStreamId = 0;
 
     QLabel *m_nameLabel = nullptr;
-    // SessionPicker.qml equivalent -- the real one lists every concurrent
-    // session of the same employee (e.g. console + RDP). PersonalHost has
-    // no concept of "several sessions, one employee": each session is its
-    // own independent deviceKey (see MainWindow::addMonitor), so there's
-    // nothing to actually pick between yet. Kept visible but with a single,
-    // disabled entry so the affordance is ready once that grouping exists.
-    QComboBox *m_sessionPicker = nullptr;
-    // StatusUser.qml equivalent -- moved to the header (top-right) like the
-    // real app, instead of the stats panel banner it used to be.
-    QLabel *m_statusUserLabel = nullptr;
-    // ViolationsTimer.qml equivalent -- no violation-detection system
-    // exists (see the disabled "Violations" tab below), so this always
-    // reads a placeholder dash; kept as a real, positioned label so the
-    // header layout already matches the original's once that system exists.
-    QLabel *m_violationsTimerLabel = nullptr;
-    QPushButton *m_goToHistoryButton = nullptr;
+    // Widgets/TabView.qml's MultiSwitch selector: the Programs / Monitors /
+    // Violations / Keylogger tab strip (icon + label with the sliding pick
+    // handle) drawn from the original Controls/Widgets assets. Violations is
+    // shown but not selectable (no violation-detection system exists).
+    DetailTabSwitch *m_tabSwitch = nullptr;
+    // StatusUser.qml: the "Not active: HH:MM:SS" box (info_bg.png +
+    // info_not_active.png), top-right above the SessionInfo panel like the
+    // real Windows.qml puts it (parented to TabView's headerZone).
+    StatusUserBox *m_statusUser = nullptr;
     QStackedWidget *m_leftStack = nullptr;
-    QPushButton *m_programsTabButton = nullptr;
-    QPushButton *m_monitorsTabButton = nullptr;
-    QPushButton *m_keyloggerTabButton = nullptr;
+    QWidget *m_programsPage = nullptr;
+    QWidget *m_monitorsPage = nullptr;
 
+    QStackedWidget *m_monitorInnerStack = nullptr;
+    BigStatusIcon *m_monitorStatusIcon = nullptr;
+    QString m_sessionState;
     QWidget *m_monitorContainer = nullptr;
     QVBoxLayout *m_monitorLayout = nullptr;
     QList<MonitorWidget *> m_currentMonitors;
@@ -204,9 +169,12 @@ private:
     // actual-empty distinction, reset on every device switch.
     bool m_keystrokesLoaded = false;
 
-    QVBoxLayout *m_webPagesLayout = nullptr;
-    QVBoxLayout *m_programsLayout = nullptr;
-    TriLineWidget *m_triLine = nullptr;
+    // Windows.qml: SessionInfo is width/3 - 85 wide, right of the video.
+    // The StatusUser box sits above it, so both share this right column.
+    QWidget *m_rightColumn = nullptr;
+    QScrollArea *m_infoArea = nullptr;
+    HistoryInfoPanel *m_infoPanel = nullptr;
+    QString m_activeApplication;
     QList<HistoryAppUsage> m_lastPrograms;
     QList<HistoryAppUsage> m_lastWebPages;
     QTimer *m_refreshTimer = nullptr;
@@ -214,4 +182,5 @@ private:
     // requestCategories/setAppCategory calls, keyed by streamId not day) --
     // shared so category edits made here show up in History and vice versa.
     QHash<QString, QString> m_categories;
+    QHash<QString, QString> m_employeeCategories;
 };

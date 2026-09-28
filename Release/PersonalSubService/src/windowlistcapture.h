@@ -38,6 +38,11 @@ signals:
     // Emitted once, the first time a given window is seen (its streamId
     // stays stable for as long as the window stays open).
     void windowDiscovered(quint32 streamId, const QString &title);
+    // Emitted once, the tick after the window stops being enumerable
+    // (closed, or no longer alt-tab eligible) -- the authoritative "this
+    // stream is gone" signal, since a background window's frame otherwise
+    // never updates again on its own (see the class comment).
+    void windowClosed(quint32 streamId);
     void frameCaptured(quint32 streamId, const QImage &image);
     // Temporary diagnostic: which window a capture attempt was for and
     // whether/why it failed, to tell apart "PrintWindow genuinely can't

@@ -85,6 +85,13 @@ signals:
                     qint64 latencyMs);
     void metadataChanged(quint32 streamId, const QString &application,
                          const QString &idleText);
+    // See MessageType::StreamClosed -- this streamId is gone for good
+    // (its WindowListCapture window closed). MainWindow removes the
+    // MonitorWidget and drops it from every tile/DeviceDetailView that
+    // could be showing it, instead of guessing from missing frames (which
+    // never arrive again for a backgrounded window even while it's still
+    // open -- see windowlistcapture.cpp).
+    void monitorClosed(quint32 streamId);
     void protocolError(const QString &message);
 
     void historyDaysReceived(quint32 streamId, const QStringList &days);

@@ -215,6 +215,7 @@ bool SessionManager::launchSubService(quint32 sessionId, const QString &username
             &SessionManager::onMetadataChanged);
     connect(entry.ingest, &SessionIngest::keystrokeReceived, this,
             &SessionManager::onKeystrokeReceived);
+    connect(entry.ingest, &SessionIngest::streamClosed, this, &SessionManager::onStreamClosed);
     connect(entry.ingest, &SessionIngest::ingestDisconnected, this,
             &SessionManager::onIngestDisconnected);
     connect(entry.ingest, &SessionIngest::connectFailed, this,
@@ -309,6 +310,28 @@ void SessionManager::onMonitorDiscovered(quint32 sessionId, quint32 localStreamI
     info.isWindow = isWindow;
     m_globalMonitors.insert(globalId, info);
     rebuildAndBroadcastMonitors();
+}
+
+void SessionManager::onStreamClosed(quint32 sessionId, quint32 localStreamId)
+{
+    auto it = m_sessions.find(sessionId);
+    if (it == m_sessions.end()) {
+        return;
+    }
+    SessionEntry &entry = it.value();
+    const quint32 globalId = entry.localToGlobal.take(localStreamId);
+    if (globalId == 0) {
+        return;
+    }
+    m_globalMonitors.remove(globalId);
+    // rebuildAndBroadcastMonitors() only re-announces streams that still
+    // exist -- a viewer that already has this one would just keep it
+    // forever (nothing tells it to remove it), which is exactly the
+    // "Programs" ghost-entry bug this whole message type exists to fix. So
+    // this is the one place that also needs an explicit removal broadcast.
+    if (m_server) {
+        m_server->broadcastStreamClosed(globalId);
+    }
 }
 
 void SessionManager::onFrameReady(quint32 sessionId, quint32 localStreamId, const QImage &image)

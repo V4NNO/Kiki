@@ -57,6 +57,8 @@ public:
     // WindowListCapture::kStreamBase), the same way pushMonitorList()
     // announces real monitors -- called once per discovered window.
     void pushWindowAnnounce(quint32 streamId, const QString &title);
+    // Retires one WindowListCapture stream -- see MessageType::StreamClosed.
+    void pushWindowClosed(quint32 streamId);
     void pushFrame(quint32 streamId, const QImage &image);
     // url is empty when the foreground app isn't a recognized browser, or
     // URL extraction failed -- see BrowserUrlProbe.

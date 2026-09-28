@@ -5,21 +5,14 @@
 #include <QList>
 #include <QWidget>
 
-class QHBoxLayout;
-class QToolButton;
 class QTimer;
-class QVariantAnimation;
 
-// A single tile in the Tracker grid representing one DEVICE/session, not
-// one per monitor (see MainWindow's per-session grouping). Shows a live
-// thumbnail of whichever stream is currently selected (one of the device's
-// monitors, its active-window preview, or auto-rotating through the
-// monitors) plus its display name -- matches the real Kickidler viewer's
-// TrackerQuadratorFullCell header video selector (videoSelector/
-// ButtonDisplayByIndex.qml, ButtonActiveWindow.qml, ButtonRotator.qml).
-// MonitorWidget instances themselves stay hidden/off-grid until the device
-// is opened into DeviceDetailView -- this tile keeps its own lightweight
-// copy of the latest frame per stream instead of embedding a MonitorWidget.
+// TrackerQuadratorFullCell.qml: one employee's tile in the Tracker grid.
+// 16px header (header/bg.png) with the VideoSelector image buttons on the
+// left (winmode / mon<N> / automode / rotationmode, or the row of every
+// monitor after picking one), the caption centered, then line.png and the
+// close button; below it the selected stream's live frame, or StatusIcon
+// when there's nothing to show. Right-click: Clear / Enlarge / History.
 class DeviceTileWidget final : public QWidget
 {
     Q_OBJECT
@@ -31,36 +24,53 @@ public:
     quint32 sessionKey() const { return m_sessionKey; }
     void setDisplayName(const QString &displayName);
     // Cached per stream regardless of selection, so switching which stream
-    // is shown is instant (no waiting for the next frame of that stream).
+    // is shown is instant.
     void updateThumbnail(quint32 streamId, const QImage &image);
-    // monitorStreamIds: this device's monitor streams, in order (index 0 ->
-    // "1" button, index 1 -> "2" button, ...). windowStreamId: the device's
-    // WindowListCapture active-window preview stream, or 0 if it doesn't
-    // have one (yet).
+    // monitorStreamIds: this device's monitor streams, in order (mon1, mon2,
+    // ...). windowStreamId: its active-window preview stream, or 0.
     void setAvailableStreams(const QList<quint32> &monitorStreamIds, quint32 windowStreamId);
-    // StatusIcon.qml equivalent -- PersonalHost's WTS session state
-    // ("active"/"connected"/"disconnected"/"idle"/"other", see
-    // sessionmanager.cpp's wtsStateToString). The real viewer distinguishes
-    // more states (locked screen, screensaver, "video watch disabled",
-    // removed employee) that PersonalHost doesn't report yet -- those all
-    // still fall back to the generic "connecting" placeholder here.
+    // PersonalHost's WTS session state ("active"/"connected"/"disconnected"/
+    // "idle"/"other"), mapped onto StatusIcon kinds.
     void setSessionState(const QString &state);
+    // The grabber's live activity: the foreground application, its idle
+    // text ("Idle hh:mm:ss" / "Locked hh:mm:ss" / empty) and that
+    // application's efficiency category -- drives ViolationsTimer, the
+    // ViolationsAlerts application line and the rating-colored border.
+    void setActivity(const QString &application, const QString &idleText, const QString &category);
 
 signals:
     void opened(quint32 sessionKey);
+    // header close button / "Clear" (fullCell.wantFree)
+    void closeRequested();
+    // "History" (fullCell.wantActivationHistory)
+    void historyRequested(quint32 sessionKey);
 
 protected:
     void paintEvent(QPaintEvent *event) override;
     void mousePressEvent(QMouseEvent *event) override;
-    void resizeEvent(QResizeEvent *event) override;
+    void mouseReleaseEvent(QMouseEvent *event) override;
+    void mouseMoveEvent(QMouseEvent *event) override;
+    void leaveEvent(QEvent *event) override;
+    void contextMenuEvent(QContextMenuEvent *event) override;
+    bool event(QEvent *event) override;
     QSize sizeHint() const override;
 
 private:
-    QRect imageTargetRect() const;
-    void rebuildSelectorButtons();
-    void refreshButtonStyles();
+    struct SelectorButton {
+        QRect rect;
+        QString kind;          // asset prefix: winmode, mon1..mon9, automode, rotationmode
+        int monitorIndex = -1; // for mon buttons
+        bool enabled = true;
+        bool checked = false;
+        QString tooltip;
+    };
+    QList<SelectorButton> selectorButtons() const;
+    int selectorRight() const;
+    QRect closeRect() const;
+    QRect contentRect() const;
+    QString statusKind() const;
+    void clickSelector(const SelectorButton &button);
     void selectStream(quint32 streamId);
-    void enableAutoRotate();
 
     quint32 m_sessionKey;
     QString m_displayName;
@@ -68,30 +78,26 @@ private:
     QList<quint32> m_monitorStreamIds;
     quint32 m_windowStreamId = 0;
     quint32 m_selectedStream = 0;
+    // VideoSelector.qml's "monitors" state: every monitor's button instead
+    // of the general row, after clicking the current monitor's button.
+    bool m_showMonitors = false;
     bool m_autoRotate = false;
     int m_autoRotateIndex = 0;
     QTimer *m_autoRotateTimer = nullptr;
     QString m_sessionState;
-
-    QWidget *m_selectorBar = nullptr;
-    QHBoxLayout *m_selectorLayout = nullptr;
-    QList<QToolButton *> m_monitorButtons;
-    QToolButton *m_windowButton = nullptr;
-    QToolButton *m_autoButton = nullptr;
-    // VideoSelector.qml's ~750ms eased highlight transition when the
-    // selected stream changes -- we fade the newly-active button's
-    // background in rather than snapping it, everything else still snaps
-    // (a full crossfade of the video itself would need double-buffering the
-    // thumbnail, out of scope for this pass).
-    QVariantAnimation *m_selectorHighlightAnim = nullptr;
-    QToolButton *m_animatingButton = nullptr;
+    QString m_application;
+    QString m_category;
+    bool m_locked = false;
+    qint64 m_idleSinceMs = 0; // 0 = not idle
+    QTimer *m_idleTicker = nullptr;
+    QPoint m_hover{-1, -1};
+    QPoint m_pressPos{-1, -1};
 };
 
-// The "+" tile that lets the user add a device to the current tab. Matches
-// the original's own behavior once a tab is full (confirmed from the real
-// Kickidler viewer's extracted QML, TrackerGridsPanel/quadratorEmptyCell:
-// `cellsLimitReached` just dims the "+" and swaps its tooltip -- it does
-// NOT auto-switch tabs -- see setLimitReached().
+// TrackerQuadratorEmptyCell.qml: the tile that adds an employee to the
+// tab -- #45464d with the same edge lines and the plus_*.png button
+// centered. Once the tab is full the plus stays in its normal state and only
+// its tooltip changes (cellsLimitReached).
 class AddDeviceTileWidget final : public QWidget
 {
     Q_OBJECT
@@ -107,8 +113,15 @@ signals:
 protected:
     void paintEvent(QPaintEvent *event) override;
     void mousePressEvent(QMouseEvent *event) override;
+    void mouseReleaseEvent(QMouseEvent *event) override;
+    void mouseMoveEvent(QMouseEvent *event) override;
+    void leaveEvent(QEvent *event) override;
     QSize sizeHint() const override;
 
 private:
+    QRect plusRect() const;
+
     bool m_limitReached = false;
+    bool m_hovered = false;
+    bool m_pressed = false;
 };

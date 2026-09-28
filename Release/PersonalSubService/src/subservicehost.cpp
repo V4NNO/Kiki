@@ -160,6 +160,15 @@ void SubServiceHost::pushWindowAnnounce(quint32 streamId, const QString &title)
                                      {QStringLiteral("isWindow"), true}}}});
 }
 
+void SubServiceHost::pushWindowClosed(quint32 streamId)
+{
+    if (!m_socket) {
+        return;
+    }
+    m_socket->write(ViewerProtocol::encodeMessage(ViewerProtocol::MessageType::StreamClosed,
+                                                  streamId, 0, QByteArray()));
+}
+
 void SubServiceHost::pushFrame(quint32 streamId, const QImage &image)
 {
     if (!m_socket || image.isNull()) {

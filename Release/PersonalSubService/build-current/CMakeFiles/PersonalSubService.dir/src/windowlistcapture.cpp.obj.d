@@ -383,6 +383,7 @@ CMakeFiles/PersonalSubService.dir/src/windowlistcapture.cpp.obj: \
  C:/Qt/6.11.2/mingw_64/include/QtCore/qalloc.h \
  C:/Qt/6.11.2/mingw_64/include/QtCore/QHash \
  C:/Qt/6.11.2/mingw_64/include/QtCore/QSet \
+ C:/Qt/6.11.2/mingw_64/include/QtCore/QStringList \
  C:/Qt/6.11.2/mingw_64/include/QtCore/QTimer \
  C:/Qt/6.11.2/mingw_64/include/QtCore/qtimer.h \
  C:/Qt/6.11.2/mingw_64/include/QtCore/qbasictimer.h \

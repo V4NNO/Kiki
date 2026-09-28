@@ -1,54 +1,71 @@
 #include "devicetilewidget.h"
 
-#include <QHBoxLayout>
+#include <QContextMenuEvent>
+#include <QDateTime>
+#include <QHelpEvent>
+#include <QMenu>
 #include <QMouseEvent>
 #include <QPainter>
 #include <QTimer>
-#include <QToolButton>
-#include <QVariantAnimation>
+#include <QToolTip>
 
 namespace {
-// Real TrackerQuadratorFullCell.qml header is `height: 16` with the video
-// selector and caption side by side in that ONE row (not stacked) -- 20px
-// here as a small, deliberate concession to Qt Widgets button hit-testing
-// (16px was too cramped to stay clickable), but same single-row layout.
-constexpr int kHeaderHeight = 20;
+// TrackerQuadratorFullCell.qml geometry.
+constexpr int kHeaderTop = 1;    // header anchors.topMargin
+constexpr int kHeaderHeight = 16;
+constexpr int kButtonWidth = 14; // videoSelector/button/*.png
+constexpr int kButtonHeight = 12;
+constexpr int kButtonSpacing = 2;
+constexpr int kSelectorMargin = 3; // VideoSelector contentHolder left/right margin
 constexpr int kAutoRotateIntervalMs = 4000;
-// VideoSelector.qml's transition duration for the active-button highlight.
-constexpr int kSelectorHighlightMs = 750;
 
-QString selectorButtonStyle(bool active)
+QPixmap asset(const QString &path)
 {
-    return active ? QStringLiteral("QToolButton { background: #1da06f; color: white; border: none; "
-                                   "font-size: 8pt; font-weight: 700; }")
-                  : QStringLiteral("QToolButton { background: #55575f; color: #d7dadd; border: none; "
-                                   "font-size: 8pt; }"
-                                   "QToolButton:hover { background: #63656d; }");
+    static QHash<QString, QPixmap> cache;
+    auto it = cache.find(path);
+    if (it == cache.end()) {
+        it = cache.insert(path, QPixmap(QStringLiteral(":/tracker/") + path));
+    }
+    return it.value();
 }
 
-QString selectorButtonStyleWithColor(const QColor &color)
+QFont captionFont() // Fonts.rb_medium_b
 {
-    return QStringLiteral("QToolButton { background: %1; color: white; border: none; "
-                          "font-size: 8pt; font-weight: 700; }").arg(color.name());
+    QFont font(QStringLiteral("Roboto"));
+    font.setPixelSize(11);
+    font.setBold(true);
+    return font;
 }
 
-// StatusIcon.qml equivalent -- only the states PersonalHost actually reports
-// today (see sessionmanager.cpp's wtsStateToString) get a distinct label;
-// everything else (locked screen, screensaver, "video watch disabled",
-// removed employee -- all present in the real app) falls back to the
-// generic "connecting" placeholder until the grabber reports them too.
-QString statusLabelForState(const QString &state)
+// ActiveApplicationRanker.statusToColor (the bright variants), white when
+// the application isn't categorized.
+QColor ratingColor(const QString &category)
 {
-    if (state == QStringLiteral("disconnected")) {
-        return QStringLiteral("Sesiune deconectata");
+    if (category == QStringLiteral("productive")) {
+        return QColor(0x28, 0xa5, 0x70);
     }
-    if (state == QStringLiteral("idle")) {
-        return QStringLiteral("Inactiv");
+    if (category == QStringLiteral("neutral")) {
+        return QColor(0xec, 0xbd, 0x0b);
     }
-    if (state == QStringLiteral("other")) {
-        return QStringLiteral("Stare necunoscuta");
+    if (category == QStringLiteral("unproductive")) {
+        return QColor(0xcc, 0x55, 0x4a);
     }
-    return QString(); // "active"/"connected"/empty -- normal video, no badge
+    return QColor(Qt::white);
+}
+
+QString statusText(const QString &kind)
+{
+    // utils/StatusIcon.qml texts for the kinds this system can report.
+    if (kind == QStringLiteral("offline")) {
+        return QStringLiteral("Offline");
+    }
+    if (kind == QStringLiteral("noSessions")) {
+        return QStringLiteral("No session");
+    }
+    if (kind == QStringLiteral("lock")) {
+        return QStringLiteral("Locked screen");
+    }
+    return QStringLiteral("No video"); // emptyStream
 }
 }
 
@@ -56,21 +73,10 @@ DeviceTileWidget::DeviceTileWidget(quint32 sessionKey, const QString &displayNam
     : QWidget(parent), m_sessionKey(sessionKey), m_displayName(displayName)
 {
     setMinimumSize(245, 155);
-    setCursor(Qt::PointingHandCursor);
+    setMouseTracking(true);
     setAttribute(Qt::WA_OpaquePaintEvent);
 
-    // Video selector row (matches TrackerQuadratorFullCell's header
-    // videoSelector: numbered monitor buttons, an active-window button, an
-    // auto-rotate button) -- built lazily in rebuildSelectorButtons() once
-    // we know how many streams this device actually has; hidden entirely
-    // for the common single-monitor case.
-    m_selectorBar = new QWidget(this);
-    m_selectorBar->hide();
-    m_selectorLayout = new QHBoxLayout(m_selectorBar);
-    m_selectorLayout->setContentsMargins(4, 1, 4, 1);
-    m_selectorLayout->setSpacing(2);
-    m_selectorLayout->addStretch();
-
+    // ButtonRotator: cycles through the monitors.
     m_autoRotateTimer = new QTimer(this);
     m_autoRotateTimer->setInterval(kAutoRotateIntervalMs);
     connect(m_autoRotateTimer, &QTimer::timeout, this, [this]() {
@@ -81,6 +87,29 @@ DeviceTileWidget::DeviceTileWidget(quint32 sessionKey, const QString &displayNam
         m_selectedStream = m_monitorStreamIds.at(m_autoRotateIndex);
         update();
     });
+    // ViolationsTimer counts up every second between grabber updates.
+    m_idleTicker = new QTimer(this);
+    m_idleTicker->setInterval(1000);
+    connect(m_idleTicker, &QTimer::timeout, this, [this] { update(contentRect()); });
+}
+
+void DeviceTileWidget::setActivity(const QString &application, const QString &idleText,
+                                   const QString &category)
+{
+    m_application = application;
+    m_category = category;
+    m_locked = idleText.startsWith(QStringLiteral("Locked "));
+    const QString clock = idleText.section(QLatin1Char(' '), 1);
+    const QStringList parts = clock.split(QLatin1Char(':'));
+    if (parts.size() == 3) {
+        const qint64 seconds = parts.at(0).toLongLong() * 3600 + parts.at(1).toLongLong() * 60 + parts.at(2).toLongLong();
+        m_idleSinceMs = QDateTime::currentMSecsSinceEpoch() - seconds * 1000;
+        m_idleTicker->start();
+    } else {
+        m_idleSinceMs = 0;
+        m_idleTicker->stop();
+    }
+    update();
 }
 
 void DeviceTileWidget::setDisplayName(const QString &displayName)
@@ -93,97 +122,262 @@ void DeviceTileWidget::updateThumbnail(quint32 streamId, const QImage &image)
 {
     m_thumbnailsByStream.insert(streamId, image);
     if (streamId == m_selectedStream) {
-        update();
+        update(contentRect());
     }
 }
 
 void DeviceTileWidget::setAvailableStreams(const QList<quint32> &monitorStreamIds, quint32 windowStreamId)
 {
-    const bool streamsChanged =
-        monitorStreamIds != m_monitorStreamIds || windowStreamId != m_windowStreamId;
-    if (!streamsChanged) {
+    if (monitorStreamIds == m_monitorStreamIds && windowStreamId == m_windowStreamId) {
         return;
     }
     m_monitorStreamIds = monitorStreamIds;
     m_windowStreamId = windowStreamId;
-
-    // Keep the current selection if it's still valid; otherwise fall back
-    // to the first monitor (matches the original defaulting to "mon0").
-    const bool selectionStillValid =
-        m_monitorStreamIds.contains(m_selectedStream) || m_selectedStream == m_windowStreamId;
-    if (!selectionStillValid) {
+    // Keep the selection while it's still valid, else the first monitor.
+    if (!m_monitorStreamIds.contains(m_selectedStream) && m_selectedStream != m_windowStreamId) {
         m_selectedStream = m_monitorStreamIds.value(0, 0);
         m_autoRotate = false;
         m_autoRotateTimer->stop();
     }
-
-    rebuildSelectorButtons();
+    m_showMonitors = m_showMonitors && m_monitorStreamIds.size() > 1;
     update();
 }
 
-void DeviceTileWidget::rebuildSelectorButtons()
+void DeviceTileWidget::setSessionState(const QString &state)
 {
-    qDeleteAll(m_monitorButtons);
-    m_monitorButtons.clear();
-    delete m_windowButton;
-    m_windowButton = nullptr;
-    delete m_autoButton;
-    m_autoButton = nullptr;
-
-    // Only worth showing a selector once there's an actual choice -- a
-    // single-monitor device with no window preview just shows its one
-    // stream, same as before.
-    const bool needsSelector = m_monitorStreamIds.size() > 1 || m_windowStreamId != 0;
-    m_selectorBar->setVisible(needsSelector);
-    if (!needsSelector) {
-        return;
+    if (m_sessionState != state) {
+        m_sessionState = state;
+        update();
     }
-
-    for (int i = 0; i < m_monitorStreamIds.size(); ++i) {
-        const quint32 streamId = m_monitorStreamIds.at(i);
-        auto *button = new QToolButton(m_selectorBar);
-        button->setText(QString::number(i + 1));
-        button->setFixedSize(18, 16);
-        button->setToolTip(QStringLiteral("Monitor %1").arg(i + 1));
-        connect(button, &QToolButton::clicked, this, [this, streamId]() { selectStream(streamId); });
-        m_selectorLayout->insertWidget(m_selectorLayout->count() - 1, button);
-        m_monitorButtons.append(button);
-    }
-
-    if (m_windowStreamId != 0) {
-        m_windowButton = new QToolButton(m_selectorBar);
-        m_windowButton->setText(QStringLiteral("W"));
-        m_windowButton->setFixedSize(18, 16);
-        m_windowButton->setToolTip(QStringLiteral("Fereastra activa"));
-        const quint32 windowStreamId = m_windowStreamId;
-        connect(m_windowButton, &QToolButton::clicked, this,
-               [this, windowStreamId]() { selectStream(windowStreamId); });
-        m_selectorLayout->insertWidget(m_selectorLayout->count() - 1, m_windowButton);
-    }
-
-    if (m_monitorStreamIds.size() > 1) {
-        m_autoButton = new QToolButton(m_selectorBar);
-        m_autoButton->setText(QStringLiteral("A"));
-        m_autoButton->setFixedSize(18, 16);
-        m_autoButton->setToolTip(QStringLiteral("Rotire automata intre monitoare"));
-        connect(m_autoButton, &QToolButton::clicked, this, &DeviceTileWidget::enableAutoRotate);
-        m_selectorLayout->insertWidget(m_selectorLayout->count() - 1, m_autoButton);
-    }
-
-    refreshButtonStyles();
 }
 
-void DeviceTileWidget::refreshButtonStyles()
+QString DeviceTileWidget::statusKind() const
 {
-    for (int i = 0; i < m_monitorButtons.size(); ++i) {
-        const bool active = !m_autoRotate && m_monitorStreamIds.value(i, 0) == m_selectedStream;
-        m_monitorButtons.at(i)->setStyleSheet(selectorButtonStyle(active));
+    if (m_sessionState == QStringLiteral("disconnected")) {
+        return QStringLiteral("offline");
     }
-    if (m_windowButton) {
-        m_windowButton->setStyleSheet(selectorButtonStyle(!m_autoRotate && m_selectedStream == m_windowStreamId));
+    if (m_sessionState == QStringLiteral("idle") || m_sessionState == QStringLiteral("other")) {
+        return QStringLiteral("noSessions");
     }
-    if (m_autoButton) {
-        m_autoButton->setStyleSheet(selectorButtonStyle(m_autoRotate));
+    if (m_locked) {
+        return QStringLiteral("lock");
+    }
+    return m_thumbnailsByStream.value(m_selectedStream).isNull() ? QStringLiteral("emptyStream") : QString();
+}
+
+QList<DeviceTileWidget::SelectorButton> DeviceTileWidget::selectorButtons() const
+{
+    // VideoSelector is only there while there's live video (statusIcon kind
+    // "null"); General row: winmode, the current mon<N>, automode,
+    // rotationmode. Monitors row: every mon<N> (at most 8).
+    QList<SelectorButton> buttons;
+    const QString kind = statusKind();
+    if (m_monitorStreamIds.isEmpty()
+        || (!kind.isEmpty() && kind != QStringLiteral("emptyStream") && kind != QStringLiteral("lock"))) {
+        return buttons;
+    }
+    const int currentMonitor = qMax(0, m_monitorStreamIds.indexOf(m_selectedStream));
+    const bool monitorSelected = !m_autoRotate && m_monitorStreamIds.contains(m_selectedStream);
+    const auto monitorButton = [&](int index) {
+        SelectorButton button;
+        button.kind = QStringLiteral("mon%1").arg(qMin(9, index + 1));
+        button.monitorIndex = index;
+        button.checked = monitorSelected && index == currentMonitor;
+        button.tooltip = QStringLiteral("Monitor %1").arg(index + 1);
+        return button;
+    };
+    if (m_showMonitors) {
+        for (int i = 0; i < qMin(8, int(m_monitorStreamIds.size())); ++i) {
+            buttons.append(monitorButton(i));
+        }
+    } else {
+        SelectorButton window;
+        window.kind = QStringLiteral("winmode");
+        window.enabled = m_windowStreamId != 0;
+        window.checked = !m_autoRotate && m_windowStreamId != 0 && m_selectedStream == m_windowStreamId;
+        window.tooltip = QStringLiteral("Active window");
+        buttons.append(window);
+        buttons.append(monitorButton(currentMonitor));
+        SelectorButton activeDisplay;
+        activeDisplay.kind = QStringLiteral("automode");
+        // "Follow the display with the active window" -- which display
+        // that is isn't reported by the grabber, so it stays disabled.
+        activeDisplay.enabled = false;
+        activeDisplay.tooltip = QStringLiteral("Active display");
+        buttons.append(activeDisplay);
+        SelectorButton rotator;
+        rotator.kind = QStringLiteral("rotationmode");
+        rotator.enabled = m_monitorStreamIds.size() > 1;
+        rotator.checked = m_autoRotate;
+        rotator.tooltip = QStringLiteral("Rotate displays");
+        buttons.append(rotator);
+    }
+    int x = 1 + kSelectorMargin;
+    const int y = kHeaderTop + (kHeaderHeight - kButtonHeight) / 2;
+    for (SelectorButton &button : buttons) {
+        button.rect = QRect(x, y, kButtonWidth, kButtonHeight);
+        x += kButtonWidth + kButtonSpacing;
+    }
+    return buttons;
+}
+
+int DeviceTileWidget::selectorRight() const
+{
+    const QList<SelectorButton> buttons = selectorButtons();
+    return buttons.isEmpty() ? 1 : buttons.last().rect.right() + 1 + kSelectorMargin;
+}
+
+QRect DeviceTileWidget::closeRect() const
+{
+    return QRect(width() - 1 - 16, kHeaderTop, 16, 16);
+}
+
+QRect DeviceTileWidget::contentRect() const
+{
+    const int top = kHeaderTop + kHeaderHeight;
+    return QRect(1, top, width() - 2, height() - top);
+}
+
+void DeviceTileWidget::paintEvent(QPaintEvent *)
+{
+    QPainter painter(this);
+    painter.fillRect(rect(), QColor(0x45, 0x46, 0x4d));
+
+    // Content: the live frame (PreserveAspectFit), or StatusIcon.
+    const QRect content = contentRect();
+    const QString kind = statusKind();
+    if (kind.isEmpty()) {
+        const QImage frame = m_thumbnailsByStream.value(m_selectedStream);
+        QSize size = frame.size();
+        size.scale(content.size(), Qt::KeepAspectRatio);
+        painter.setRenderHint(QPainter::SmoothPixmapTransform);
+        painter.drawImage(QRect(content.left() + (content.width() - size.width()) / 2,
+                                content.top() + (content.height() - size.height()) / 2, size.width(),
+                                size.height()),
+                          frame);
+    } else {
+        // StatusIcon: normal_<kind>.png over the 9pt bold #38373d text,
+        // spacing 10, centered.
+        const QPixmap icon = asset(QStringLiteral("statusIcon/normal_%1.png").arg(kind));
+        QFont font(QStringLiteral("Roboto"));
+        font.setPointSize(9);
+        font.setBold(true);
+        const QFontMetrics metrics(font);
+        const int blockHeight = icon.height() + 10 + metrics.height();
+        const int top = content.center().y() - blockHeight / 2;
+        painter.drawPixmap(content.center().x() - icon.width() / 2, top, icon);
+        painter.setFont(font);
+        painter.setPen(QColor(0x38, 0x37, 0x3d));
+        painter.drawText(QRect(content.left(), top + icon.height() + 10, content.width(), metrics.height()),
+                         Qt::AlignHCenter | Qt::AlignTop, statusText(kind));
+    }
+
+    // ViolationsTimer: a #404147 veil at 0.6 with the idle/locked time
+    // centered, in the rating color (else #f5f5f5), size scaled to the
+    // tile, drop shadow.
+    if (m_idleSinceMs > 0 && kind != QStringLiteral("offline") && kind != QStringLiteral("noSessions")) {
+        QColor veil(0x40, 0x41, 0x47);
+        veil.setAlphaF(0.6);
+        painter.fillRect(content, veil);
+        const qint64 seconds = qMax<qint64>(0, (QDateTime::currentMSecsSinceEpoch() - m_idleSinceMs) / 1000);
+        const QString time = QStringLiteral("%1:%2:%3")
+                                 .arg(seconds / 3600, 2, 10, QLatin1Char('0'))
+                                 .arg((seconds / 60) % 60, 2, 10, QLatin1Char('0'))
+                                 .arg(seconds % 60, 2, 10, QLatin1Char('0'));
+        QFont timeFont(QStringLiteral("Roboto Medium"));
+        timeFont.setPointSizeF(qMin(30.0, qMax(qMin(content.width(), content.height()) / 6.0, 8.0)));
+        painter.setFont(timeFont);
+        painter.setPen(QColor(0, 0, 0, 0x40));
+        painter.drawText(content.translated(1, 1), Qt::AlignCenter, time);
+        const bool rated = m_category == QStringLiteral("productive") || m_category == QStringLiteral("unproductive")
+                        || m_category == QStringLiteral("neutral");
+        painter.setPen(rated ? ratingColor(m_category) : QColor(0xf5, 0xf5, 0xf5));
+        painter.drawText(content, Qt::AlignCenter, time);
+    }
+
+    // ViolationsAlerts, application line only (there are no violation
+    // filters in this system): #404147 at 0.75, 16px, "!" 9px in, then the
+    // application 11px after it, both in the rating color.
+    if (!m_application.isEmpty() && kind != QStringLiteral("offline") && kind != QStringLiteral("noSessions")) {
+        const QRect strip(content.left(), content.bottom() - 15, content.width(), 16);
+        QColor stripColor(0x40, 0x41, 0x47);
+        stripColor.setAlphaF(0.75);
+        painter.fillRect(strip, stripColor);
+        QFont bang(QStringLiteral("Roboto"));
+        bang.setPixelSize(12);
+        bang.setBold(true);
+        painter.setFont(bang);
+        painter.setPen(ratingColor(m_category));
+        const int bangWidth = QFontMetrics(bang).horizontalAdvance(QStringLiteral("!"));
+        painter.drawText(QRect(strip.left() + 9, strip.top(), bangWidth + 1, strip.height()),
+                         Qt::AlignLeft | Qt::AlignVCenter, QStringLiteral("!"));
+        QFont appFont(QStringLiteral("Roboto"));
+        appFont.setPixelSize(11);
+        appFont.setBold(true);
+        painter.setFont(appFont);
+        const int textLeft = strip.left() + 9 + bangWidth + 11;
+        const QRect textRect(textLeft, strip.top(), strip.right() - textLeft, strip.height());
+        painter.drawText(textRect, Qt::AlignLeft | Qt::AlignVCenter,
+                         QFontMetrics(appFont).elidedText(m_application, Qt::ElideMiddle, textRect.width()));
+    }
+
+    // Header strip and its edges.
+    const QRect header(1, kHeaderTop, width() - 2, kHeaderHeight);
+    painter.drawTiledPixmap(header, asset(QStringLiteral("header/bg.png")));
+    QColor underline(0x3b, 0x3c, 0x42);
+    underline.setAlphaF(0.9);
+    painter.fillRect(QRect(0, header.bottom() + 1, width(), 1), underline);
+    underline.setAlphaF(0.5);
+    painter.fillRect(QRect(0, header.bottom() + 2, width(), 1), underline);
+
+    // VideoSelector + line.png.
+    const QList<SelectorButton> buttons = selectorButtons();
+    for (const SelectorButton &button : buttons) {
+        QString state = QStringLiteral("normal");
+        if (!button.enabled) {
+            state = QStringLiteral("disabled");
+        } else if (button.rect.contains(m_pressPos) && button.rect.contains(m_hover)) {
+            state = QStringLiteral("pressed");
+        } else if (button.checked) {
+            state = QStringLiteral("activated");
+        } else if (button.rect.contains(m_hover)) {
+            state = QStringLiteral("hovered");
+        }
+        painter.drawPixmap(button.rect.topLeft(),
+                           asset(QStringLiteral("videoSelector/%1_%2.png").arg(button.kind, state)));
+    }
+    const QPixmap line = asset(QStringLiteral("header/line.png"));
+    const int captionLeft = buttons.isEmpty() ? 1 : selectorRight();
+    if (!buttons.isEmpty()) {
+        painter.drawPixmap(captionLeft, kHeaderTop, line);
+    }
+
+    // Caption centered between the selector and the right separator.
+    const QRect close = closeRect();
+    const int captionRight = close.left() - line.width();
+    const QRect captionArea(captionLeft + (buttons.isEmpty() ? 0 : line.width()), kHeaderTop,
+                            captionRight - captionLeft - (buttons.isEmpty() ? 0 : line.width()), kHeaderHeight);
+    painter.setFont(captionFont());
+    painter.setPen(Qt::white);
+    painter.drawText(captionArea, Qt::AlignCenter,
+                     QFontMetrics(captionFont()).elidedText(m_displayName, Qt::ElideRight, captionArea.width()));
+    painter.drawPixmap(captionRight, kHeaderTop, line);
+    const QString closeState = close.contains(m_pressPos) && close.contains(m_hover) ? QStringLiteral("pressed")
+                             : close.contains(m_hover)                               ? QStringLiteral("hovered")
+                                                                                       : QStringLiteral("normal");
+    painter.drawPixmap(close.topLeft(), asset(QStringLiteral("header/bclose_%1.png").arg(closeState)));
+
+    // Cell edges: #33343a top, #414248 sides.
+    painter.fillRect(QRect(0, 0, width(), 1), QColor(0x33, 0x34, 0x3a));
+    painter.fillRect(QRect(0, 0, 1, height()), QColor(0x41, 0x42, 0x48));
+    painter.fillRect(QRect(width() - 1, 0, 1, height()), QColor(0x41, 0x42, 0x48));
+
+    // cellBackground's forced highlight: a 1px border in the rating color
+    // while the active application is rated Productive or NonProductive.
+    if (m_category == QStringLiteral("productive") || m_category == QStringLiteral("unproductive")) {
+        painter.setPen(ratingColor(m_category));
+        painter.setBrush(Qt::NoBrush);
+        painter.drawRect(rect().adjusted(0, 0, -1, -1));
     }
 }
 
@@ -192,127 +386,115 @@ void DeviceTileWidget::selectStream(quint32 streamId)
     m_autoRotate = false;
     m_autoRotateTimer->stop();
     m_selectedStream = streamId;
-    refreshButtonStyles();
-
-    if (m_selectorHighlightAnim) {
-        m_selectorHighlightAnim->stop();
-    }
-    m_animatingButton = nullptr;
-    for (int i = 0; i < m_monitorStreamIds.size(); ++i) {
-        if (m_monitorStreamIds.at(i) == streamId) {
-            m_animatingButton = m_monitorButtons.value(i, nullptr);
-            break;
-        }
-    }
-    if (!m_animatingButton && streamId == m_windowStreamId) {
-        m_animatingButton = m_windowButton;
-    }
-    if (m_animatingButton) {
-        m_selectorHighlightAnim = new QVariantAnimation(this);
-        m_selectorHighlightAnim->setStartValue(QColor(0x55, 0x57, 0x5f));
-        m_selectorHighlightAnim->setEndValue(QColor(0x1d, 0xa0, 0x6f));
-        m_selectorHighlightAnim->setDuration(kSelectorHighlightMs);
-        m_selectorHighlightAnim->setEasingCurve(QEasingCurve::OutCubic);
-        QToolButton *button = m_animatingButton;
-        connect(m_selectorHighlightAnim, &QVariantAnimation::valueChanged, this,
-               [button](const QVariant &value) {
-                   if (button) {
-                       button->setStyleSheet(selectorButtonStyleWithColor(value.value<QColor>()));
-                   }
-               });
-        connect(m_selectorHighlightAnim, &QVariantAnimation::finished, this,
-               &DeviceTileWidget::refreshButtonStyles);
-        m_selectorHighlightAnim->start(QAbstractAnimation::DeleteWhenStopped);
-    }
-
     update();
 }
 
-void DeviceTileWidget::setSessionState(const QString &state)
+void DeviceTileWidget::clickSelector(const SelectorButton &button)
 {
-    if (m_sessionState == state) {
+    if (!button.enabled) {
         return;
     }
-    m_sessionState = state;
-    update();
-}
-
-void DeviceTileWidget::enableAutoRotate()
-{
-    m_autoRotate = true;
-    m_autoRotateIndex = qMax(0, m_monitorStreamIds.indexOf(m_selectedStream));
-    m_autoRotateTimer->start();
-    refreshButtonStyles();
-    update();
-}
-
-void DeviceTileWidget::resizeEvent(QResizeEvent *event)
-{
-    QWidget::resizeEvent(event);
-    // Selector sits inline at the header's left edge, sized to just its
-    // buttons (not the full tile width) -- the caption text is drawn to
-    // its right, matching the real header's single-row layout.
-    const int selectorWidth = m_selectorBar->isVisible() ? m_selectorBar->sizeHint().width() : 0;
-    m_selectorBar->setGeometry(0, 0, selectorWidth, kHeaderHeight);
-}
-
-void DeviceTileWidget::paintEvent(QPaintEvent *event)
-{
-    // Colors/layout match the real Kickidler viewer's TrackerQuadratorFullCell.qml
-    // (extracted from viewer.exe's own QML, see Src/Viewer_SRC/qml_real):
-    // flat rectangle (no rounding), background #45464d, a 1px darker top
-    // line (#33343a) and 1px side lines (#414248), a single-row header (the
-    // real thing is 16px, selector + caption side by side, not stacked)
-    // in white bold text.
-    Q_UNUSED(event)
-    QPainter painter(this);
-    painter.fillRect(rect(), QColor(0x45, 0x46, 0x4d));
-
-    const int contentTop = kHeaderHeight;
-    const QImage thumbnail = m_thumbnailsByStream.value(m_selectedStream);
-    const QRect target = imageTargetRect();
-    const QString statusLabel = statusLabelForState(m_sessionState);
-    if (!thumbnail.isNull() && statusLabel.isEmpty()) {
-        painter.drawImage(target, thumbnail);
-    } else {
-        // StatusIcon.qml equivalent: replaces the video entirely while the
-        // session isn't in a normal active/connected state, or while we
-        // simply have no frame yet.
-        painter.setRenderHint(QPainter::Antialiasing);
-        const QPoint center(width() / 2, contentTop + (height() - contentTop) / 2);
-        painter.setPen(QPen(QColor(45, 47, 53), 2));
-        painter.setBrush(QColor(61, 62, 70));
-        painter.drawRoundedRect(QRect(center.x() - 26, center.y() - 18, 52, 36), 4, 4);
-        painter.drawRect(center.x() - 6, center.y() + 18, 12, 6);
-        painter.setPen(QColor(50, 51, 58));
-        painter.setFont(QFont(QStringLiteral("Segoe UI"), 8, QFont::DemiBold));
-        painter.drawText(QRect(0, center.y() + 32, width(), 20), Qt::AlignCenter,
-                         statusLabel.isEmpty() ? QStringLiteral("Se conecteaza...") : statusLabel);
+    if (button.monitorIndex >= 0) {
+        // General row: pick this monitor and show all of them (when there's
+        // more than one); Monitors row: pick one and go back.
+        selectStream(m_monitorStreamIds.at(button.monitorIndex));
+        m_showMonitors = !m_showMonitors && m_monitorStreamIds.size() > 1;
+    } else if (button.kind == QStringLiteral("winmode")) {
+        selectStream(m_windowStreamId);
+    } else if (button.kind == QStringLiteral("rotationmode")) {
+        m_autoRotate = true;
+        m_autoRotateIndex = qMax(0, m_monitorStreamIds.indexOf(m_selectedStream));
+        m_autoRotateTimer->start();
     }
-
-    painter.fillRect(QRect(0, 0, width(), kHeaderHeight), QColor(0x38, 0x3a, 0x41));
-    const int captionLeft = (m_selectorBar->isVisible() ? m_selectorBar->width() : 0) + 6;
-    painter.setPen(QColor(0xff, 0xff, 0xff));
-    painter.setFont(QFont(QStringLiteral("Segoe UI"), 9, QFont::DemiBold));
-    painter.drawText(QRect(captionLeft, 0, width() - captionLeft - 8, kHeaderHeight),
-                     Qt::AlignLeft | Qt::AlignVCenter,
-                     painter.fontMetrics().elidedText(m_displayName, Qt::ElideRight,
-                                                      width() - captionLeft - 8));
-
-    painter.setPen(QColor(0x33, 0x34, 0x3a));
-    painter.drawLine(0, 0, width(), 0);
-    painter.drawLine(0, contentTop, width(), contentTop);
-    painter.setPen(QColor(0x41, 0x42, 0x48));
-    painter.drawLine(0, 0, 0, height() - 1);
-    painter.drawLine(width() - 1, 0, width() - 1, height() - 1);
+    update();
 }
 
 void DeviceTileWidget::mousePressEvent(QMouseEvent *event)
 {
     if (event->button() == Qt::LeftButton) {
+        m_pressPos = event->pos();
+        update();
+    }
+}
+
+void DeviceTileWidget::mouseReleaseEvent(QMouseEvent *event)
+{
+    if (event->button() != Qt::LeftButton) {
+        return;
+    }
+    const QPoint press = m_pressPos;
+    m_pressPos = QPoint(-1, -1);
+    update();
+    if (closeRect().contains(press)) {
+        if (closeRect().contains(event->pos())) {
+            emit closeRequested();
+        }
+        return;
+    }
+    for (const SelectorButton &button : selectorButtons()) {
+        if (button.rect.contains(press)) {
+            if (button.rect.contains(event->pos())) {
+                clickSelector(button);
+            }
+            return;
+        }
+    }
+    // TrackerQuadratorCell: clicking the tile activates it.
+    if (rect().contains(event->pos())) {
         emit opened(m_sessionKey);
     }
-    QWidget::mousePressEvent(event);
+}
+
+void DeviceTileWidget::mouseMoveEvent(QMouseEvent *event)
+{
+    m_hover = event->pos();
+    const QRect header(0, 0, width(), kHeaderTop + kHeaderHeight);
+    setCursor(header.contains(m_hover) ? Qt::ArrowCursor : Qt::PointingHandCursor);
+    update(header);
+}
+
+void DeviceTileWidget::leaveEvent(QEvent *)
+{
+    m_hover = QPoint(-1, -1);
+    update();
+}
+
+void DeviceTileWidget::contextMenuEvent(QContextMenuEvent *event)
+{
+    // TrackerQuadratorFullCell's Menu (Support needs a remote-support
+    // feature this system doesn't have, so it isn't offered).
+    QMenu menu(this);
+    menu.addAction(QIcon(asset(QStringLiteral("menu/clear.png"))), QStringLiteral("Clear"), this,
+                   &DeviceTileWidget::closeRequested);
+    menu.addSeparator();
+    menu.addAction(QIcon(asset(QStringLiteral("menu/increase.png"))), QStringLiteral("Enlarge"), this,
+                   [this] { emit opened(m_sessionKey); });
+    menu.addAction(QIcon(asset(QStringLiteral("menu/history.png"))), QStringLiteral("History"), this,
+                   [this] { emit historyRequested(m_sessionKey); });
+    menu.exec(event->globalPos());
+}
+
+bool DeviceTileWidget::event(QEvent *event)
+{
+    if (event->type() == QEvent::ToolTip) {
+        const auto *help = static_cast<QHelpEvent *>(event);
+        QString tip;
+        if (closeRect().contains(help->pos())) {
+            tip = QStringLiteral("Close");
+        }
+        for (const SelectorButton &button : selectorButtons()) {
+            if (button.rect.contains(help->pos())) {
+                tip = button.tooltip;
+            }
+        }
+        if (tip.isEmpty()) {
+            QToolTip::hideText();
+        } else {
+            QToolTip::showText(help->globalPos(), tip, this);
+        }
+        return true;
+    }
+    return QWidget::event(event);
 }
 
 QSize DeviceTileWidget::sizeHint() const
@@ -320,26 +502,12 @@ QSize DeviceTileWidget::sizeHint() const
     return QSize(335, 205);
 }
 
-QRect DeviceTileWidget::imageTargetRect() const
-{
-    const int contentTop = kHeaderHeight;
-    const QImage thumbnail = m_thumbnailsByStream.value(m_selectedStream);
-    if (thumbnail.isNull()) {
-        return QRect(0, contentTop, width(), height() - contentTop);
-    }
-    QSize scaled = thumbnail.size();
-    const QSize available(width(), height() - contentTop);
-    scaled.scale(available, Qt::KeepAspectRatio);
-    return QRect(QPoint((width() - scaled.width()) / 2,
-                        contentTop + (available.height() - scaled.height()) / 2),
-                scaled);
-}
-
 AddDeviceTileWidget::AddDeviceTileWidget(QWidget *parent)
     : QWidget(parent)
 {
     setMinimumSize(245, 155);
-    setCursor(Qt::PointingHandCursor);
+    setMouseTracking(true);
+    setToolTip(QStringLiteral("Add employee"));
 }
 
 void AddDeviceTileWidget::setLimitReached(bool limitReached)
@@ -348,42 +516,65 @@ void AddDeviceTileWidget::setLimitReached(bool limitReached)
         return;
     }
     m_limitReached = limitReached;
-    setToolTip(limitReached
-                   ? QStringLiteral("Limita de device-uri pe acest tab a fost atinsa (25).")
-                   : QString());
-    setCursor(limitReached ? Qt::ArrowCursor : Qt::PointingHandCursor);
+    setToolTip(limitReached ? QStringLiteral("The limit of employees on this tab has been reached")
+                            : QStringLiteral("Add employee"));
     update();
 }
 
-void AddDeviceTileWidget::paintEvent(QPaintEvent *event)
+QRect AddDeviceTileWidget::plusRect() const
 {
-    // Matches the real TrackerQuadratorEmptyCell.qml: flat background
-    // #45464d, thin #33343a/#414248 border lines (no rounding, no dashes --
-    // that was our own invention), a plain centered "+".
-    Q_UNUSED(event)
+    return QRect(width() / 2 - 23, height() / 2 - 23, 46, 46);
+}
+
+void AddDeviceTileWidget::paintEvent(QPaintEvent *)
+{
     QPainter painter(this);
     painter.fillRect(rect(), QColor(0x45, 0x46, 0x4d));
-    painter.setPen(QColor(0x33, 0x34, 0x3a));
-    painter.drawLine(0, 0, width(), 0);
-    painter.setPen(QColor(0x41, 0x42, 0x48));
-    painter.drawLine(0, 0, 0, height() - 1);
-    painter.drawLine(width() - 1, 0, width() - 1, height() - 1);
+    painter.fillRect(QRect(0, 0, width(), 1), QColor(0x33, 0x34, 0x3a));
+    painter.fillRect(QRect(0, 0, 1, height()), QColor(0x41, 0x42, 0x48));
+    painter.fillRect(QRect(width() - 1, 0, 1, height()), QColor(0x41, 0x42, 0x48));
 
-    const QColor iconColor = m_limitReached ? QColor(90, 94, 100) : QColor(0xa2, 0xa2, 0xa4);
-    painter.setRenderHint(QPainter::Antialiasing);
-    painter.setPen(iconColor);
-    painter.setFont(QFont(QStringLiteral("Segoe UI"), 22));
-    painter.drawText(rect(), Qt::AlignCenter, QStringLiteral("+"));
+    QString state = QStringLiteral("normal");
+    if (!m_limitReached && m_pressed && m_hovered) {
+        state = QStringLiteral("pressed");
+    } else if (!m_limitReached && m_hovered) {
+        state = QStringLiteral("hovered");
+    }
+    const QPixmap plus = asset(QStringLiteral("emptyCell/plus_%1.png").arg(state));
+    painter.drawPixmap(width() / 2 - plus.width() / 2, height() / 2 - plus.height() / 2, plus);
 }
 
 void AddDeviceTileWidget::mousePressEvent(QMouseEvent *event)
 {
-    // Real Kickidler behavior once the tab is full: the "+" tile just shows
-    // a "limit reached" tooltip and does nothing -- no auto new tab.
-    if (event->button() == Qt::LeftButton && !m_limitReached) {
+    m_pressed = event->button() == Qt::LeftButton && plusRect().contains(event->pos());
+    update();
+}
+
+void AddDeviceTileWidget::mouseReleaseEvent(QMouseEvent *event)
+{
+    const bool clicked = m_pressed && plusRect().contains(event->pos());
+    m_pressed = false;
+    update();
+    if (clicked && !m_limitReached) {
         emit addRequested();
     }
-    QWidget::mousePressEvent(event);
+}
+
+void AddDeviceTileWidget::mouseMoveEvent(QMouseEvent *event)
+{
+    const bool hovered = plusRect().contains(event->pos());
+    if (hovered != m_hovered) {
+        m_hovered = hovered;
+        setCursor(hovered && !m_limitReached ? Qt::PointingHandCursor : Qt::ArrowCursor);
+        update();
+    }
+}
+
+void AddDeviceTileWidget::leaveEvent(QEvent *)
+{
+    m_hovered = false;
+    m_pressed = false;
+    update();
 }
 
 QSize AddDeviceTileWidget::sizeHint() const

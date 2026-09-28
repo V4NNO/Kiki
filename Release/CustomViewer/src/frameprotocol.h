@@ -36,7 +36,16 @@ enum class MessageType : quint16 {
     // (anywhere, not per-monitor) so it can capture at a low idle FPS when
     // nobody is actually watching live and only spend full FPS while
     // someone is -- see screencapture.cpp/setFps().
-    ViewerCount = 12
+    ViewerCount = 12,
+    // Sub-service -> host -> viewer: this specific streamId is gone for
+    // good (its window closed). Unlike a real monitor (whose count rarely
+    // changes and is safe to infer from "no frame in a while"),
+    // WindowListCapture deliberately never re-sends a frame for a
+    // background window once captured -- see windowlistcapture.cpp -- so
+    // "stale" can't mean "closed" for those. This is the explicit signal
+    // that lets every hop actually remove the stream instead of guessing.
+    // No payload; header.streamId is the one being retired.
+    StreamClosed = 13
 };
 
 struct Header {

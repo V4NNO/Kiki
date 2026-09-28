@@ -293,6 +293,15 @@ void AgentConnection::pushMetadata(quint32 streamId, const QString &application,
                         {QStringLiteral("idle"), idleText}});
 }
 
+void AgentConnection::pushStreamClosed(quint32 streamId)
+{
+    if (!m_authenticated) {
+        return;
+    }
+    m_socket->write(ViewerProtocol::encodeMessage(ViewerProtocol::MessageType::StreamClosed,
+                                                  streamId, 0, QByteArray()));
+}
+
 void AgentConnection::sendJson(ViewerProtocol::MessageType type, quint32 streamId,
                                const QJsonObject &object)
 {

@@ -202,6 +202,15 @@ void SessionIngest::processMessage(const ViewerProtocol::Header &header, const Q
         }
         break;
     }
+    case MessageType::StreamClosed: {
+        if (!m_secretVerified) {
+            return;
+        }
+        m_lastImages.remove(header.streamId);
+        m_lastSequences.remove(header.streamId);
+        emit streamClosed(m_sessionId, header.streamId);
+        break;
+    }
     case MessageType::Heartbeat:
     default:
         break;

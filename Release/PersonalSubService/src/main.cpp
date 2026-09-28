@@ -129,6 +129,8 @@ int main(int argc, char *argv[])
                      &SubServiceHost::pushFrame);
     QObject::connect(&windowCapture, &WindowListCapture::windowDiscovered, &host,
                      &SubServiceHost::pushWindowAnnounce);
+    QObject::connect(&windowCapture, &WindowListCapture::windowClosed, &host,
+                     &SubServiceHost::pushWindowClosed);
     QObject::connect(&windowCapture, &WindowListCapture::logMessage, &application,
                      [](const QString &message) { printLine(message); });
 

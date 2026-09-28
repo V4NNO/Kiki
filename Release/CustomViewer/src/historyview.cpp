@@ -1,7 +1,5 @@
 #include "historyview.h"
 
-#include "efficiencycategorybutton.h"
-
 #include <QComboBox>
 #include <QTabBar>
 #include <QToolTip>
@@ -50,9 +48,20 @@
 
 namespace {
 
-// Category display name/color now live in EfficiencyCategoryButton (the one
-// place category-editing UI exists) -- use those instead of duplicating the
-// logic here.
+// EfficiencyColors.qml "normal" colors, used for the chart's category bands.
+QColor categoryColor(const QString &category)
+{
+    if (category == QStringLiteral("productive")) {
+        return QColor(0x1f, 0x80, 0x57);
+    }
+    if (category == QStringLiteral("unproductive")) {
+        return QColor(0x9d, 0x45, 0x3e);
+    }
+    if (category == QStringLiteral("neutral")) {
+        return QColor(0xc2, 0x9c, 0x0b);
+    }
+    return QColor(0xa4, 0xa7, 0xab); // noneColorsMap.normal
+}
 
 // Timeline/Activity/Efficiency/violations all used to span just
 // [first captured timestamp, last captured timestamp], so a device that only
@@ -95,19 +104,6 @@ constexpr int kLabelsLeft = 20;         // ExtraHeaders mainHeaderText leftMargi
 constexpr int kRowHeight = 30;          // ExtraHeaders.rowHeight / HistoLine outer Item
 constexpr int kHistogramHeight = 20;    // HistoLine.histogramHeight
 constexpr int kProductivityHeight = 22; // Line.qml singleLineHeight (not a filter line)
-
-void ensureHistoryFonts()
-{
-    static const bool loaded = [] {
-        for (const QString &file : {QStringLiteral(":/fonts/Roboto-Regular.ttf"),
-                                    QStringLiteral(":/fonts/Roboto-Medium.ttf"),
-                                    QStringLiteral(":/fonts/Roboto-Bold.ttf")}) {
-            QFontDatabase::addApplicationFont(file);
-        }
-        return true;
-    }();
-    Q_UNUSED(loaded)
-}
 
 // Fonts.rb_small_b: Roboto Bold 10px -- a real screenshot's
 // "Friday, September 25, 2026" date label is exactly 134px wide, which is
@@ -1331,6 +1327,37 @@ KeystreamBar::KeystreamBar(QWidget *parent)
     : QWidget(parent)
 {
     setFixedHeight(30);
+    m_scrollBar = new QScrollBar(Qt::Horizontal, this);
+    m_scrollBar->setStyleSheet(QStringLiteral(
+        "QScrollBar:horizontal { background: transparent; height: 6px; margin: 0; }"
+        "QScrollBar::handle:horizontal { background: #5a5b63; border-radius: 3px; min-width: 30px; }"
+        "QScrollBar::add-line:horizontal, QScrollBar::sub-line:horizontal { width: 0; }"
+        "QScrollBar::add-page:horizontal, QScrollBar::sub-page:horizontal { background: none; }"));
+    connect(m_scrollBar, &QScrollBar::valueChanged, this, qOverload<>(&QWidget::update));
+    updateScrollRange();
+}
+
+int KeystreamBar::rowWidth() const
+{
+    const QFontMetrics metrics(mediumFont());
+    return metrics.horizontalAdvance(m_past) + metrics.horizontalAdvance(m_future);
+}
+
+void KeystreamBar::updateScrollRange()
+{
+    const int viewport = width() - 10;
+    const int overflow = qMax(0, rowWidth() - viewport);
+    m_scrollBar->setRange(0, overflow);
+    m_scrollBar->setPageStep(qMax(1, viewport));
+    m_scrollBar->setSingleStep(20);
+    m_scrollBar->setVisible(overflow > 0);
+    m_scrollBar->setGeometry(5, height() - 7, qMax(1, viewport), 6);
+}
+
+void KeystreamBar::resizeEvent(QResizeEvent *event)
+{
+    QWidget::resizeEvent(event);
+    updateScrollRange();
 }
 
 void KeystreamBar::setText(const QString &past, const QString &future)
@@ -1340,15 +1367,14 @@ void KeystreamBar::setText(const QString &past, const QString &future)
     }
     m_past = past;
     m_future = future;
+    updateScrollRange();
     update();
 }
 
 void KeystreamBar::wheelEvent(QWheelEvent *event)
 {
-    // The real bar is a ScrollView, so an overlong line can be scrolled.
     const int delta = event->angleDelta().x() != 0 ? event->angleDelta().x() : event->angleDelta().y();
-    m_scroll = qMax(0, m_scroll - delta / 2);
-    update();
+    m_scrollBar->setValue(m_scrollBar->value() - delta / 2);
 }
 
 void KeystreamBar::paintEvent(QPaintEvent *)
@@ -1371,9 +1397,7 @@ void KeystreamBar::paintEvent(QPaintEvent *)
     const int viewport = width() - 10;
     const int pastWidth = metrics.horizontalAdvance(m_past);
     const int rowWidth = pastWidth + metrics.horizontalAdvance(m_future);
-    const int maxScroll = qMax(0, rowWidth - viewport);
-    const int scroll = qMin(m_scroll, maxScroll);
-    const int x = 5 + qMax(0, (viewport - rowWidth) / 2) - scroll;
+    const int x = 5 + qMax(0, (viewport - rowWidth) / 2) - m_scrollBar->value();
     painter.setClipRect(QRect(5, 0, viewport, height()));
     painter.setPen(Qt::white);
     painter.drawText(QRect(x, 0, pastWidth + 1, height()), Qt::AlignLeft | Qt::AlignVCenter, m_past);
@@ -1875,7 +1899,7 @@ void HistoryChartWidget::paintEvent(QPaintEvent *)
         double y = productivityTop;
         for (const QString &category : std::as_const(bands)) {
             painter.fillRect(QRectF(x, y, productivityWidth, bandHeight),
-                             EfficiencyCategoryButton::color(category));
+                             categoryColor(category));
             y += bandHeight;
         }
     }
@@ -1905,7 +1929,6 @@ HistoryView::HistoryView(ViewerConnection &connection, QWidget *parent)
     // COLLAPSED and only opens via its own toggle button (panelViolation in
     // History.qml: `height: 0`, opens via "Open violation panel"/"Hide
     // violation panel", not shown by default like our first attempt had it).
-    ensureHistoryFonts();
     auto *root = new QVBoxLayout(this);
     // No page margins: videoCell/keylogger/sliderAndMeta/chartsItem span
     // the page edge to edge and carry their own insets (History.qml).

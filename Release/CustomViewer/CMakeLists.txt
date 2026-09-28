@@ -19,8 +19,6 @@ qt_add_executable(PersonalScreenViewer WIN32
     src/devicetilewidget.h
     src/devicedetailview.cpp
     src/devicedetailview.h
-    src/efficiencycategorybutton.cpp
-    src/efficiencycategorybutton.h
     src/historyview.cpp
     src/historyview.h
     src/viewerconnection.cpp
@@ -29,55 +27,16 @@ qt_add_executable(PersonalScreenViewer WIN32
     src/frameprotocol.h
 )
 
-# Original Kickidler History assets (qml_real/desktop/View/history) and the
-# Roboto faces embedded in the real viewer.exe, so History renders with the
-# exact same images/fonts instead of hand-drawn approximations.
-qt_add_resources(PersonalScreenViewer "history_assets"
+# Original Kickidler assets (copied from qml_real) and the Roboto faces
+# embedded in the real viewer.exe, so the UI renders with the exact same
+# images/fonts instead of hand-drawn approximations.
+file(GLOB_RECURSE VIEWER_ASSETS RELATIVE "${CMAKE_CURRENT_SOURCE_DIR}" CONFIGURE_DEPENDS
+    "${CMAKE_CURRENT_SOURCE_DIR}/resources/*.png"
+    "${CMAKE_CURRENT_SOURCE_DIR}/resources/*.ttf")
+qt_add_resources(PersonalScreenViewer "viewer_assets"
     PREFIX "/"
     BASE resources
-    FILES
-        resources/fonts/Roboto-Regular.ttf
-        resources/fonts/Roboto-Medium.ttf
-        resources/fonts/Roboto-Bold.ttf
-        resources/history/sliderBar/bg_none.png
-        resources/history/sliderBar/bg_loaded_cropped.png
-        resources/history/sliderBar/bg_online_cropped.png
-        resources/history/sliderBar/pick_normal.png
-        resources/history/sliderBar/pick_hovered.png
-        resources/history/sliderBar/pick_pressed.png
-        resources/history/bg_play.png
-        resources/history/bg_audio.png
-        resources/history/play_normal.png
-        resources/history/play_active.png
-        resources/history/pause_normal.png
-        resources/history/pause_active.png
-        resources/history/volume_on.png
-        resources/history/volume_off.png
-        resources/history/avi_export_normal.png
-        resources/history/avi_export_hovered.png
-        resources/history/avi_export_pressed.png
-        resources/history/speedButton/speed_bg.png
-        resources/history/speedButton/speed_bg_hovered.png
-        resources/history/speedButton/speed_bg_pressed.png
-        resources/history/speedButton/triangle_normal.png
-        resources/history/speedButton/triangle_hovered.png
-        resources/history/speedButton/triangle_pressed.png
-        resources/history/iconButtonViolation/arrow_up.png
-        resources/history/iconButtonViolation/arrow_down.png
-        resources/history/keylogger_bg.png
-        resources/history/big_emptyStream.png
-        resources/history/warning.png
-        resources/history/info.png
-        resources/history/spinner/spinner.png
-        resources/history/video/buttonRunningApp/applications_arrow_left.png
-        resources/history/video/buttonRunningApp/applications_arrow_right.png
-        resources/sessionInfo/images/active_program.png
-        resources/sessionInfo/categorizationButton/small_normal.png
-        resources/sessionInfo/categorizationButton/small_hovered.png
-        resources/sessionInfo/categorizationButton/small_pressed.png
-        resources/sessionInfo/categorizationPanel/indent.png
-        resources/sessionInfo/categorizationPanel/multiuser_on.png
-        resources/sessionInfo/categorizationPanel/user_on.png
+    FILES ${VIEWER_ASSETS}
 )
 
 target_link_libraries(PersonalScreenViewer PRIVATE

@@ -43,6 +43,7 @@ template <> constexpr inline auto WindowListCapture::qt_create_metaobjectdata<qt
         "",
         "streamId",
         "title",
+        "windowClosed",
         "frameCaptured",
         "QImage",
         "image",
@@ -55,13 +56,17 @@ template <> constexpr inline auto WindowListCapture::qt_create_metaobjectdata<qt
         QtMocHelpers::SignalData<void(quint32, const QString &)>(1, 2, QMC::AccessPublic, QMetaType::Void, {{
             { QMetaType::UInt, 3 }, { QMetaType::QString, 4 },
         }}),
+        // Signal 'windowClosed'
+        QtMocHelpers::SignalData<void(quint32)>(5, 2, QMC::AccessPublic, QMetaType::Void, {{
+            { QMetaType::UInt, 3 },
+        }}),
         // Signal 'frameCaptured'
-        QtMocHelpers::SignalData<void(quint32, const QImage &)>(5, 2, QMC::AccessPublic, QMetaType::Void, {{
-            { QMetaType::UInt, 3 }, { 0x80000000 | 6, 7 },
+        QtMocHelpers::SignalData<void(quint32, const QImage &)>(6, 2, QMC::AccessPublic, QMetaType::Void, {{
+            { QMetaType::UInt, 3 }, { 0x80000000 | 7, 8 },
         }}),
         // Signal 'logMessage'
-        QtMocHelpers::SignalData<void(const QString &)>(8, 2, QMC::AccessPublic, QMetaType::Void, {{
-            { QMetaType::QString, 9 },
+        QtMocHelpers::SignalData<void(const QString &)>(9, 2, QMC::AccessPublic, QMetaType::Void, {{
+            { QMetaType::QString, 10 },
         }}),
     };
     QtMocHelpers::UintData qt_properties {
@@ -87,17 +92,20 @@ void WindowListCapture::qt_static_metacall(QObject *_o, QMetaObject::Call _c, in
     if (_c == QMetaObject::InvokeMetaMethod) {
         switch (_id) {
         case 0: _t->windowDiscovered((*reinterpret_cast<std::add_pointer_t<quint32>>(_a[1])),(*reinterpret_cast<std::add_pointer_t<QString>>(_a[2]))); break;
-        case 1: _t->frameCaptured((*reinterpret_cast<std::add_pointer_t<quint32>>(_a[1])),(*reinterpret_cast<std::add_pointer_t<QImage>>(_a[2]))); break;
-        case 2: _t->logMessage((*reinterpret_cast<std::add_pointer_t<QString>>(_a[1]))); break;
+        case 1: _t->windowClosed((*reinterpret_cast<std::add_pointer_t<quint32>>(_a[1]))); break;
+        case 2: _t->frameCaptured((*reinterpret_cast<std::add_pointer_t<quint32>>(_a[1])),(*reinterpret_cast<std::add_pointer_t<QImage>>(_a[2]))); break;
+        case 3: _t->logMessage((*reinterpret_cast<std::add_pointer_t<QString>>(_a[1]))); break;
         default: ;
         }
     }
     if (_c == QMetaObject::IndexOfMethod) {
         if (QtMocHelpers::indexOfMethod<void (WindowListCapture::*)(quint32 , const QString & )>(_a, &WindowListCapture::windowDiscovered, 0))
             return;
-        if (QtMocHelpers::indexOfMethod<void (WindowListCapture::*)(quint32 , const QImage & )>(_a, &WindowListCapture::frameCaptured, 1))
+        if (QtMocHelpers::indexOfMethod<void (WindowListCapture::*)(quint32 )>(_a, &WindowListCapture::windowClosed, 1))
             return;
-        if (QtMocHelpers::indexOfMethod<void (WindowListCapture::*)(const QString & )>(_a, &WindowListCapture::logMessage, 2))
+        if (QtMocHelpers::indexOfMethod<void (WindowListCapture::*)(quint32 , const QImage & )>(_a, &WindowListCapture::frameCaptured, 2))
+            return;
+        if (QtMocHelpers::indexOfMethod<void (WindowListCapture::*)(const QString & )>(_a, &WindowListCapture::logMessage, 3))
             return;
     }
 }
@@ -121,14 +129,14 @@ int WindowListCapture::qt_metacall(QMetaObject::Call _c, int _id, void **_a)
     if (_id < 0)
         return _id;
     if (_c == QMetaObject::InvokeMetaMethod) {
-        if (_id < 3)
+        if (_id < 4)
             qt_static_metacall(this, _c, _id, _a);
-        _id -= 3;
+        _id -= 4;
     }
     if (_c == QMetaObject::RegisterMethodArgumentMetaType) {
-        if (_id < 3)
+        if (_id < 4)
             *reinterpret_cast<QMetaType *>(_a[0]) = QMetaType();
-        _id -= 3;
+        _id -= 4;
     }
     return _id;
 }
@@ -140,14 +148,20 @@ void WindowListCapture::windowDiscovered(quint32 _t1, const QString & _t2)
 }
 
 // SIGNAL 1
-void WindowListCapture::frameCaptured(quint32 _t1, const QImage & _t2)
+void WindowListCapture::windowClosed(quint32 _t1)
 {
-    QMetaObject::activate<void>(this, &staticMetaObject, 1, nullptr, _t1, _t2);
+    QMetaObject::activate<void>(this, &staticMetaObject, 1, nullptr, _t1);
 }
 
 // SIGNAL 2
+void WindowListCapture::frameCaptured(quint32 _t1, const QImage & _t2)
+{
+    QMetaObject::activate<void>(this, &staticMetaObject, 2, nullptr, _t1, _t2);
+}
+
+// SIGNAL 3
 void WindowListCapture::logMessage(const QString & _t1)
 {
-    QMetaObject::activate<void>(this, &staticMetaObject, 2, nullptr, _t1);
+    QMetaObject::activate<void>(this, &staticMetaObject, 3, nullptr, _t1);
 }
 QT_WARNING_POP

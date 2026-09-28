@@ -49,6 +49,8 @@ private slots:
     void onMetadataChanged(quint32 sessionId, quint32 localStreamId, const QString &application,
                            const QString &idleText, int inputEvents, const QString &url);
     void onKeystrokeReceived(quint32 sessionId, const QString &windowTitle, const QString &text);
+    // See MessageType::StreamClosed / SessionIngest::streamClosed.
+    void onStreamClosed(quint32 sessionId, quint32 localStreamId);
     void onIngestDisconnected(quint32 sessionId);
     void onViewerCountChanged(int count);
 

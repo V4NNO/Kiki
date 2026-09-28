@@ -232,11 +232,17 @@ public:
 protected:
     void paintEvent(QPaintEvent *event) override;
     void wheelEvent(QWheelEvent *event) override;
+    void resizeEvent(QResizeEvent *event) override;
 
 private:
+    // The bar is a ScrollView: a horizontal scrollbar along its bottom
+    // whenever the line is wider than the view.
+    void updateScrollRange();
+    int rowWidth() const;
+
     QString m_past;
     QString m_future;
-    int m_scroll = 0;
+    QScrollBar *m_scrollBar = nullptr;
 };
 
 // history/SliderBar.qml: the 4px scrub bar drawn from the original

@@ -2,6 +2,7 @@
 
 #include <QApplication>
 #include <QCoreApplication>
+#include <QFontDatabase>
 #include <QTimer>
 
 int main(int argc, char *argv[])
@@ -10,6 +11,12 @@ int main(int argc, char *argv[])
     QCoreApplication::setOrganizationName(QStringLiteral("PersonalTools"));
     QCoreApplication::setApplicationName(QStringLiteral("PersonalScreenViewer"));
     QCoreApplication::setApplicationVersion(QStringLiteral("0.1.0"));
+    // The Roboto faces embedded in the real viewer.exe (resources/fonts).
+    for (const QString &font : {QStringLiteral(":/fonts/Roboto-Regular.ttf"),
+                                QStringLiteral(":/fonts/Roboto-Medium.ttf"),
+                                QStringLiteral(":/fonts/Roboto-Bold.ttf")}) {
+        QFontDatabase::addApplicationFont(font);
+    }
 
     MainWindow window;
     window.show();

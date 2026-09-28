@@ -5663,6 +5663,7 @@ CMakeFiles/PersonalSubService.dir/src/windowlistcapture.cpp.obj: C:/Users/IonSac
   C:/Qt/6.11.2/mingw_64/include/QtCore/QHash \
   C:/Qt/6.11.2/mingw_64/include/QtCore/QObject \
   C:/Qt/6.11.2/mingw_64/include/QtCore/QSet \
+  C:/Qt/6.11.2/mingw_64/include/QtCore/QStringList \
   C:/Qt/6.11.2/mingw_64/include/QtCore/QThread \
   C:/Qt/6.11.2/mingw_64/include/QtCore/QTimer \
   C:/Qt/6.11.2/mingw_64/include/QtCore/q17memory.h \
@@ -7925,3 +7926,5 @@ C:/Qt/6.11.2/mingw_64/include/QtCore/qthreadpool.h:
 C:/Qt/6.11.2/mingw_64/include/QtCore/QJsonDocument:
 
 C:/Qt/6.11.2/mingw_64/include/QtCore/qbuffer.h:
+
+C:/Qt/6.11.2/mingw_64/include/QtCore/QStringList:

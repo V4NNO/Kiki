@@ -114,6 +114,59 @@ private:
 };
 }
 
+namespace {
+// TrackerPanel.qml's Grids/Filters: icon (b_<kind>_normal/hovered/pressed)
+// + Fonts.rr_medium_b text, #a2a2a4 normally, white hovered, #717276 pressed.
+class TrackerPanelButton final : public QPushButton
+{
+public:
+    TrackerPanelButton(const QString &kind, const QString &text, QWidget *parent)
+        : QPushButton(text, parent), m_kind(kind)
+    {
+        setObjectName(QStringLiteral("trackerPanelButton"));
+        setIconSize(QSize(19, 17));
+        setCursor(Qt::PointingHandCursor);
+        updateIcon();
+    }
+
+protected:
+    void enterEvent(QEnterEvent *event) override
+    {
+        m_hovered = true;
+        updateIcon();
+        QPushButton::enterEvent(event);
+    }
+    void leaveEvent(QEvent *event) override
+    {
+        m_hovered = false;
+        updateIcon();
+        QPushButton::leaveEvent(event);
+    }
+    void mousePressEvent(QMouseEvent *event) override
+    {
+        QPushButton::mousePressEvent(event);
+        updateIcon();
+    }
+    void mouseReleaseEvent(QMouseEvent *event) override
+    {
+        QPushButton::mouseReleaseEvent(event);
+        updateIcon();
+    }
+
+private:
+    void updateIcon()
+    {
+        const QString state = isDown() ? QStringLiteral("pressed")
+                            : (m_hovered || isChecked()) ? QStringLiteral("hovered")
+                                                         : QStringLiteral("normal");
+        setIcon(QIcon(QStringLiteral(":/tracker/panel/b_%1_%2.png").arg(m_kind, state)));
+    }
+
+    QString m_kind;
+    bool m_hovered = false;
+};
+}
+
 MainWindow::MainWindow(QWidget *parent)
     : QMainWindow(parent)
 {
@@ -150,6 +203,30 @@ MainWindow::MainWindow(QWidget *parent)
             this, &MainWindow::updateMetadata);
     connect(&m_connection, &ViewerConnection::protocolError,
             this, &MainWindow::showProtocolError);
+    // Categories for the tiles' rating colors (global + each employee's own).
+    connect(&m_connection, &ViewerConnection::historyCategoriesReceived, this,
+            [this](quint32, const QHash<QString, QString> &categories) {
+                m_globalCategories = categories;
+                for (auto it = m_devicePrimaryStream.cbegin(); it != m_devicePrimaryStream.cend(); ++it) {
+                    refreshTileActivity(it.key());
+                }
+            });
+    connect(&m_connection, &ViewerConnection::historyEmployeeCategoriesReceived, this,
+            [this](quint32 streamId, const QHash<QString, QString> &categories) {
+                const quint32 deviceKey = m_streamDeviceKey.value(streamId, 0);
+                if (deviceKey != 0) {
+                    m_deviceEmployeeCategories.insert(deviceKey, categories);
+                    refreshTileActivity(deviceKey);
+                }
+            });
+    auto *categoryRefresh = new QTimer(this);
+    categoryRefresh->setInterval(30000);
+    connect(categoryRefresh, &QTimer::timeout, this, [this] {
+        for (quint32 streamId : std::as_const(m_devicePrimaryStream)) {
+            m_connection.requestCategories(streamId);
+        }
+    });
+    categoryRefresh->start();
 
     // utils/NoCNodeConnectionBlocker.qml: modal after 60s with no server
     // connection -- started on connect attempt, canceled on success/
@@ -396,6 +473,9 @@ void MainWindow::addMonitor(quint32 streamId, const QString &name, const QSize &
                 tile->setSessionState(sessionState);
             }
         }
+        if (m_openDeviceKey == deviceKey) {
+            m_deviceDetailView->setSessionState(sessionState);
+        }
     }
     const QString displayName = sessionUsername.isEmpty()
         ? name : QStringLiteral("%1 — %2").arg(sessionUsername, name);
@@ -418,13 +498,17 @@ void MainWindow::addMonitor(quint32 streamId, const QString &name, const QSize &
         // of the device's monitors (doesn't count for tile
         // thumbnail/primary-stream selection, doesn't get stacked on the
         // Monitors sub-tab); remembered separately for DeviceDetailView's
-        // Programs sub-tab, pruned by m_windowStreamPruneTimer once its
-        // window closes. Also offered as the tile video selector's "W"
-        // (active window) option -- see refreshTileStreamsForDevice().
+        // Programs sub-tab, removed by removeWindowStream() once
+        // ViewerConnection::monitorClosed says the window actually closed
+        // (see frameprotocol.h's StreamClosed -- a background window's
+        // frame never updates again on its own, so "stale" can't mean
+        // "closed" for these; this is the real signal instead). Also
+        // offered as the tile video selector's "W" (active window) option
+        // -- see refreshTileStreamsForDevice().
         m_deviceWindowStreams[deviceKey].append(streamId);
         m_windowStreamIds.insert(streamId);
-        m_windowStreamLastFrameMs.insert(streamId, QDateTime::currentMSecsSinceEpoch());
         refreshTileStreamsForDevice(deviceKey);
+        refreshOpenDeviceWindowPreviews(deviceKey);
         return;
     }
 
@@ -432,6 +516,7 @@ void MainWindow::addMonitor(quint32 streamId, const QString &name, const QSize &
     const bool isNewDevice = !m_devicePrimaryStream.contains(deviceKey);
     if (isNewDevice) {
         m_devicePrimaryStream.insert(deviceKey, streamId);
+        m_connection.requestCategories(streamId);
     }
     m_deviceMonitorStreams[deviceKey].append(streamId);
 
@@ -459,6 +544,20 @@ void MainWindow::refreshTileStreamsForDevice(quint32 deviceKey)
     }
 }
 
+void MainWindow::refreshOpenDeviceWindowPreviews(quint32 deviceKey)
+{
+    if (m_openDeviceKey != deviceKey) {
+        return;
+    }
+    QList<MonitorWidget *> windowPreviews;
+    for (quint32 streamId : m_deviceWindowStreams.value(deviceKey)) {
+        if (MonitorWidget *monitor = m_monitors.value(streamId, nullptr)) {
+            windowPreviews.append(monitor);
+        }
+    }
+    m_deviceDetailView->refreshWindowPreviews(windowPreviews);
+}
+
 void MainWindow::updateFrame(quint32 streamId, const QImage &image,
                              quint64 sequence, qint64 latencyMs)
 {
@@ -467,10 +566,6 @@ void MainWindow::updateFrame(quint32 streamId, const QImage &image,
                   QString(), QString(), false);
     }
     m_monitors.value(streamId)->setFrame(image, sequence, latencyMs);
-
-    if (m_windowStreamIds.contains(streamId)) {
-        m_windowStreamLastFrameMs.insert(streamId, QDateTime::currentMSecsSinceEpoch());
-    }
 
     // Feed every tile of this stream's device -- each tile caches every
     // stream it could show (see DeviceTileWidget::updateThumbnail) and only
@@ -492,6 +587,29 @@ void MainWindow::updateMetadata(quint32 streamId, const QString &application,
     if (MonitorWidget *monitor = m_monitors.value(streamId, nullptr)) {
         monitor->setMetadata(application, idleText);
     }
+    const quint32 deviceKey = m_streamDeviceKey.value(streamId, 0);
+    if (deviceKey != 0 && m_devicePrimaryStream.value(deviceKey) == streamId) {
+        m_deviceActivity.insert(deviceKey, {application, idleText});
+        refreshTileActivity(deviceKey);
+    }
+}
+
+QString MainWindow::deviceCategory(quint32 deviceKey, const QString &application) const
+{
+    // The employee's own rule wins over the global one (same as History).
+    const QHash<QString, QString> employee = m_deviceEmployeeCategories.value(deviceKey);
+    return employee.value(application, m_globalCategories.value(application));
+}
+
+void MainWindow::refreshTileActivity(quint32 deviceKey)
+{
+    const QPair<QString, QString> activity = m_deviceActivity.value(deviceKey);
+    const QString category = deviceCategory(deviceKey, activity.first);
+    for (DeviceTileWidget *tile : std::as_const(m_deviceTiles)) {
+        if (tile->sessionKey() == deviceKey) {
+            tile->setActivity(activity.first, activity.second, category);
+        }
+    }
 }
 
 void MainWindow::selectMonitor(quint32 streamId)
@@ -500,7 +618,6 @@ void MainWindow::selectMonitor(quint32 streamId)
     for (auto it = m_monitors.cbegin(); it != m_monitors.cend(); ++it) {
         it.value()->setSelected(it.key() == streamId);
     }
-    m_snapshotButton->setEnabled(m_monitors.contains(streamId));
 }
 
 void MainWindow::showMonitorFullScreen(quint32 streamId)
@@ -513,24 +630,6 @@ void MainWindow::showMonitorFullScreen(quint32 streamId)
     window->setWindowTitle(QStringLiteral("Monitor %1 — Esc sau dublu clic pentru inchidere")
                                .arg(streamId));
     window->showFullScreen();
-}
-
-void MainWindow::saveSnapshot()
-{
-    MonitorWidget *monitor = m_monitors.value(m_selectedStream, nullptr);
-    if (!monitor || monitor->currentFrame().isNull()) {
-        return;
-    }
-    const QString pictures = QStandardPaths::writableLocation(QStandardPaths::PicturesLocation);
-    const QString suggested = QDir(pictures).filePath(
-        QStringLiteral("viewer-%1.png").arg(
-            QDateTime::currentDateTime().toString(QStringLiteral("yyyyMMdd-HHmmss"))));
-    const QString path = QFileDialog::getSaveFileName(
-        this, QStringLiteral("Salveaza captura"), suggested, QStringLiteral("PNG (*.png)"));
-    if (!path.isEmpty() && !monitor->currentFrame().save(path, "PNG")) {
-        QMessageBox::warning(this, QStringLiteral("Captura"),
-                             QStringLiteral("Imaginea nu a putut fi salvata."));
-    }
 }
 
 void MainWindow::showProtocolError(const QString &message)
@@ -830,6 +929,7 @@ void MainWindow::openDeviceDetail(quint32 sessionKey)
         }
     }
     m_openDeviceKey = sessionKey;
+    m_deviceDetailView->setSessionState(m_deviceSessionState.value(sessionKey));
     m_deviceDetailView->showDevice(sessionKey, deviceDisplayName(sessionKey), primaryStream, monitors,
                                    windowPreviews);
     m_contentStack->setCurrentWidget(m_deviceDetailView);
@@ -845,43 +945,29 @@ void MainWindow::closeDeviceDetail()
     m_openDeviceKey = 0;
 }
 
-void MainWindow::pruneStaleWindowStreams()
+void MainWindow::removeWindowStream(quint32 streamId)
 {
-    // WindowListCapture only captures the foreground window every tick;
-    // background windows are refreshed on a much slower ~10s cadence to
-    // keep resource use down (see windowlistcapture.cpp), so "no frame in a
-    // while" needs a longer grace period here than a literal one-tick
-    // timeout, or backgrounded-but-still-open windows would get pruned as
-    // if they'd closed.
-    constexpr qint64 StaleAfterMs = 15000;
-    const qint64 now = QDateTime::currentMSecsSinceEpoch();
-    QList<quint32> stale;
-    for (auto it = m_windowStreamLastFrameMs.cbegin(); it != m_windowStreamLastFrameMs.cend(); ++it) {
-        if (now - it.value() > StaleAfterMs) {
-            stale.append(it.key());
-        }
-    }
-    if (stale.isEmpty()) {
+    // ViewerConnection::monitorClosed -- the authoritative "this window
+    // actually closed" signal (see frameprotocol.h's StreamClosed). Only
+    // ever fires for window streams (real monitors don't come and go), but
+    // guard anyway in case that ever changes.
+    if (!m_windowStreamIds.remove(streamId)) {
         return;
     }
-    for (auto deviceIt = m_deviceWindowStreams.begin(); deviceIt != m_deviceWindowStreams.end();
-        ++deviceIt) {
-        if (deviceIt.key() == m_openDeviceKey) {
-            // DeviceDetailView is showing this device's window list right
-            // now and holds raw MonitorWidget pointers for it -- defer
-            // pruning until the user navigates away, to avoid deleting a
-            // widget out from under it.
-            continue;
-        }
-        for (quint32 streamId : stale) {
-            if (deviceIt.value().removeOne(streamId)) {
-                m_windowStreamIds.remove(streamId);
-                m_windowStreamLastFrameMs.remove(streamId);
-                if (MonitorWidget *monitor = m_monitors.take(streamId)) {
-                    monitor->deleteLater();
-                }
-            }
-        }
+    const quint32 deviceKey = m_streamDeviceKey.take(streamId);
+    if (deviceKey != 0) {
+        m_deviceWindowStreams[deviceKey].removeOne(streamId);
+    }
+    if (MonitorWidget *monitor = m_monitors.take(streamId)) {
+        // refreshOpenDeviceWindowPreviews() below (if it applies to this
+        // device) rebuilds and re-lays-out from m_deviceWindowStreams --
+        // already updated above -- before this deleteLater() actually
+        // runs, so it never touches the stale pointer.
+        monitor->deleteLater();
+    }
+    if (deviceKey != 0) {
+        refreshTileStreamsForDevice(deviceKey);
+        refreshOpenDeviceWindowPreviews(deviceKey);
     }
 }
 
@@ -991,28 +1077,19 @@ void MainWindow::buildInterface()
     m_subbar = new QFrame(root);
     QFrame *subbar = m_subbar;
     subbar->setObjectName(QStringLiteral("subbar"));
-    subbar->setFixedHeight(40);
+    // TrackerPanel.qml: 37px, 9px in, then Grids / 9px / Filters (the
+    // trackerPanel/b_*.png icon + text, #a2a2a4 -> white on hover).
+    subbar->setFixedHeight(37);
     auto *subLayout = new QHBoxLayout(subbar);
-    subLayout->setContentsMargins(8, 0, 8, 0);
-    subLayout->setSpacing(8);
-    auto *grids = new QPushButton(QStringLiteral("▦  Grids"), subbar);
-    grids->setObjectName(QStringLiteral("flatButton"));
+    subLayout->setContentsMargins(9, 0, 8, 0);
+    subLayout->setSpacing(9);
+    auto *grids = new TrackerPanelButton(QStringLiteral("grid"), QStringLiteral("Grids"), subbar);
     connect(grids, &QPushButton::clicked, this, &MainWindow::openGridsPanel);
-    m_filtersButton = new QPushButton(QStringLiteral("ⓘ  Filters"), subbar);
-    m_filtersButton->setObjectName(QStringLiteral("flatButton"));
+    m_filtersButton = new TrackerPanelButton(QStringLiteral("filters"), QStringLiteral("Filters"), subbar);
     m_filtersButton->setCheckable(true);
     connect(m_filtersButton, &QPushButton::toggled, this, &MainWindow::toggleFiltersPanel);
-    auto *demoButton = new QPushButton(QStringLiteral("▶  Demo"), subbar);
-    demoButton->setObjectName(QStringLiteral("flatButton"));
-    connect(demoButton, &QPushButton::clicked, this, &MainWindow::startDemo);
-    m_snapshotButton = new QPushButton(QStringLiteral("▣  Snapshot"), subbar);
-    m_snapshotButton->setObjectName(QStringLiteral("flatButton"));
-    m_snapshotButton->setEnabled(false);
-    connect(m_snapshotButton, &QPushButton::clicked, this, &MainWindow::saveSnapshot);
     subLayout->addWidget(grids);
     subLayout->addWidget(m_filtersButton);
-    subLayout->addWidget(demoButton);
-    subLayout->addWidget(m_snapshotButton);
     subLayout->addStretch();
     auto *plusButton = new QToolButton(subbar);
     plusButton->setObjectName(QStringLiteral("plus"));
@@ -1036,7 +1113,7 @@ void MainWindow::buildInterface()
 
     m_trackerPage = new QWidget(root);
     auto *contentLayout = new QVBoxLayout(m_trackerPage);
-    contentLayout->setContentsMargins(5, 5, 5, 5);
+    contentLayout->setContentsMargins(0, 0, 0, 0);
     contentLayout->setSpacing(0);
     // utils/NoEmployeesAssignedInformer.qml equivalent: was created but
     // never actually put into a layout (a dead leftover, never visible) --
@@ -1060,15 +1137,36 @@ void MainWindow::buildInterface()
     // but "+" tiles otherwise, which is a valid but less clear substitute).
     m_gridStack = new QStackedWidget(m_trackerPage);
     m_gridScrollPage = new QWidget(m_gridStack);
+    // TrackerQuadratorGrid.qml: a grayHatching Background fills the whole
+    // grid item, behind the shadow strip and the cells -- shows through the
+    // 3px cell spacing and the scroll margins.
+    m_gridScrollPage->setObjectName(QStringLiteral("gridScrollPage"));
+    m_gridScrollPage->setAttribute(Qt::WA_StyledBackground);
+    m_gridScrollPage->setStyleSheet(QStringLiteral(
+        "QWidget#gridScrollPage { background-image: url(:/activeCell/grayHatching.png); background-repeat: repeat; }"));
     auto *gridScrollLayout = new QVBoxLayout(m_gridScrollPage);
     gridScrollLayout->setContentsMargins(0, 0, 0, 0);
+    gridScrollLayout->setSpacing(0);
+    // TrackerQuadratorGrid.qml: mainbgshaddow.png tiled along the top.
+    auto *gridShadow = new QWidget(m_gridScrollPage);
+    gridShadow->setObjectName(QStringLiteral("gridShadow"));
+    gridShadow->setAttribute(Qt::WA_StyledBackground);
+    gridShadow->setFixedHeight(3);
+    gridShadow->setStyleSheet(QStringLiteral(
+        "QWidget#gridShadow { background-image: url(:/tracker/grid/mainbgshaddow.png); background-repeat: repeat-x; }"));
+    gridScrollLayout->addWidget(gridShadow);
     auto *scroll = new QScrollArea(m_gridScrollPage);
     scroll->setWidgetResizable(true);
     scroll->setFrameShape(QFrame::NoFrame);
+    scroll->setStyleSheet(QStringLiteral("QScrollArea { background: transparent; }"));
+    scroll->viewport()->setStyleSheet(QStringLiteral("background: transparent;"));
     m_monitorContainer = new QWidget(scroll);
     m_monitorContainer->setObjectName(QStringLiteral("monitorArea"));
+    m_monitorContainer->setStyleSheet(QStringLiteral("QWidget#monitorArea { background: transparent; }"));
     m_monitorGrid = new QGridLayout(m_monitorContainer);
-    m_monitorGrid->setContentsMargins(0, 0, 0, 0);
+    // ScrollView margins 4/4/4/3 (the shadow strip above already takes 3 of
+    // the top 4), cells 3px apart.
+    m_monitorGrid->setContentsMargins(4, 1, 4, 3);
     m_monitorGrid->setHorizontalSpacing(3);
     m_monitorGrid->setVerticalSpacing(3);
     scroll->setWidget(m_monitorContainer);
@@ -1171,10 +1269,7 @@ void MainWindow::buildInterface()
                 refreshHistoryDevices();
             });
 
-    m_windowStreamPruneTimer = new QTimer(this);
-    m_windowStreamPruneTimer->setInterval(2000);
-    connect(m_windowStreamPruneTimer, &QTimer::timeout, this, &MainWindow::pruneStaleWindowStreams);
-    m_windowStreamPruneTimer->start();
+    connect(&m_connection, &ViewerConnection::monitorClosed, this, &MainWindow::removeWindowStream);
 
     m_contentStack = new QStackedWidget(root);
     m_contentStack->addWidget(m_trackerPage);
@@ -1239,6 +1334,11 @@ void MainWindow::applyStyle()
         QMainWindow, QWidget { background: #30323a; color: #e7eaed; font-family: "Segoe UI"; font-size: %1pt; }
         QFrame#header { background: #1da06f; border: none; }
         QFrame#subbar { background: #292c33; border-bottom: 1px solid #17191e; }
+        QPushButton#trackerPanelButton { color: #a2a2a4; background: transparent; border: none; padding: 0;
+                                         font-family: Roboto; font-size: 12px; font-weight: 700; text-align: left; }
+        QPushButton#trackerPanelButton:hover, QPushButton#trackerPanelButton:checked { color: white; }
+        QPushButton#trackerPanelButton:pressed { color: #717276; }
+        QPushButton#trackerPanelButton:disabled { color: #6f7176; }
         QLabel#brand { background: #199466; color: white; padding-left: 18px; font-size: 14pt; font-weight: 700; }
         QToolButton#menuButton { background: #188c62; color: white; border: none; font-size: 20pt; }
         QToolButton#menuButton:hover { background: #147a55; }
@@ -1297,7 +1397,6 @@ void MainWindow::clearMonitors()
     m_deviceWindowStreams.clear();
     m_streamDeviceKey.clear();
     m_windowStreamIds.clear();
-    m_windowStreamLastFrameMs.clear();
     qDeleteAll(m_deviceTiles);
     m_deviceTiles.clear();
     for (MonitorWidget *monitor : monitors) {
@@ -1307,7 +1406,6 @@ void MainWindow::clearMonitors()
         tab.tiles.clear();
     }
     m_selectedStream = 0;
-    m_snapshotButton->setEnabled(false);
     m_agentLabel->hide();
     if (m_contentStack->currentWidget() == m_deviceDetailView) {
         closeDeviceDetail();
@@ -1370,6 +1468,12 @@ void MainWindow::relayoutCurrentTab()
             tile = new DeviceTileWidget(entry.deviceKey, deviceDisplayName(entry.deviceKey),
                                         m_monitorContainer);
             connect(tile, &DeviceTileWidget::opened, this, &MainWindow::openDeviceDetail);
+            connect(tile, &DeviceTileWidget::closeRequested, this,
+                    [this, tileId = entry.tileId] { removeTile(tileId); });
+            connect(tile, &DeviceTileWidget::historyRequested, this, [this](quint32 sessionKey) {
+                showHistoryPage();
+                m_historyView->openForDevice(sessionKey);
+            });
             m_deviceTiles.insert(entry.tileId, tile);
             tile->setAvailableStreams(m_deviceMonitorStreams.value(entry.deviceKey),
                                       m_deviceWindowStreams.value(entry.deviceKey).value(0, 0));
@@ -1382,6 +1486,8 @@ void MainWindow::relayoutCurrentTab()
             if (!knownState.isEmpty()) {
                 tile->setSessionState(knownState);
             }
+            const QPair<QString, QString> activity = m_deviceActivity.value(entry.deviceKey);
+            tile->setActivity(activity.first, activity.second, deviceCategory(entry.deviceKey, activity.first));
         }
         tile->setParent(m_monitorContainer);
         tile->show();
@@ -1403,6 +1509,22 @@ void MainWindow::relayoutCurrentTab()
         m_monitorGrid->addWidget(addTile, index / columns, index % columns);
         ++index;
     }
+}
+
+void MainWindow::removeTile(quint32 tileId)
+{
+    // fullCell.wantFree: the tile leaves the current tab.
+    if (m_tabs.isEmpty()) {
+        return;
+    }
+    QList<TrackerTab::TileEntry> &tiles = m_tabs[m_currentTabIndex].tiles;
+    tiles.erase(std::remove_if(tiles.begin(), tiles.end(),
+                               [tileId](const TrackerTab::TileEntry &entry) { return entry.tileId == tileId; }),
+                tiles.end());
+    if (DeviceTileWidget *tile = m_deviceTiles.take(tileId)) {
+        tile->deleteLater();
+    }
+    relayoutCurrentTab();
 }
 
 void MainWindow::resizeEvent(QResizeEvent *event)

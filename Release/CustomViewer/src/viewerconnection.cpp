@@ -229,6 +229,10 @@ void ViewerConnection::processMessage(const ViewerProtocol::Header &header,
         break;
     case MessageType::Heartbeat:
         break;
+    case MessageType::StreamClosed:
+        m_streams.remove(header.streamId);
+        emit monitorClosed(header.streamId);
+        break;
     case MessageType::Goodbye:
         emit statusChanged(QStringLiteral("Agentul a inchis sesiunea"), false);
         m_socket.disconnectFromHost();
