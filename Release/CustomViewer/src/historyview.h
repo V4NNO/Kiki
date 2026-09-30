@@ -5,6 +5,7 @@
 #include <QDate>
 #include <QDialog>
 #include <QHash>
+#include <QColor>
 #include <QWidget>
 
 class QComboBox;
@@ -339,6 +340,10 @@ public:
     void setEfficiency(const QList<HistoryAppSegment> &segments,
                        const QHash<QString, QString> &categories);
     void setCurrentPositionMs(qint64 positionMs);
+    // Violations tab (trackerQuadratorActiveCell): the Chart isn't the fixed
+    // 186px History strip with a filters area below -- it fills the whole tab,
+    // with the grid full-height and only the Activity/Efficiency rows at top.
+    void setFillMode(bool on);
 
     static qint64 chartStepMs(qint64 rangeMs, qint64 userStepMs);
 
@@ -354,6 +359,7 @@ private:
     qint64 m_stepMs = 5 * 60 * 1000;
     qint64 m_currentPositionMs = 0;
     int m_gridLeft = 0;
+    bool m_fillMode = false;
 };
 
 // The full embedded History page (replaces what used to be a separate

@@ -62,8 +62,13 @@ public:
     void pushFrame(quint32 streamId, const QImage &image);
     // url is empty when the foreground app isn't a recognized browser, or
     // URL extraction failed -- see BrowserUrlProbe.
+    // activeMonitorStreamId: the (local) monitor stream the foreground
+    // window is on, or 0 -- same for every monitor's metadata this tick;
+    // the host translates it to its global id before relaying (see
+    // ScreenCaptureManager::foregroundMonitorStreamId).
     void pushMetadata(quint32 streamId, const QString &application, const QString &idleText,
-                      int inputEvents, const QString &url);
+                      int inputEvents, const QString &url, quint32 activeMonitorStreamId,
+                      const QString &windowTitle);
     // streamId 0: keystrokes aren't tied to a specific monitor, only to the
     // session (matches how Keylogger observes the foreground window
     // regardless of which physical screen it's on).

@@ -28,7 +28,11 @@ public:
     void updateThumbnail(quint32 streamId, const QImage &image);
     // monitorStreamIds: this device's monitor streams, in order (mon1, mon2,
     // ...). windowStreamId: its active-window preview stream, or 0.
-    void setAvailableStreams(const QList<quint32> &monitorStreamIds, quint32 windowStreamId);
+    // activeMonitorStreamId: the monitor the foreground window is on, or 0
+    // (the "Show active monitor" target -- see MainWindow's
+    // m_deviceActiveMonitorStream).
+    void setAvailableStreams(const QList<quint32> &monitorStreamIds, quint32 windowStreamId,
+                             quint32 activeMonitorStreamId);
     // PersonalHost's WTS session state ("active"/"connected"/"disconnected"/
     // "idle"/"other"), mapped onto StatusIcon kinds.
     void setSessionState(const QString &state);
@@ -77,10 +81,20 @@ private:
     QHash<quint32, QImage> m_thumbnailsByStream;
     QList<quint32> m_monitorStreamIds;
     quint32 m_windowStreamId = 0;
+    // The monitor holding the foreground window (0 = unknown); the
+    // "Show active monitor" (automode) target.
+    quint32 m_activeMonitorStream = 0;
     quint32 m_selectedStream = 0;
     // VideoSelector.qml's "monitors" state: every monitor's button instead
     // of the general row, after clicking the current monitor's button.
     bool m_showMonitors = false;
+    // "Show only active program" (winmode): follow whichever window is the
+    // active/foreground one, i.e. re-point to m_windowStreamId whenever
+    // MainWindow moves it -- see setAvailableStreams()/clickSelector().
+    bool m_followActiveWindow = false;
+    // "Show active monitor" (automode): follow whichever monitor the
+    // foreground window is on, re-pointing when m_activeMonitorStream moves.
+    bool m_followActiveMonitor = false;
     bool m_autoRotate = false;
     int m_autoRotateIndex = 0;
     QTimer *m_autoRotateTimer = nullptr;
@@ -106,6 +120,12 @@ public:
     explicit AddDeviceTileWidget(QWidget *parent = nullptr);
 
     void setLimitReached(bool limitReached);
+    // QuadratorGrid.qml's fictive "half-cells": a thin strip below/right of
+    // the real grid (60px, outside the viewport-sized grid), always present;
+    // in "simple" filling one grows the grid by one row/column first -- see
+    // MainWindow::relayoutCurrentTab()/fillCell(). Same widget, only the
+    // "+" is scaled down if it doesn't fit.
+    void setFictive(bool fictive);
 
 signals:
     void addRequested();
@@ -124,4 +144,5 @@ private:
     bool m_limitReached = false;
     bool m_hovered = false;
     bool m_pressed = false;
+    bool m_fictive = false;
 };

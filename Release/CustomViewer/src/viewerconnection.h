@@ -19,12 +19,14 @@ struct HistoryAppSegment {
     QString application;
     qint64 startMs = 0;
     qint64 endMs = 0;
+    QString title; // foreground window title (empty for web visits)
 };
 
 struct HistoryAppUsage {
     QString application;
     qint64 totalMs = 0;
     QString category;
+    QString title; // foreground window title (empty for web pages)
 };
 
 struct HistoryKeystrokeEntry {
@@ -83,8 +85,12 @@ signals:
                            const QString &sessionState, bool isWindow);
     void frameReady(quint32 streamId, const QImage &image, quint64 sequence,
                     qint64 latencyMs);
+    // activeMonitorStreamId: the monitor stream this device's foreground
+    // window is on (0 = none/unknown), for the tile's "Show active monitor"
+    // button. Same value on every one of the device's monitor metadata
+    // pushes.
     void metadataChanged(quint32 streamId, const QString &application,
-                         const QString &idleText);
+                         const QString &idleText, quint32 activeMonitorStreamId);
     // See MessageType::StreamClosed -- this streamId is gone for good
     // (its WindowListCapture window closed). MainWindow removes the
     // MonitorWidget and drops it from every tile/DeviceDetailView that

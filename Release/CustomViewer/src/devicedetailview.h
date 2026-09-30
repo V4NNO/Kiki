@@ -1,13 +1,19 @@
 #pragma once
 
 #include <QHash>
+#include <QSet>
 #include <QWidget>
+
+#include "viewerconnection.h" // HistoryActivitySample / HistoryAppSegment
 
 #include <QList>
 
 struct HistoryAppUsage;
 struct HistoryKeystrokeEntry;
 class HistoryInfoPanel;
+class HistoryChartWidget;
+class TimeAxisWidget;
+class QSlider;
 // Defined in devicedetailview.cpp -- the TabView MultiSwitch strip, the
 // StatusUser box, and the big offline/no-session placeholder, all
 // custom-painted from the original viewer.exe assets.
@@ -141,8 +147,32 @@ private:
     // windowlistcapture.h. Falls back to a placeholder label until at least
     // one window stream has been discovered.
     QWidget *m_windowsContainer = nullptr;
+    // Windows.qml shows the same big StatusIcon placeholder on Programs as on
+    // Monitors when there's nothing to display -- not a plain text label.
+    QStackedWidget *m_programsInnerStack = nullptr;
+    BigStatusIcon *m_programsStatusIcon = nullptr;
+
+    // Violations tab: the Activity/Efficiency Chart (trackerQuadratorActiveCell/
+    // Filters.qml -- in this org-less build it's just the Chart, no violation-
+    // filter groups). Data comes from the same per-day History queries; the
+    // Range/Step sliders pick the window and bucket size.
+    QWidget *m_violationsPage = nullptr;
+    TimeAxisWidget *m_violAxis = nullptr;
+    HistoryChartWidget *m_violChart = nullptr;
+    QSlider *m_violRangeSlider = nullptr;
+    QSlider *m_violStepSlider = nullptr;
+    QWidget *m_violStepLabels = nullptr; // rebuilt per range (allowed steps differ)
+    int m_violRangeIndex = 5; // 10 days
+    int m_violStepIndex = 9;  // 8 hours
+    qint64 m_violWindowEndMs = 0; // right edge; 0 = now
+    QHash<QString, QList<HistoryActivitySample>> m_violActivityByDay;
+    QHash<QString, QList<HistoryAppSegment>> m_violSegmentsByDay;
+    QSet<QString> m_violRequestedDays;
+    void buildViolationsPage(QWidget *page);
+    void reloadViolationsData();
+    void updateViolationsChart();
+    void applyViolationsStepForRange();
     QVBoxLayout *m_windowsLayout = nullptr;
-    QLabel *m_programsPlaceholder = nullptr;
     QList<MonitorWidget *> m_currentWindowPreviews;
 
     // keylogger/Table.qml equivalent: Date/Pressing period/Window/Keystrokes

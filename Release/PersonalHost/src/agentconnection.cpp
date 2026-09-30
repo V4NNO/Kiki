@@ -283,14 +283,17 @@ void AgentConnection::pushFrame(quint32 streamId, const QImage &image)
     state.primed = true;
 }
 
-void AgentConnection::pushMetadata(quint32 streamId, const QString &application, const QString &idleText)
+void AgentConnection::pushMetadata(quint32 streamId, const QString &application,
+                                   const QString &idleText, quint32 activeMonitorStreamId)
 {
     if (!m_authenticated) {
         return;
     }
     sendJson(ViewerProtocol::MessageType::Metadata, streamId,
             QJsonObject{{QStringLiteral("application"), application},
-                        {QStringLiteral("idle"), idleText}});
+                        {QStringLiteral("idle"), idleText},
+                        {QStringLiteral("activeMonitor"),
+                         static_cast<qint64>(activeMonitorStreamId)}});
 }
 
 void AgentConnection::pushStreamClosed(quint32 streamId)
@@ -385,7 +388,8 @@ void AgentConnection::handleHistoryQuery(const ViewerProtocol::Header &header, c
         for (const AppSegment &segment : m_historyRecorder->listAppSegments(monitorStreamId, day)) {
             array.append(QJsonObject{{QStringLiteral("application"), segment.application},
                                      {QStringLiteral("startMs"), segment.startMs},
-                                     {QStringLiteral("endMs"), segment.endMs}});
+                                     {QStringLiteral("endMs"), segment.endMs},
+                                     {QStringLiteral("title"), segment.title}});
         }
         sendJson(ViewerProtocol::MessageType::HistoryQuery, monitorStreamId,
                 QJsonObject{{QStringLiteral("action"), action},
@@ -397,7 +401,8 @@ void AgentConnection::handleHistoryQuery(const ViewerProtocol::Header &header, c
         for (const AppUsage &usage : m_historyRecorder->listRunningApplications(monitorStreamId, day)) {
             array.append(QJsonObject{{QStringLiteral("application"), usage.application},
                                      {QStringLiteral("totalMs"), usage.totalMs},
-                                     {QStringLiteral("category"), usage.category}});
+                                     {QStringLiteral("category"), usage.category},
+                                     {QStringLiteral("title"), usage.title}});
         }
         sendJson(ViewerProtocol::MessageType::HistoryQuery, monitorStreamId,
                 QJsonObject{{QStringLiteral("action"), action},

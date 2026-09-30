@@ -58,8 +58,9 @@ template <> constexpr inline auto SessionManager::qt_create_metaobjectdata<qt_me
         "idleText",
         "inputEvents",
         "url",
-        "onKeystrokeReceived",
+        "activeMonitorLocalStreamId",
         "windowTitle",
+        "onKeystrokeReceived",
         "text",
         "onStreamClosed",
         "onIngestDisconnected",
@@ -84,25 +85,25 @@ template <> constexpr inline auto SessionManager::qt_create_metaobjectdata<qt_me
             { QMetaType::UInt, 6 }, { QMetaType::UInt, 7 }, { 0x80000000 | 13, 14 },
         }}),
         // Slot 'onMetadataChanged'
-        QtMocHelpers::SlotData<void(quint32, quint32, const QString &, const QString &, int, const QString &)>(15, 2, QMC::AccessPrivate, QMetaType::Void, {{
+        QtMocHelpers::SlotData<void(quint32, quint32, const QString &, const QString &, int, const QString &, quint32, const QString &)>(15, 2, QMC::AccessPrivate, QMetaType::Void, {{
             { QMetaType::UInt, 6 }, { QMetaType::UInt, 7 }, { QMetaType::QString, 16 }, { QMetaType::QString, 17 },
-            { QMetaType::Int, 18 }, { QMetaType::QString, 19 },
+            { QMetaType::Int, 18 }, { QMetaType::QString, 19 }, { QMetaType::UInt, 20 }, { QMetaType::QString, 21 },
         }}),
         // Slot 'onKeystrokeReceived'
-        QtMocHelpers::SlotData<void(quint32, const QString &, const QString &)>(20, 2, QMC::AccessPrivate, QMetaType::Void, {{
-            { QMetaType::UInt, 6 }, { QMetaType::QString, 21 }, { QMetaType::QString, 22 },
+        QtMocHelpers::SlotData<void(quint32, const QString &, const QString &)>(22, 2, QMC::AccessPrivate, QMetaType::Void, {{
+            { QMetaType::UInt, 6 }, { QMetaType::QString, 21 }, { QMetaType::QString, 23 },
         }}),
         // Slot 'onStreamClosed'
-        QtMocHelpers::SlotData<void(quint32, quint32)>(23, 2, QMC::AccessPrivate, QMetaType::Void, {{
+        QtMocHelpers::SlotData<void(quint32, quint32)>(24, 2, QMC::AccessPrivate, QMetaType::Void, {{
             { QMetaType::UInt, 6 }, { QMetaType::UInt, 7 },
         }}),
         // Slot 'onIngestDisconnected'
-        QtMocHelpers::SlotData<void(quint32)>(24, 2, QMC::AccessPrivate, QMetaType::Void, {{
+        QtMocHelpers::SlotData<void(quint32)>(25, 2, QMC::AccessPrivate, QMetaType::Void, {{
             { QMetaType::UInt, 6 },
         }}),
         // Slot 'onViewerCountChanged'
-        QtMocHelpers::SlotData<void(int)>(25, 2, QMC::AccessPrivate, QMetaType::Void, {{
-            { QMetaType::Int, 26 },
+        QtMocHelpers::SlotData<void(int)>(26, 2, QMC::AccessPrivate, QMetaType::Void, {{
+            { QMetaType::Int, 27 },
         }}),
     };
     QtMocHelpers::UintData qt_properties {
@@ -131,7 +132,7 @@ void SessionManager::qt_static_metacall(QObject *_o, QMetaObject::Call _c, int _
         case 1: _t->pollSessions(); break;
         case 2: _t->onMonitorDiscovered((*reinterpret_cast<std::add_pointer_t<quint32>>(_a[1])),(*reinterpret_cast<std::add_pointer_t<quint32>>(_a[2])),(*reinterpret_cast<std::add_pointer_t<QString>>(_a[3])),(*reinterpret_cast<std::add_pointer_t<QSize>>(_a[4])),(*reinterpret_cast<std::add_pointer_t<bool>>(_a[5]))); break;
         case 3: _t->onFrameReady((*reinterpret_cast<std::add_pointer_t<quint32>>(_a[1])),(*reinterpret_cast<std::add_pointer_t<quint32>>(_a[2])),(*reinterpret_cast<std::add_pointer_t<QImage>>(_a[3]))); break;
-        case 4: _t->onMetadataChanged((*reinterpret_cast<std::add_pointer_t<quint32>>(_a[1])),(*reinterpret_cast<std::add_pointer_t<quint32>>(_a[2])),(*reinterpret_cast<std::add_pointer_t<QString>>(_a[3])),(*reinterpret_cast<std::add_pointer_t<QString>>(_a[4])),(*reinterpret_cast<std::add_pointer_t<int>>(_a[5])),(*reinterpret_cast<std::add_pointer_t<QString>>(_a[6]))); break;
+        case 4: _t->onMetadataChanged((*reinterpret_cast<std::add_pointer_t<quint32>>(_a[1])),(*reinterpret_cast<std::add_pointer_t<quint32>>(_a[2])),(*reinterpret_cast<std::add_pointer_t<QString>>(_a[3])),(*reinterpret_cast<std::add_pointer_t<QString>>(_a[4])),(*reinterpret_cast<std::add_pointer_t<int>>(_a[5])),(*reinterpret_cast<std::add_pointer_t<QString>>(_a[6])),(*reinterpret_cast<std::add_pointer_t<quint32>>(_a[7])),(*reinterpret_cast<std::add_pointer_t<QString>>(_a[8]))); break;
         case 5: _t->onKeystrokeReceived((*reinterpret_cast<std::add_pointer_t<quint32>>(_a[1])),(*reinterpret_cast<std::add_pointer_t<QString>>(_a[2])),(*reinterpret_cast<std::add_pointer_t<QString>>(_a[3]))); break;
         case 6: _t->onStreamClosed((*reinterpret_cast<std::add_pointer_t<quint32>>(_a[1])),(*reinterpret_cast<std::add_pointer_t<quint32>>(_a[2]))); break;
         case 7: _t->onIngestDisconnected((*reinterpret_cast<std::add_pointer_t<quint32>>(_a[1]))); break;

@@ -72,7 +72,9 @@ QString statusText(const QString &kind)
 DeviceTileWidget::DeviceTileWidget(quint32 sessionKey, const QString &displayName, QWidget *parent)
     : QWidget(parent), m_sessionKey(sessionKey), m_displayName(displayName)
 {
-    setMinimumSize(245, 155);
+    // No minimum size: MainWindow::relayoutCurrentTab() places every cell at
+    // exactly QuadratorGrid.qml's makeCellSize() geometry (viewport / grid
+    // shape), which has no floor in the original either.
     setMouseTracking(true);
     setAttribute(Qt::WA_OpaquePaintEvent);
 
@@ -126,15 +128,41 @@ void DeviceTileWidget::updateThumbnail(quint32 streamId, const QImage &image)
     }
 }
 
-void DeviceTileWidget::setAvailableStreams(const QList<quint32> &monitorStreamIds, quint32 windowStreamId)
+void DeviceTileWidget::setAvailableStreams(const QList<quint32> &monitorStreamIds,
+                                           quint32 windowStreamId, quint32 activeMonitorStreamId)
 {
-    if (monitorStreamIds == m_monitorStreamIds && windowStreamId == m_windowStreamId) {
+    if (monitorStreamIds == m_monitorStreamIds && windowStreamId == m_windowStreamId
+        && activeMonitorStreamId == m_activeMonitorStream) {
         return;
     }
     m_monitorStreamIds = monitorStreamIds;
     m_windowStreamId = windowStreamId;
-    // Keep the selection while it's still valid, else the first monitor.
-    if (!m_monitorStreamIds.contains(m_selectedStream) && m_selectedStream != m_windowStreamId) {
+    m_activeMonitorStream = activeMonitorStreamId;
+    if (m_followActiveMonitor) {
+        // Following the active monitor: jump to wherever the foreground
+        // window moved. If it's no longer known, fall back to a monitor.
+        if (m_activeMonitorStream != 0 && m_monitorStreamIds.contains(m_activeMonitorStream)) {
+            m_selectedStream = m_activeMonitorStream;
+        } else {
+            m_followActiveMonitor = false;
+            if (!m_monitorStreamIds.contains(m_selectedStream)) {
+                m_selectedStream = m_monitorStreamIds.value(0, 0);
+            }
+        }
+        update();
+        return;
+    }
+    if (m_followActiveWindow) {
+        // Following the active program: track wherever the foreground window
+        // moved. If there's no active window left, fall back to a monitor.
+        if (m_windowStreamId != 0) {
+            m_selectedStream = m_windowStreamId;
+        } else {
+            m_followActiveWindow = false;
+            m_selectedStream = m_monitorStreamIds.value(0, 0);
+        }
+    } else if (!m_monitorStreamIds.contains(m_selectedStream) && m_selectedStream != m_windowStreamId) {
+        // Keep the selection while it's still valid, else the first monitor.
         m_selectedStream = m_monitorStreamIds.value(0, 0);
         m_autoRotate = false;
         m_autoRotateTimer->stop();
@@ -177,13 +205,14 @@ QList<DeviceTileWidget::SelectorButton> DeviceTileWidget::selectorButtons() cons
         return buttons;
     }
     const int currentMonitor = qMax(0, m_monitorStreamIds.indexOf(m_selectedStream));
-    const bool monitorSelected = !m_autoRotate && m_monitorStreamIds.contains(m_selectedStream);
+    const bool monitorSelected = !m_autoRotate && !m_followActiveMonitor
+                              && m_monitorStreamIds.contains(m_selectedStream);
     const auto monitorButton = [&](int index) {
         SelectorButton button;
         button.kind = QStringLiteral("mon%1").arg(qMin(9, index + 1));
         button.monitorIndex = index;
         button.checked = monitorSelected && index == currentMonitor;
-        button.tooltip = QStringLiteral("Monitor %1").arg(index + 1);
+        button.tooltip = QStringLiteral("Choose monitor for watching");
         return button;
     };
     if (m_showMonitors) {
@@ -194,22 +223,25 @@ QList<DeviceTileWidget::SelectorButton> DeviceTileWidget::selectorButtons() cons
         SelectorButton window;
         window.kind = QStringLiteral("winmode");
         window.enabled = m_windowStreamId != 0;
-        window.checked = !m_autoRotate && m_windowStreamId != 0 && m_selectedStream == m_windowStreamId;
-        window.tooltip = QStringLiteral("Active window");
+        window.checked = m_followActiveWindow && m_windowStreamId != 0;
+        window.tooltip = QStringLiteral("Show only active program");
         buttons.append(window);
         buttons.append(monitorButton(currentMonitor));
         SelectorButton activeDisplay;
         activeDisplay.kind = QStringLiteral("automode");
-        // "Follow the display with the active window" -- which display
-        // that is isn't reported by the grabber, so it stays disabled.
-        activeDisplay.enabled = false;
-        activeDisplay.tooltip = QStringLiteral("Active display");
+        // "Follow the display with the active window" -- enabled once the
+        // grabber reports which monitor that is (see MainWindow's
+        // m_deviceActiveMonitorStream); disabled until then, as originally.
+        activeDisplay.enabled =
+            m_activeMonitorStream != 0 && m_monitorStreamIds.contains(m_activeMonitorStream);
+        activeDisplay.checked = m_followActiveMonitor && activeDisplay.enabled;
+        activeDisplay.tooltip = QStringLiteral("Show active monitor");
         buttons.append(activeDisplay);
         SelectorButton rotator;
         rotator.kind = QStringLiteral("rotationmode");
         rotator.enabled = m_monitorStreamIds.size() > 1;
         rotator.checked = m_autoRotate;
-        rotator.tooltip = QStringLiteral("Rotate displays");
+        rotator.tooltip = QStringLiteral("Show all monitors by turns");
         buttons.append(rotator);
     }
     int x = 1 + kSelectorMargin;
@@ -397,11 +429,23 @@ void DeviceTileWidget::clickSelector(const SelectorButton &button)
     if (button.monitorIndex >= 0) {
         // General row: pick this monitor and show all of them (when there's
         // more than one); Monitors row: pick one and go back.
+        m_followActiveWindow = false;
+        m_followActiveMonitor = false;
         selectStream(m_monitorStreamIds.at(button.monitorIndex));
         m_showMonitors = !m_showMonitors && m_monitorStreamIds.size() > 1;
     } else if (button.kind == QStringLiteral("winmode")) {
+        m_followActiveWindow = true;
+        m_followActiveMonitor = false;
         selectStream(m_windowStreamId);
+    } else if (button.kind == QStringLiteral("automode")) {
+        // Show active monitor: follow the display holding the foreground
+        // window, tracking it as it moves between monitors.
+        m_followActiveWindow = false;
+        m_followActiveMonitor = true;
+        selectStream(m_activeMonitorStream);
     } else if (button.kind == QStringLiteral("rotationmode")) {
+        m_followActiveWindow = false;
+        m_followActiveMonitor = false;
         m_autoRotate = true;
         m_autoRotateIndex = qMax(0, m_monitorStreamIds.indexOf(m_selectedStream));
         m_autoRotateTimer->start();
@@ -480,7 +524,7 @@ bool DeviceTileWidget::event(QEvent *event)
         const auto *help = static_cast<QHelpEvent *>(event);
         QString tip;
         if (closeRect().contains(help->pos())) {
-            tip = QStringLiteral("Close");
+            tip = QStringLiteral("Clean cell");
         }
         for (const SelectorButton &button : selectorButtons()) {
             if (button.rect.contains(help->pos())) {
@@ -505,7 +549,6 @@ QSize DeviceTileWidget::sizeHint() const
 AddDeviceTileWidget::AddDeviceTileWidget(QWidget *parent)
     : QWidget(parent)
 {
-    setMinimumSize(245, 155);
     setMouseTracking(true);
     setToolTip(QStringLiteral("Add employee"));
 }
@@ -521,9 +564,19 @@ void AddDeviceTileWidget::setLimitReached(bool limitReached)
     update();
 }
 
+void AddDeviceTileWidget::setFictive(bool fictive)
+{
+    if (m_fictive == fictive) {
+        return;
+    }
+    m_fictive = fictive;
+    update();
+}
+
 QRect AddDeviceTileWidget::plusRect() const
 {
-    return QRect(width() / 2 - 23, height() / 2 - 23, 46, 46);
+    const int size = m_fictive ? qMax(12, qMin(width(), height()) - 8) : 46;
+    return QRect(width() / 2 - size / 2, height() / 2 - size / 2, size, size);
 }
 
 void AddDeviceTileWidget::paintEvent(QPaintEvent *)
@@ -541,7 +594,12 @@ void AddDeviceTileWidget::paintEvent(QPaintEvent *)
         state = QStringLiteral("hovered");
     }
     const QPixmap plus = asset(QStringLiteral("emptyCell/plus_%1.png").arg(state));
-    painter.drawPixmap(width() / 2 - plus.width() / 2, height() / 2 - plus.height() / 2, plus);
+    const QRect target = plusRect();
+    if (m_fictive && (plus.width() > target.width() || plus.height() > target.height())) {
+        painter.drawPixmap(target, plus, plus.rect());
+    } else {
+        painter.drawPixmap(width() / 2 - plus.width() / 2, height() / 2 - plus.height() / 2, plus);
+    }
 }
 
 void AddDeviceTileWidget::mousePressEvent(QMouseEvent *event)
@@ -579,5 +637,5 @@ void AddDeviceTileWidget::leaveEvent(QEvent *)
 
 QSize AddDeviceTileWidget::sizeHint() const
 {
-    return QSize(335, 205);
+    return m_fictive ? QSize(60, 60) : QSize(335, 205);
 }

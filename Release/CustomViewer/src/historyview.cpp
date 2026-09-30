@@ -740,7 +740,11 @@ void HistoryInfoPanel::paintEvent(QPaintEvent *)
     }
 
     painter.setPen(Qt::white);
-    painter.setFont(bigFont());
+    // Section headers "Web pages"/"Programs" are Fonts.rb_big_b (Roboto Bold,
+    // 11pt bold) -- the row titles below use the regular rr_big instead.
+    QFont sectionFont = bigFont();
+    sectionFont.setBold(true);
+    painter.setFont(sectionFont);
     for (const Title &title : std::as_const(m_titles)) {
         painter.drawText(title.rect, Qt::AlignCenter, title.text);
     }
@@ -811,7 +815,7 @@ void HistoryInfoPanel::paintEvent(QPaintEvent *)
         painter.fillRect(QRectF(bar.left(), bar.bottom() - 1, bar.width(), 1), QColor(0x4a, 0x4b, 0x52));
         painter.fillRect(QRectF(bar.left(), bar.top(), bar.width() * qBound(0.0, row.item.percent, 100.0) / 100,
                                 bar.height()),
-                         QColor(0x1f, 0x80, 0x57));
+                         QColor(0x6f, 0x71, 0x7f));
         painter.restore();
         painter.setPen(Qt::white);
         QFont percentFont(QStringLiteral("Roboto"));
@@ -1789,6 +1793,22 @@ void HistoryChartWidget::setCurrentPositionMs(qint64 positionMs)
     update();
 }
 
+void HistoryChartWidget::setFillMode(bool on)
+{
+    if (m_fillMode == on) {
+        return;
+    }
+    m_fillMode = on;
+    if (on) {
+        // Let the layout stretch it to fill the tab instead of the fixed 186px.
+        setMinimumHeight(0);
+        setMaximumHeight(QWIDGETSIZE_MAX);
+    } else {
+        setFixedHeight(kChartsItemHeight);
+    }
+    update();
+}
+
 void HistoryChartWidget::paintEvent(QPaintEvent *)
 {
     QPainter painter(this);
@@ -1797,10 +1817,13 @@ void HistoryChartWidget::paintEvent(QPaintEvent *)
     // Filters.qml: anchors.fill chartsItem, leftMargin 10, bottomMargin 15;
     // Chart.qml with needPlayerLine splits it 40% (Activity/Efficiency) /
     // separator1 (10px) / 60% (filters).
-    const double chartHeight = height() - kChartBottomMargin;
-    const double extraHeight = chartHeight * 0.4;
-    const double filtersTop = extraHeight + 10;
-    const double filtersHeight = chartHeight * 0.6;
+    // Fill mode (Violations tab): the grid fills the whole widget height and
+    // there's no filters area; History's fixed strip splits 40% extra / 60%
+    // filters instead.
+    const double chartHeight = m_fillMode ? height() : height() - kChartBottomMargin;
+    const double extraHeight = m_fillMode ? chartHeight : chartHeight * 0.4;
+    const double filtersTop = m_fillMode ? 0.0 : extraHeight + 10;
+    const double filtersHeight = m_fillMode ? 0.0 : chartHeight * 0.6;
     const int gridLeft = m_gridLeft;
     const double gridWidth = qMax(1, width() - gridLeft);
     const qint64 span = m_rangeEnd - m_rangeStart;
@@ -1905,8 +1928,11 @@ void HistoryChartWidget::paintEvent(QPaintEvent *)
     }
     painter.restore();
 
-    // separator1: 10px tall, two lines centered, 25px short of the right.
-    drawHorizontalSeparator(painter, kChartLeft, extraHeight + 4, width() - kChartLeft - 25);
+    // separator1 (between the extra rows and the filters area): only in the
+    // fixed History layout -- fill mode has no filters area below.
+    if (!m_fillMode) {
+        drawHorizontalSeparator(painter, kChartLeft, extraHeight + 4, width() - kChartLeft - 25);
+    }
 
     // HistoryPlayerMarkerControl: 1px khaki line at the current marker,
     // chart height + 10 tall.
@@ -3148,6 +3174,7 @@ void HistoryView::updateInfoPanel()
     const QHash<QString, QString> categories = effectiveCategories();
     const auto build = [&](const QList<HistoryAppSegment> &segments) {
         QHash<QString, qint64> usedMs;
+        QHash<QString, QString> latestTitle;
         QString active;
         qint64 totalMs = 0;
         for (const HistoryAppSegment &segment : segments) {
@@ -3156,13 +3183,18 @@ void HistoryView::updateInfoPanel()
                 usedMs[segment.application] += overlap;
                 totalMs += overlap;
             }
+            if (!segment.title.isEmpty()) {
+                latestTitle[segment.application] = segment.title;
+            }
             if (segment.startMs <= moment && moment < segment.endMs) {
                 active = segment.application;
             }
         }
         QList<HistoryInfoPanel::Item> items;
         for (auto it = usedMs.cbegin(); it != usedMs.cend(); ++it) {
-            items.append({it.key(), QStringLiteral("No title"), 100.0 * it.value() / qMax<qint64>(1, totalMs),
+            const QString title = latestTitle.value(it.key());
+            items.append({it.key(), title.isEmpty() ? QStringLiteral("No title") : title,
+                          100.0 * it.value() / qMax<qint64>(1, totalMs),
                           categories.value(it.key()), it.key() == active});
         }
         std::sort(items.begin(), items.end(), [](const HistoryInfoPanel::Item &a, const HistoryInfoPanel::Item &b) {

@@ -11,7 +11,7 @@ class QAction;
 class QCheckBox;
 class QDialog;
 class QFrame;
-class QGridLayout;
+class QScrollArea;
 class QLabel;
 class QLineEdit;
 class QPushButton;
@@ -25,6 +25,9 @@ class MonitorWidget;
 class DeviceTileWidget;
 class DeviceDetailView;
 class HistoryView;
+// Defined in mainwindow.cpp -- the top header's Tracker/Reports/History/
+// Remote Control buttons (TopPanel.qml).
+class TopNavButton;
 class QResizeEvent;
 
 class MainWindow final : public QMainWindow
@@ -38,6 +41,17 @@ public:
     // testing (fills the settings dialog fields, then connects).
     void autoConnect(const QString &host, quint16 port, const QString &token, bool useTls);
 
+    // Which empty cell of the current tab's grid a new device goes into --
+    // QuadratorGrid.qml's empty-cell model: indexInGrid is the cell's slot in
+    // TrackerTab::cells; the thin "fictive" half-cells below/right of the grid
+    // also carry fictiveRow/fictiveColumn, which (in the "simple" layout) grow
+    // the grid by one row/column first -- see fillCell().
+    struct GridFillTarget {
+        int indexInGrid = -1;
+        int fictiveRow = -1;
+        int fictiveColumn = -1;
+    };
+
 private slots:
     void connectOrDisconnect();
     void startDemo();
@@ -48,14 +62,17 @@ private slots:
     void showPreferences();
     void showAbout();
     void updateStatus(const QString &text, bool connected);
+    // Refreshes the StaterNodes dot pixmap + tooltip for the given
+    // connection state (see the member).
+    void updateStaterNode(bool online);
     void setAgentIdentity(const QString &agentName, const QString &sessionName);
     void addMonitor(quint32 streamId, const QString &name, const QSize &size,
                     quint32 sessionId, const QString &sessionUsername,
                     const QString &sessionState, bool isWindow);
     void updateFrame(quint32 streamId, const QImage &image, quint64 sequence,
                      qint64 latencyMs);
-    void updateMetadata(quint32 streamId, const QString &application,
-                        const QString &idleText);
+    void updateMetadata(quint32 streamId, const QString &application, const QString &idleText,
+                        quint32 activeMonitorStreamId);
     void selectMonitor(quint32 streamId);
     void showMonitorFullScreen(quint32 streamId);
     void showProtocolError(const QString &message);
@@ -69,13 +86,12 @@ private slots:
     // ViewerControls/Tabs.qml: drag-reorder and double-click-to-rename.
     void moveTab(int from, int to);
     void renameTab(int index);
-    void openAddDeviceDialog();
-    // "Grids" subbar button -- matches the real Kickidler viewer's
-    // TrackerGridsPanel.qml (a slide-out panel of preset quadrator layouts,
-    // drag-and-drop of departments onto grid cells). We have no department/
-    // drag-drop model to draw from, so this is scoped down to what's
-    // actually useful here: picking a fixed column count for the current
-    // tab instead of the width-derived default (see TrackerTab::columnsOverride).
+    void openAddDeviceDialog(const GridFillTarget &target);
+    // "Grids" subbar button -- GridsPanel.qml/TrackerGridsPanel.qml: a
+    // popup of preset quadrator layout thumbnails (Horizontal/Vertical
+    // toggle + the named h_*/v_* templates, see gridTemplateSlots()) drawn
+    // from the original gridsPanel/*.png assets. Department drag-and-drop
+    // onto grid cells isn't reproduced -- no department model exists here.
     void openGridsPanel();
     // TrackerFiltersPanel.qml equivalent -- toggles a side panel listing
     // violation-rule categories. There's no rule engine anywhere in this
@@ -104,16 +120,11 @@ private:
     void applyStyle();
     void clearMonitors();
     void relayoutCurrentTab();
+    // QuadratorGrid.qml's + TrackerQuadrator.qml's onWantFill / onWantFree,
+    // ported 1:1 (see the definitions).
+    void fillTarget(const GridFillTarget &target, quint32 deviceKey);
+    void fillCell(int cell, quint32 deviceKey, bool canCollapse, int minColumns, int minRows);
     void removeTile(quint32 tileId);
-    // Column count for the current tracker grid width -- matches the real
-    // Kickidler viewer's TrackerGridsPanel (extracted QML: `property int
-    // columns: layoutIsVertical ? 3 : 4`, then grown via
-    // `Math.max(columns, quadrator.gridBestColumns)` to use extra width),
-    // floored at 4, no upper clamp.
-    int columnsForCurrentWidth() const;
-    // columnsForCurrentWidth(), unless the current tab has a fixed column
-    // count picked via the Grids panel (TrackerTab::columnsOverride).
-    int effectiveColumns() const;
     void loadSettings();
     void saveSettings() const;
     QString deviceDisplayName(quint32 sessionKey) const;
@@ -153,13 +164,23 @@ protected:
     QDialog *m_settingsDialog = nullptr;
     QPushButton *m_connectButton = nullptr;
     QLabel *m_statusLabel = nullptr;
+    // ViewerControls/StaterNodes.qml: the single-node server-status dot in
+    // the header (green/red) with a server-name tooltip. m_staterNodeName is
+    // the agent's reported name, shown in that tooltip.
+    QLabel *m_staterNodeDot = nullptr;
+    QString m_staterNodeName;
     QLabel *m_agentLabel = nullptr; // utils/NoEmployeesAssignedInformer.qml equivalent
     // utils/NoCNodeConnectionBlocker.qml / NoEmployeesAssignedInformer.qml
     // equivalents -- see connectOrDisconnect()/updateStatus()/addMonitor().
     QTimer *m_noConnectionTimer = nullptr;
     QTimer *m_noEmployeesTimer = nullptr;
+    // TrackerQuadratorGrid.qml's ScrollView and its content item: cells are
+    // positioned absolutely by relayoutCurrentTab() (QuadratorGrid.qml's
+    // mkCells4View geometry), not by a layout.
+    QScrollArea *m_gridScroll = nullptr;
     QWidget *m_monitorContainer = nullptr;
-    QGridLayout *m_monitorGrid = nullptr;
+    // The empty "+" cells of the current relayout -- rebuilt every time.
+    QList<QWidget *> m_emptyCellWidgets;
 
     // Every monitor ever discovered, regardless of which (if any) tab shows
     // its device. Canonical owner of every MonitorWidget instance -- the
@@ -218,6 +239,22 @@ protected:
     // windowlistcapture.cpp).
     QHash<quint32, QList<quint32>> m_deviceWindowStreams; // key: deviceKey
     QSet<quint32> m_windowStreamIds; // fast "is this streamId a window preview" check
+    // The window stream that most recently delivered a frame for this device
+    // = its currently active (foreground) program: WindowListCapture live-
+    // captures only the foreground window and leaves every other one as a
+    // one-shot static snapshot (see windowlistcapture.cpp), so the stream
+    // still getting fresh frames is the active one. This is what the tile's
+    // "Show only active program" (winmode) button follows -- picking the
+    // first-discovered window instead just shows some arbitrary, often
+    // background window whose lone snapshot may never have rendered ("No
+    // video"). 0 / absent until the first window frame arrives.
+    QHash<quint32, quint32> m_deviceActiveWindowStream; // key: deviceKey
+    // The monitor stream this device's foreground window is currently on,
+    // reported by the grabber in each metadata push (see
+    // ScreenCaptureManager::foregroundMonitorStreamId): the tile's "Show
+    // active monitor" (automode) target. 0 / absent = unknown, button stays
+    // disabled (as in the original when the grabber can't report it).
+    QHash<quint32, quint32> m_deviceActiveMonitorStream; // key: deviceKey
     // Device whose detail page is currently open, if any -- see
     // refreshOpenDeviceWindowPreviews().
     quint32 m_openDeviceKey = 0;
@@ -228,9 +265,28 @@ protected:
             quint32 deviceKey;
         };
         QString title;
-        QList<TileEntry> tiles;
-        // 0 = auto (columnsForCurrentWidth()); set via the Grids panel.
-        int columnsOverride = 0;
+        // TrackerQuadrator.qml's quadrator.cells: positional, with holes --
+        // an entry with tileId == 0 is an empty cell (null in the QML array).
+        // Freeing a cell leaves its hole in place (only trailing holes are
+        // trimmed), so the other tiles never shift.
+        QList<TileEntry> cells;
+        // GridsPanel.qml's currentLayout/currentLayoutIsVertical -- "simple"
+        // is the plain uniform grid; any other name is one of the fixed
+        // templates in QuadratorGrid.qml's mkCells4View.
+        QString gridLayout = QStringLiteral("simple");
+        bool gridLayoutVertical = false;
+        // TrackerQuadrator.qml's quadrator.gridColumns/gridRows (the shape
+        // of the "simple" layout), starting at gridBestColumns/gridBestRows.
+        int gridColumns = 2;
+        int gridRows = 2;
+        int tileCount() const
+        {
+            int count = 0;
+            for (const TileEntry &entry : cells) {
+                count += entry.tileId != 0 ? 1 : 0;
+            }
+            return count;
+        }
     };
     QList<TrackerTab> m_tabs;
     int m_currentTabIndex = 0;
@@ -247,14 +303,15 @@ protected:
     QFrame *m_subbar = nullptr;
     HistoryView *m_historyView = nullptr;
     DeviceDetailView *m_deviceDetailView = nullptr;
-    QPushButton *m_trackerNavButton = nullptr;
-    QPushButton *m_historyNavButton = nullptr;
+    TopNavButton *m_trackerNavButton = nullptr;
+    TopNavButton *m_historyNavButton = nullptr;
+    TopNavButton *m_reportsNavButton = nullptr;
+    TopNavButton *m_remoteControlNavButton = nullptr;
 
-    // TrackerDefaultPrompt.qml equivalent: swaps in for the monitor grid
-    // scroll area when the current tab has no real tiles at all.
+    // An empty tab shows the grid itself, full of "+" tiles
+    // (TrackerQuadratorEmptyCell.qml) -- not a separate placeholder screen.
     QStackedWidget *m_gridStack = nullptr;
     QWidget *m_gridScrollPage = nullptr;
-    QWidget *m_emptyPrompt = nullptr;
 
     // TrackerFiltersPanel.qml equivalent -- see toggleFiltersPanel().
     QFrame *m_filtersPanel = nullptr;

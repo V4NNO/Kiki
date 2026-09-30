@@ -19,6 +19,28 @@
 
 #include <memory>
 
+#ifdef Q_OS_WIN
+#include <windows.h>
+namespace {
+// The foreground window's title, recorded alongside the active application so
+// the viewer's "Programs" list can show a real title instead of "No title".
+QString foregroundWindowTitleForMetadata()
+{
+    HWND fg = GetForegroundWindow();
+    if (!fg) {
+        return QString();
+    }
+    wchar_t buffer[256] = {0};
+    GetWindowTextW(fg, buffer, 256);
+    return QString::fromWCharArray(buffer);
+}
+} // namespace
+#else
+namespace {
+QString foregroundWindowTitleForMetadata() { return QString(); }
+} // namespace
+#endif
+
 namespace {
 // This process is launched by PersonalHost (itself a service) with no
 // console, so stderr silently goes nowhere -- same reasoning as
@@ -116,9 +138,13 @@ int main(int argc, char *argv[])
     // below (which supplies the real inputEvents count).
     auto pushCurrentMetadata = [&host, &capture, currentApplication, currentIdleText,
                                 currentUrl](int inputEvents) {
+        // Same for every monitor this push -- which display currently holds
+        // the foreground window (the tile's "Show active monitor" target).
+        const quint32 activeMonitor = capture.foregroundMonitorStreamId();
+        const QString windowTitle = foregroundWindowTitleForMetadata();
         for (const MonitorInfo &monitor : capture.monitors()) {
             host.pushMetadata(monitor.streamId, *currentApplication, *currentIdleText, inputEvents,
-                              *currentUrl);
+                              *currentUrl, activeMonitor, windowTitle);
         }
     };
 

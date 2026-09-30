@@ -86,11 +86,15 @@ bool HistoryRecorder::start(QString *error)
         "  monitor_stream_id INTEGER NOT NULL,"
         "  application TEXT NOT NULL,"
         "  start_ms INTEGER NOT NULL,"
-        "  end_ms INTEGER NOT NULL"
+        "  end_ms INTEGER NOT NULL,"
+        "  title TEXT NOT NULL DEFAULT ''"
         ")"));
     query.exec(QStringLiteral(
         "CREATE INDEX IF NOT EXISTS idx_app_segments_monitor_time "
         "ON app_segments(monitor_stream_id, start_ms)"));
+    // Migration for databases created before app_segments carried a window
+    // title (fails harmlessly when the column already exists).
+    query.exec(QStringLiteral("ALTER TABLE app_segments ADD COLUMN title TEXT NOT NULL DEFAULT ''"));
 
     query.exec(QStringLiteral(
         "CREATE TABLE IF NOT EXISTS web_visits ("
@@ -351,7 +355,7 @@ void HistoryRecorder::recordActivity(quint32 sessionId, quint32 monitorStreamId,
 }
 
 void HistoryRecorder::noteApplication(quint32 sessionId, quint32 monitorStreamId,
-                                      const QString &application)
+                                      const QString &application, const QString &title)
 {
     if (!m_database.isOpen() || application.isEmpty()) {
         return;
@@ -361,9 +365,12 @@ void HistoryRecorder::noteApplication(quint32 sessionId, quint32 monitorStreamId
     auto it = m_openSegments.find(key);
 
     if (it != m_openSegments.end() && it->application == application) {
+        // Same app still in front: extend the segment and keep its title
+        // current (the window title changes while the app stays the same).
         QSqlQuery update(m_database);
-        update.prepare(QStringLiteral("UPDATE app_segments SET end_ms = ? WHERE id = ?"));
+        update.prepare(QStringLiteral("UPDATE app_segments SET end_ms = ?, title = ? WHERE id = ?"));
         update.addBindValue(now);
+        update.addBindValue(title);
         update.addBindValue(it->rowId);
         update.exec();
         return;
@@ -371,13 +378,14 @@ void HistoryRecorder::noteApplication(quint32 sessionId, quint32 monitorStreamId
 
     QSqlQuery insert(m_database);
     insert.prepare(QStringLiteral(
-        "INSERT INTO app_segments (session_id, monitor_stream_id, application, start_ms, end_ms) "
-        "VALUES (?, ?, ?, ?, ?)"));
+        "INSERT INTO app_segments (session_id, monitor_stream_id, application, start_ms, end_ms, title) "
+        "VALUES (?, ?, ?, ?, ?, ?)"));
     insert.addBindValue(sessionId);
     insert.addBindValue(monitorStreamId);
     insert.addBindValue(application);
     insert.addBindValue(now);
     insert.addBindValue(now);
+    insert.addBindValue(title);
     if (!insert.exec()) {
         emit logMessage(
             QStringLiteral("Nu am putut scrie segmentul de aplicatie: %1").arg(insert.lastError().text()));
@@ -534,7 +542,11 @@ QString HistoryRecorder::category(const QString &application) const
     if (query.exec() && query.next()) {
         return query.value(0).toString();
     }
-    return QStringLiteral("neutral");
+    // Apps with no saved category are uncategorized ("none"), not "neutral" --
+    // "none" is the uncategorized token the whole system uses (white text, no
+    // efficiency band), so new/unknown apps stay uncategorized until the user
+    // rates them.
+    return QStringLiteral("none");
 }
 
 QList<ActivitySample> HistoryRecorder::listActivity(quint32 monitorStreamId, const QString &day) const
@@ -565,7 +577,7 @@ QList<AppSegment> HistoryRecorder::listAppSegments(quint32 monitorStreamId, cons
     }
     QSqlQuery query(m_database);
     query.prepare(QStringLiteral(
-        "SELECT application, start_ms, end_ms FROM app_segments WHERE monitor_stream_id = ? "
+        "SELECT application, start_ms, end_ms, title FROM app_segments WHERE monitor_stream_id = ? "
         "AND strftime('%Y%m%d', start_ms / 1000, 'unixepoch', 'localtime') = ? "
         "ORDER BY start_ms ASC"));
     query.addBindValue(monitorStreamId);
@@ -574,7 +586,7 @@ QList<AppSegment> HistoryRecorder::listAppSegments(quint32 monitorStreamId, cons
     if (query.exec()) {
         while (query.next()) {
             segments.append(AppSegment{query.value(0).toString(), query.value(1).toLongLong(),
-                                       query.value(2).toLongLong()});
+                                       query.value(2).toLongLong(), query.value(3).toString()});
         }
     }
     return segments;
@@ -584,12 +596,18 @@ QList<AppUsage> HistoryRecorder::listRunningApplications(quint32 monitorStreamId
                                                           const QString &day) const
 {
     QHash<QString, qint64> totals;
+    QHash<QString, QString> latestTitle;
+    // Segments come back oldest-first, so the last non-empty title seen for
+    // an app is its most recent window title.
     for (const AppSegment &segment : listAppSegments(monitorStreamId, day)) {
         totals[segment.application] += qMax<qint64>(0, segment.endMs - segment.startMs);
+        if (!segment.title.isEmpty()) {
+            latestTitle[segment.application] = segment.title;
+        }
     }
     QList<AppUsage> usage;
     for (auto it = totals.cbegin(); it != totals.cend(); ++it) {
-        usage.append(AppUsage{it.key(), it.value(), category(it.key())});
+        usage.append(AppUsage{it.key(), it.value(), category(it.key()), latestTitle.value(it.key())});
     }
     std::sort(usage.begin(), usage.end(),
              [](const AppUsage &a, const AppUsage &b) { return a.totalMs > b.totalMs; });

@@ -25,7 +25,10 @@ public:
     void stopListening();
 
     void broadcastFrame(quint32 streamId, const QImage &image);
-    void broadcastMetadata(quint32 streamId, const QString &application, const QString &idleText);
+    // activeMonitorStreamId: the global monitor stream the foreground window
+    // is on (0 = none/unknown), for the tile's "Show active monitor" button.
+    void broadcastMetadata(quint32 streamId, const QString &application, const QString &idleText,
+                           quint32 activeMonitorStreamId);
     void broadcastMonitorList(const QList<MonitorInfo> &monitors);
     void broadcastStreamClosed(quint32 streamId);
 

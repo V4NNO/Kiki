@@ -287,7 +287,9 @@ void ViewerConnection::processJsonMessage(const ViewerProtocol::Header &header,
     }
     emit metadataChanged(header.streamId,
                          object.value(QStringLiteral("application")).toString(),
-                         object.value(QStringLiteral("idle")).toString());
+                         object.value(QStringLiteral("idle")).toString(),
+                         static_cast<quint32>(
+                             object.value(QStringLiteral("activeMonitor")).toDouble()));
 }
 
 void ViewerConnection::processFullFrame(const ViewerProtocol::Header &header,
@@ -477,7 +479,8 @@ void ViewerConnection::processHistoryQuery(const ViewerProtocol::Header &header,
             segments.append(HistoryAppSegment{
                 entry.value(QStringLiteral("application")).toString(),
                 static_cast<qint64>(entry.value(QStringLiteral("startMs")).toDouble()),
-                static_cast<qint64>(entry.value(QStringLiteral("endMs")).toDouble())});
+                static_cast<qint64>(entry.value(QStringLiteral("endMs")).toDouble()),
+                entry.value(QStringLiteral("title")).toString()});
         }
         emit historyAppSegmentsReceived(header.streamId, object.value(QStringLiteral("day")).toString(),
                                         segments);
@@ -499,7 +502,8 @@ void ViewerConnection::processHistoryQuery(const ViewerProtocol::Header &header,
             applications.append(HistoryAppUsage{
                 entry.value(QStringLiteral("application")).toString(),
                 static_cast<qint64>(entry.value(QStringLiteral("totalMs")).toDouble()),
-                entry.value(QStringLiteral("category")).toString()});
+                entry.value(QStringLiteral("category")).toString(),
+                entry.value(QStringLiteral("title")).toString()});
         }
         emit historyRunningApplicationsReceived(
             header.streamId, object.value(QStringLiteral("day")).toString(), applications);
@@ -618,15 +622,15 @@ void ViewerConnection::renderDemoFrame()
         emit metadataChanged(display.first,
                              display.first % 3 == 0 ? QStringLiteral("ms-teams.exe")
                                                     : QStringLiteral("chrome.exe"),
-                             QStringLiteral("Browser is active"));
+                             QStringLiteral("Browser is active"), 0);
     }
 
     emit metadataChanged(4, QStringLiteral("microsoft.lockapp"),
-                         QStringLiteral("Locked 00:10:15"));
+                         QStringLiteral("Locked 00:10:15"), 0);
     emit metadataChanged(7, QStringLiteral("microsoft.lockapp"),
-                         QStringLiteral("Locked 00:06:34"));
+                         QStringLiteral("Locked 00:06:34"), 0);
     emit metadataChanged(12, QStringLiteral("microsoft.lockapp"),
-                         QStringLiteral("Locked 00:36:52"));
+                         QStringLiteral("Locked 00:36:52"), 0);
     emit metadataChanged(15, QStringLiteral("microsoft.lockapp"),
-                         QStringLiteral("Locked 00:01:31"));
+                         QStringLiteral("Locked 00:01:31"), 0);
 }

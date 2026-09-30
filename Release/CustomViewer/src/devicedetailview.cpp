@@ -20,7 +20,10 @@
 #include <QPushButton>
 #include <QResizeEvent>
 #include <QScrollArea>
+#include <QSignalBlocker>
 #include <QSizePolicy>
+#include <QSlider>
+#include <QToolButton>
 #include <QStackedWidget>
 #include <QStyle>
 #include <QTableWidget>
@@ -68,6 +71,23 @@ QFont robotoBold(int px)
     f.setBold(true);
     return f;
 }
+
+// trackerQuadratorActiveCell/ChartTimeModels.qml: the Violations chart's
+// Range and Step options (seconds), and which steps each range allows.
+const qint64 kViolRangeSec[] = {3600, 14400, 28800, 86400, 432000, 864000};
+const char *const kViolRangeText[] = {"1 hour", "4 hours", "8 hours", "1 day", "5 days", "10 days"};
+const qint64 kViolStepSec[] = {60,   300,  600,   900,   1200,  1800,
+                               3600, 7200, 14400, 28800, 43200, 86400};
+const char *const kViolStepText[] = {"1 minute", "5 minutes", "10 minutes", "15 minutes",
+                                     "20 minutes", "30 minutes", "1 hour", "2 hours",
+                                     "4 hours", "8 hours", "12 hours", "1 day"};
+// timeRangeInit: step indices valid for each range index.
+const QList<int> kViolRangeSteps[] = {
+    {0, 1, 3}, {1, 3, 5, 6}, {2, 3, 5, 6}, {4, 5, 6}, {7, 8, 9, 10, 11}, {8, 9, 10, 11}};
+constexpr int kViolRangeCount = 6;
+// Chart.qml labelsAreaLeftMargin / labelsAreaRightMargin.
+constexpr int kViolGridLeft = 210;
+constexpr int kViolGridRight = 25;
 
 } // namespace
 
@@ -396,8 +416,29 @@ DeviceDetailView::DeviceDetailView(ViewerConnection &connection, QWidget *parent
     // TabView.qml: the whole page sits on a grayHatching background.
     setObjectName(QStringLiteral("detailView"));
     setAttribute(Qt::WA_StyledBackground);
+    // Controls/ScrollView.qml: a slim (~5px handle), rounded, arrow-less
+    // scrollbar over an invisible track (scrollView/*.png, handle ~#57585F),
+    // NOT Qt's default wide bar with up/down arrow buttons and a groove. Set
+    // on #detailView so it cascades to every QScrollArea in this page (the
+    // monitors/programs stacks and the right-hand info panel).
     setStyleSheet(QStringLiteral(
-        "QWidget#detailView { background-image: url(:/activeCell/grayHatching.png); }"));
+        // TabView.qml sits on a single grayHatching background (#47484f); the
+        // whole page -- both the video column and the SessionInfo panel --
+        // shares it. Make every structural container transparent so that one
+        // background shows through uniformly, instead of MainWindow's default
+        // #30323a QWidget fill covering it on the left/gutters. Inputs and the
+        // keylogger table keep their own explicit backgrounds (more specific
+        // rules below / the global QLineEdit rule).
+        "QWidget { background: transparent; }"
+        "QWidget#detailView { background-image: url(:/activeCell/grayHatching.png); }"
+        "QScrollBar:vertical { background: transparent; width: 11px; margin: 0 3px 0 3px; }"
+        "QScrollBar::handle:vertical { background: #57585f; border-radius: 2px; min-height: 30px; }"
+        "QScrollBar::handle:vertical:hover { background: #5f6067; }"
+        "QScrollBar:horizontal { background: transparent; height: 11px; margin: 3px 0 3px 0; }"
+        "QScrollBar::handle:horizontal { background: #57585f; border-radius: 2px; min-width: 30px; }"
+        "QScrollBar::handle:horizontal:hover { background: #5f6067; }"
+        "QScrollBar::add-line, QScrollBar::sub-line { width: 0; height: 0; background: none; border: none; }"
+        "QScrollBar::add-page, QScrollBar::sub-page { background: none; }"));
 
     // TabView.qml topLine: 27px, Back, 20px, caption, 20px, MultiSwitch,
     // 20px, headerZone (fills to the right); topMargin 17.
@@ -463,19 +504,22 @@ DeviceDetailView::DeviceDetailView(ViewerConnection &connection, QWidget *parent
     auto *programsPage = new QWidget(m_leftStack);
     auto *programsPageLayout = new QVBoxLayout(programsPage);
     programsPageLayout->setContentsMargins(0, 0, 0, 0);
-    auto *windowsScroll = new QScrollArea(programsPage);
+    // Same structure as Monitors: a scroll of previews, or a big StatusIcon
+    // placeholder when there's nothing to show (Windows.qml's instantStatusIcon
+    // -- not a plain gray text line).
+    m_programsInnerStack = new QStackedWidget(programsPage);
+    auto *windowsScroll = new QScrollArea(m_programsInnerStack);
     windowsScroll->setWidgetResizable(true);
     windowsScroll->setFrameShape(QFrame::NoFrame);
     m_windowsContainer = new QWidget(windowsScroll);
     m_windowsLayout = new QVBoxLayout(m_windowsContainer);
     m_windowsLayout->setContentsMargins(6, 6, 6, 6);
     m_windowsLayout->setSpacing(6);
-    m_programsPlaceholder = new QLabel(QStringLiteral("Se asteapta activitate..."), m_windowsContainer);
-    m_programsPlaceholder->setAlignment(Qt::AlignCenter);
-    m_programsPlaceholder->setStyleSheet(QStringLiteral("color: #6f747d; font-size: 11pt;"));
-    m_windowsLayout->addWidget(m_programsPlaceholder);
     windowsScroll->setWidget(m_windowsContainer);
-    programsPageLayout->addWidget(windowsScroll);
+    m_programsInnerStack->addWidget(windowsScroll);
+    m_programsStatusIcon = new BigStatusIcon(m_programsInnerStack);
+    m_programsInnerStack->addWidget(m_programsStatusIcon);
+    programsPageLayout->addWidget(m_programsInnerStack);
     m_leftStack->addWidget(programsPage);
     m_programsPage = programsPage;
 
@@ -516,18 +560,34 @@ DeviceDetailView::DeviceDetailView(ViewerConnection &connection, QWidget *parent
     m_keyloggerTable->verticalHeader()->hide();
     m_keyloggerTable->setEditTriggers(QAbstractItemView::NoEditTriggers);
     m_keyloggerTable->setSelectionBehavior(QAbstractItemView::SelectRows);
+    // keylogger/Table.qml: no fill -- the table sits on the page's grayHatching
+    // background, with #43444c decoration lines and a transparent header;
+    // cell text is light gray, the header white.
+    m_keyloggerTable->setShowGrid(true);
+    m_keyloggerTable->setStyleSheet(QStringLiteral(
+        "QTableWidget { background: transparent; gridline-color: #43444c; color: #cccccc; }"
+        "QTableWidget::item { background: transparent; }"
+        "QHeaderView::section { background: transparent; color: white; border: none;"
+        " border-bottom: 1px solid #43444c; padding: 4px; }"
+        "QTableCornerButton::section { background: transparent; }"));
     keyloggerLayout->addWidget(m_keyloggerTable, 1);
     m_leftStack->addWidget(keyloggerPage);
 
+    // Violations: the Activity/Efficiency Chart (Filters.qml in this org-less
+    // build).
+    auto *violationsPage = new QWidget(m_leftStack);
+    buildViolationsPage(violationsPage);
+    m_leftStack->addWidget(violationsPage);
+    m_violationsPage = violationsPage;
+
     // TrackerQuadratorActiveCell.qml's tab order: Programs, Monitors,
-    // Violations (shown but not selectable -- no violation engine here),
-    // Keylogger. Default is Monitors (currentIndex 1, WOOS-616).
+    // Violations, Keylogger. Default is Monitors (currentIndex 1, WOOS-616).
     m_tabSwitch->addTab(QStringLiteral("Programs"), QStringLiteral("tabs/windows_on.png"),
                         QStringLiteral("tabs/windows_off.png"));
     m_tabSwitch->addTab(QStringLiteral("Monitors"), QStringLiteral("tabs/monitor_on.png"),
                         QStringLiteral("tabs/monitor_off.png"));
     m_tabSwitch->addTab(QStringLiteral("Violations"), QStringLiteral("tabs/filters_on.png"),
-                        QStringLiteral("tabs/filters_off.png"), false);
+                        QStringLiteral("tabs/filters_off.png"));
     m_tabSwitch->addTab(QStringLiteral("Keylogger"), QStringLiteral("tabs/keylogger_on.png"),
                         QStringLiteral("tabs/keylogger_off.png"));
     connect(m_tabSwitch, &DetailTabSwitch::currentChanged, this, &DeviceDetailView::switchSubTab);
@@ -574,7 +634,7 @@ DeviceDetailView::DeviceDetailView(ViewerConnection &connection, QWidget *parent
     m_infoArea->setFrameShape(QFrame::NoFrame);
     m_infoArea->setWidgetResizable(true);
     m_infoArea->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
-    m_infoArea->setStyleSheet(QStringLiteral("background: transparent;"));
+    m_infoArea->setStyleSheet(QStringLiteral("QScrollArea { background: transparent; }"));
     m_infoPanel = new HistoryInfoPanel;
     m_infoArea->setWidget(m_infoPanel);
     connect(m_infoPanel, &HistoryInfoPanel::categorizationRequested, this,
@@ -629,6 +689,7 @@ DeviceDetailView::DeviceDetailView(ViewerConnection &connection, QWidget *parent
                 }
                 m_categories = categories;
                 updateInfoPanel();
+                updateViolationsChart(); // efficiency colors depend on categories
             });
     connect(&m_connection, &ViewerConnection::historyEmployeeCategoriesReceived, this,
             [this](quint32 streamId, const QHash<QString, QString> &categories) {
@@ -637,6 +698,25 @@ DeviceDetailView::DeviceDetailView(ViewerConnection &connection, QWidget *parent
                 }
                 m_employeeCategories = categories;
                 updateInfoPanel();
+                updateViolationsChart(); // efficiency colors depend on categories
+            });
+    // Violations chart data (Activity histogram + Efficiency bands), stored
+    // per day and combined over the current window.
+    connect(&m_connection, &ViewerConnection::historyActivityReceived, this,
+            [this](quint32 streamId, const QString &day, const QList<HistoryActivitySample> &samples) {
+                if (streamId != m_primaryStreamId || !m_violRequestedDays.contains(day)) {
+                    return;
+                }
+                m_violActivityByDay.insert(day, samples);
+                updateViolationsChart();
+            });
+    connect(&m_connection, &ViewerConnection::historyAppSegmentsReceived, this,
+            [this](quint32 streamId, const QString &day, const QList<HistoryAppSegment> &segments) {
+                if (streamId != m_primaryStreamId || !m_violRequestedDays.contains(day)) {
+                    return;
+                }
+                m_violSegmentsByDay.insert(day, segments);
+                updateViolationsChart();
             });
     connect(&m_connection, &ViewerConnection::historyKeystrokesReceived, this,
             [this](quint32 streamId, const QString &day, const QList<HistoryKeystrokeEntry> &entries) {
@@ -664,24 +744,281 @@ DeviceDetailView::DeviceDetailView(ViewerConnection &connection, QWidget *parent
 
 void DeviceDetailView::switchSubTab(int index)
 {
-    // Tab index -> stacked page. Violations (2) has no page and isn't
-    // selectable, so it never reaches here.
+    // Tab index -> stacked page.
     QWidget *page = m_monitorsPage;
     if (index == 0) {
         page = m_programsPage;
+    } else if (index == 2) {
+        page = m_violationsPage;
     } else if (index == 3) {
         page = m_keyloggerPage;
     }
     m_leftStack->setCurrentWidget(page);
-    // The keylog ticker sits under the video on Programs/Monitors only; the
-    // Keylogger tab shows the full log instead.
+    const bool videoTab = page == m_programsPage || page == m_monitorsPage;
+    // The keylog ticker sits under the video on Programs/Monitors only.
     if (m_keylogTicker) {
-        m_keylogTicker->setVisible(page != m_keyloggerPage);
+        m_keylogTicker->setVisible(videoTab);
+    }
+    // SessionInfo (Web pages/Programs) belongs to Windows.qml (Programs/
+    // Monitors); Violations (Chart) and Keylogger span the full width.
+    if (m_rightColumn) {
+        m_rightColumn->setVisible(videoTab);
+    }
+    if (index == 2) {
+        // (Re)load the Activity/Efficiency data for the current window when
+        // the Violations tab is opened.
+        reloadViolationsData();
     }
     // A hidden QStackedWidget page's children don't necessarily get a real
     // layout pass (container width can stay stale/zero) until the page is
     // actually made current.
     QTimer::singleShot(0, this, &DeviceDetailView::resizeMonitorsToFit);
+}
+
+namespace {
+// A thin, arrow-less slider matching Controls/Slider.qml's look.
+QString violSliderQss()
+{
+    return QStringLiteral(
+        "QSlider::groove:horizontal { height: 2px; background: #43444c; margin: 0 8px; }"
+        "QSlider::handle:horizontal { width: 13px; height: 13px; margin: -6px -7px;"
+        " border-radius: 7px; background: #b7b7b7; }"
+        "QSlider::handle:horizontal:hover { background: #ffffff; }");
+}
+// A row of evenly-distributed labels beneath a slider.
+QWidget *makeLabelRow(const QStringList &texts, QWidget *parent)
+{
+    auto *row = new QWidget(parent);
+    auto *lay = new QHBoxLayout(row);
+    lay->setContentsMargins(4, 0, 4, 0);
+    lay->setSpacing(0);
+    for (int i = 0; i < texts.size(); ++i) {
+        auto *label = new QLabel(texts.at(i), row);
+        label->setStyleSheet(QStringLiteral("color: #8f9298; font-size: 8pt;"));
+        Qt::Alignment align = Qt::AlignHCenter;
+        if (i == 0) {
+            align = Qt::AlignLeft;
+        } else if (i == texts.size() - 1) {
+            align = Qt::AlignRight;
+        }
+        label->setAlignment(align | Qt::AlignVCenter);
+        lay->addWidget(label, 1);
+    }
+    return row;
+}
+} // namespace
+
+void DeviceDetailView::buildViolationsPage(QWidget *page)
+{
+    auto *lay = new QVBoxLayout(page);
+    lay->setContentsMargins(0, 0, 0, 0);
+    lay->setSpacing(0);
+
+    // Time axis (dates/times), aligned to the chart grid (leftMargin 210,
+    // rightMargin 25), with the shift-left/right buttons at its ends.
+    auto *axisRow = new QWidget(page);
+    auto *axisLay = new QHBoxLayout(axisRow);
+    axisLay->setContentsMargins(kViolGridLeft - 18, 0, kViolGridRight - 18, 0);
+    axisLay->setSpacing(0);
+    auto *shiftLeft = new QToolButton(axisRow);
+    shiftLeft->setText(QStringLiteral("‹"));
+    shiftLeft->setFixedWidth(18);
+    shiftLeft->setStyleSheet(QStringLiteral(
+        "QToolButton { color: #b7b7b7; background: transparent; border: none; font-size: 14pt; }"
+        "QToolButton:hover { color: white; }"));
+    axisLay->addWidget(shiftLeft);
+    m_violAxis = new TimeAxisWidget(axisRow);
+    m_violAxis->setFixedHeight(30);
+    axisLay->addWidget(m_violAxis, 1);
+    auto *shiftRight = new QToolButton(axisRow);
+    shiftRight->setText(QStringLiteral("›"));
+    shiftRight->setFixedWidth(18);
+    shiftRight->setStyleSheet(shiftLeft->styleSheet());
+    axisLay->addWidget(shiftRight);
+    axisRow->setFixedHeight(30);
+    lay->addWidget(axisRow);
+
+    // The Activity/Efficiency chart, filling the rest.
+    m_violChart = new HistoryChartWidget(page);
+    m_violChart->setFillMode(true);
+    m_violChart->setGridLeft(kViolGridLeft);
+    lay->addWidget(m_violChart, 1);
+
+    // Range + Step selectors at the bottom (Control.qml).
+    auto *controls = new QWidget(page);
+    auto *cLay = new QHBoxLayout(controls);
+    cLay->setContentsMargins(kViolGridLeft, 6, kViolGridRight, 10);
+    cLay->setSpacing(30);
+
+    // Range block.
+    auto *rangeBlock = new QWidget(controls);
+    auto *rangeOuter = new QHBoxLayout(rangeBlock);
+    rangeOuter->setContentsMargins(0, 0, 0, 0);
+    rangeOuter->setSpacing(8);
+    auto *rangeTitle = new QLabel(QStringLiteral("Range"), rangeBlock);
+    rangeTitle->setStyleSheet(QStringLiteral("color: white; font-size: 9pt;"));
+    rangeOuter->addWidget(rangeTitle, 0, Qt::AlignVCenter);
+    auto *rangeCol = new QWidget(rangeBlock);
+    auto *rangeColLay = new QVBoxLayout(rangeCol);
+    rangeColLay->setContentsMargins(0, 0, 0, 0);
+    rangeColLay->setSpacing(2);
+    m_violRangeSlider = new QSlider(Qt::Horizontal, rangeCol);
+    m_violRangeSlider->setStyleSheet(violSliderQss());
+    m_violRangeSlider->setRange(0, kViolRangeCount - 1);
+    m_violRangeSlider->setValue(m_violRangeIndex);
+    m_violRangeSlider->setPageStep(1);
+    rangeColLay->addWidget(m_violRangeSlider);
+    QStringList rangeTexts;
+    for (const char *t : kViolRangeText) {
+        rangeTexts << QString::fromLatin1(t);
+    }
+    rangeColLay->addWidget(makeLabelRow(rangeTexts, rangeCol));
+    rangeOuter->addWidget(rangeCol, 1);
+    cLay->addWidget(rangeBlock, 3);
+
+    // Step block.
+    auto *stepBlock = new QWidget(controls);
+    auto *stepOuter = new QHBoxLayout(stepBlock);
+    stepOuter->setContentsMargins(0, 0, 0, 0);
+    stepOuter->setSpacing(8);
+    auto *stepTitle = new QLabel(QStringLiteral("Step"), stepBlock);
+    stepTitle->setStyleSheet(QStringLiteral("color: white; font-size: 9pt;"));
+    stepOuter->addWidget(stepTitle, 0, Qt::AlignVCenter);
+    auto *stepCol = new QWidget(stepBlock);
+    auto *stepColLay = new QVBoxLayout(stepCol);
+    stepColLay->setContentsMargins(0, 0, 0, 0);
+    stepColLay->setSpacing(2);
+    m_violStepSlider = new QSlider(Qt::Horizontal, stepCol);
+    m_violStepSlider->setStyleSheet(violSliderQss());
+    m_violStepSlider->setPageStep(1);
+    stepColLay->addWidget(m_violStepSlider);
+    m_violStepLabels = new QWidget(stepCol);
+    new QHBoxLayout(m_violStepLabels);
+    stepColLay->addWidget(m_violStepLabels);
+    stepOuter->addWidget(stepCol, 1);
+    cLay->addWidget(stepBlock, 2);
+
+    lay->addWidget(controls);
+
+    connect(m_violRangeSlider, &QSlider::valueChanged, this, [this](int value) {
+        m_violRangeIndex = qBound(0, value, kViolRangeCount - 1);
+        applyViolationsStepForRange();
+        reloadViolationsData();
+    });
+    connect(m_violStepSlider, &QSlider::valueChanged, this, [this](int value) {
+        const QList<int> &allowed = kViolRangeSteps[m_violRangeIndex];
+        if (value >= 0 && value < allowed.size()) {
+            m_violStepIndex = allowed.at(value);
+            reloadViolationsData();
+        }
+    });
+    connect(shiftLeft, &QToolButton::clicked, this, [this] {
+        const qint64 end = m_violWindowEndMs > 0 ? m_violWindowEndMs : QDateTime::currentMSecsSinceEpoch();
+        m_violWindowEndMs = end - kViolRangeSec[m_violRangeIndex] * 1000;
+        reloadViolationsData();
+    });
+    connect(shiftRight, &QToolButton::clicked, this, [this] {
+        if (m_violWindowEndMs <= 0) {
+            return; // already at "now"
+        }
+        m_violWindowEndMs += kViolRangeSec[m_violRangeIndex] * 1000;
+        if (m_violWindowEndMs >= QDateTime::currentMSecsSinceEpoch()) {
+            m_violWindowEndMs = 0; // back to live "now"
+        }
+        reloadViolationsData();
+    });
+
+    applyViolationsStepForRange();
+}
+
+void DeviceDetailView::applyViolationsStepForRange()
+{
+    if (!m_violStepSlider || !m_violStepLabels) {
+        return;
+    }
+    const QList<int> &allowed = kViolRangeSteps[m_violRangeIndex];
+    // Keep the current step if it's valid for this range, else pick the last
+    // (coarsest) allowed step.
+    int pos = allowed.indexOf(m_violStepIndex);
+    if (pos < 0) {
+        pos = allowed.size() - 1;
+        m_violStepIndex = allowed.at(pos);
+    }
+    {
+        QSignalBlocker blocker(m_violStepSlider);
+        m_violStepSlider->setRange(0, allowed.size() - 1);
+        m_violStepSlider->setValue(pos);
+    }
+    // Rebuild the step labels for the allowed set.
+    auto *oldLay = m_violStepLabels->layout();
+    if (oldLay) {
+        QLayoutItem *item = nullptr;
+        while ((item = oldLay->takeAt(0)) != nullptr) {
+            delete item->widget();
+            delete item;
+        }
+        delete oldLay;
+    }
+    QStringList texts;
+    for (int idx : allowed) {
+        texts << QString::fromLatin1(kViolStepText[idx]);
+    }
+    auto *built = makeLabelRow(texts, m_violStepLabels);
+    auto *host = new QVBoxLayout(m_violStepLabels);
+    host->setContentsMargins(0, 0, 0, 0);
+    host->addWidget(built);
+}
+
+void DeviceDetailView::reloadViolationsData()
+{
+    if (!m_violChart || m_primaryStreamId == 0) {
+        return;
+    }
+    const qint64 rangeMs = kViolRangeSec[m_violRangeIndex] * 1000;
+    const qint64 stepMs = kViolStepSec[m_violStepIndex] * 1000;
+    qint64 endMs = m_violWindowEndMs > 0 ? m_violWindowEndMs : QDateTime::currentMSecsSinceEpoch();
+    // Align the window edge to a step boundary (in local time) so the axis
+    // ticks land on round times -- TrackerQuadratorActiveCell.qml floors
+    // "now" to the step the same way.
+    const qint64 tzOffMs = QDateTime::currentDateTime().offsetFromUtc() * 1000LL;
+    endMs = ((endMs + tzOffMs) / stepMs) * stepMs - tzOffMs;
+    const qint64 startMs = endMs - rangeMs;
+    m_violChart->setRange(startMs, endMs);
+    m_violChart->setStepMs(stepMs);
+    m_violAxis->setRange(startMs, endMs);
+    m_violAxis->setStepMs(stepMs);
+
+    // Query every day the window touches (data is stored per day); keep only
+    // those days so stale ones don't linger.
+    m_violRequestedDays.clear();
+    QDate day = QDateTime::fromMSecsSinceEpoch(startMs).date();
+    const QDate lastDay = QDateTime::fromMSecsSinceEpoch(endMs).date();
+    for (; day <= lastDay; day = day.addDays(1)) {
+        const QString key = day.toString(QStringLiteral("yyyyMMdd"));
+        m_violRequestedDays.insert(key);
+        m_connection.requestHistoryActivity(m_primaryStreamId, key);
+        m_connection.requestHistoryAppSegments(m_primaryStreamId, key);
+    }
+    updateViolationsChart();
+}
+
+void DeviceDetailView::updateViolationsChart()
+{
+    if (!m_violChart) {
+        return;
+    }
+    QList<HistoryActivitySample> activity;
+    QList<HistoryAppSegment> segments;
+    for (const QString &day : std::as_const(m_violRequestedDays)) {
+        activity += m_violActivityByDay.value(day);
+        segments += m_violSegmentsByDay.value(day);
+    }
+    QHash<QString, QString> categories = m_categories;
+    for (auto it = m_employeeCategories.cbegin(); it != m_employeeCategories.cend(); ++it) {
+        categories.insert(it.key(), it.value());
+    }
+    m_violChart->setActivity(activity);
+    m_violChart->setEfficiency(segments, categories);
 }
 
 void DeviceDetailView::showDevice(quint32 sessionKey, const QString &displayName,
@@ -717,6 +1054,15 @@ void DeviceDetailView::showDevice(quint32 sessionKey, const QString &displayName
     m_employeeCategories.clear();
     m_activeApplication.clear();
     updateInfoPanel();
+    // Reset the Violations chart to a fresh "now"-anchored window.
+    m_violWindowEndMs = 0;
+    m_violActivityByDay.clear();
+    m_violSegmentsByDay.clear();
+    m_violRequestedDays.clear();
+    if (m_violChart) {
+        m_violChart->setActivity({});
+        m_violChart->setEfficiency({}, {});
+    }
     m_tabSwitch->setCurrentIndex(1);
     switchSubTab(1);
     refreshStats();
@@ -726,11 +1072,19 @@ void DeviceDetailView::refreshWindowPreviews(const QList<MonitorWidget *> &windo
 {
     m_currentWindowPreviews = windowPreviews;
     layoutPreviewWidgets(m_windowsLayout, m_windowsContainer, windowPreviews);
-    m_programsPlaceholder->setVisible(windowPreviews.isEmpty());
-    if (windowPreviews.isEmpty()) {
-        // layoutPreviewWidgets() cleared the layout, including the
-        // placeholder -- put it back since there's nothing else to show.
-        m_windowsLayout->addWidget(m_programsPlaceholder);
+    // Show the big StatusIcon placeholder (same kind mapping as Monitors)
+    // when there are no window previews, else the previews scroll.
+    if (windowPreviews.isEmpty() && m_programsInnerStack) {
+        QString kind = QStringLiteral("emptyStream");
+        if (m_sessionState == QStringLiteral("disconnected")) {
+            kind = QStringLiteral("offline");
+        } else if (m_sessionState == QStringLiteral("idle") || m_sessionState == QStringLiteral("other")) {
+            kind = QStringLiteral("noSessions");
+        }
+        m_programsStatusIcon->setKind(kind);
+        m_programsInnerStack->setCurrentIndex(1);
+    } else if (m_programsInnerStack) {
+        m_programsInnerStack->setCurrentIndex(0);
     }
     resizeMonitorsToFit();
 }
@@ -860,7 +1214,8 @@ void DeviceDetailView::updateInfoPanel()
         }
         QList<HistoryInfoPanel::Item> items;
         for (const HistoryAppUsage &entry : entries) {
-            items.append({entry.application, QStringLiteral("No title"),
+            items.append({entry.application,
+                          entry.title.isEmpty() ? QStringLiteral("No title") : entry.title,
                           100.0 * entry.totalMs / qMax<qint64>(1, totalMs),
                           categories.value(entry.application, entry.category),
                           matchActive && entry.application == m_activeApplication});

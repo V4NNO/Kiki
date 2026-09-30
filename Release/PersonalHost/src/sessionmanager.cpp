@@ -359,7 +359,8 @@ void SessionManager::onFrameReady(quint32 sessionId, quint32 localStreamId, cons
 
 void SessionManager::onMetadataChanged(quint32 sessionId, quint32 localStreamId,
                                        const QString &application, const QString &idleText,
-                                       int inputEvents, const QString &url)
+                                       int inputEvents, const QString &url,
+                                       quint32 activeMonitorLocalStreamId, const QString &windowTitle)
 {
     auto it = m_sessions.constFind(sessionId);
     if (it == m_sessions.constEnd()) {
@@ -369,11 +370,17 @@ void SessionManager::onMetadataChanged(quint32 sessionId, quint32 localStreamId,
     if (globalId == 0) {
         return;
     }
+    // Translate the active-monitor stream to the id viewers actually know
+    // (0 stays 0 = "no/unknown active monitor").
+    const quint32 activeMonitorGlobalId =
+        activeMonitorLocalStreamId == 0
+            ? 0
+            : it.value().localToGlobal.value(activeMonitorLocalStreamId, 0);
     if (m_server) {
-        m_server->broadcastMetadata(globalId, application, idleText);
+        m_server->broadcastMetadata(globalId, application, idleText, activeMonitorGlobalId);
     }
     if (m_historyRecorder) {
-        m_historyRecorder->noteApplication(sessionId, globalId, application);
+        m_historyRecorder->noteApplication(sessionId, globalId, application, windowTitle);
         m_historyRecorder->noteUrl(sessionId, globalId, url);
         // inputEvents is only meaningful on the periodic 10s sample tick
         // (see PersonalSubService main.cpp); app-change-triggered metadata

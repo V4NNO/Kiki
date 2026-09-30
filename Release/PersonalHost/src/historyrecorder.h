@@ -14,12 +14,14 @@ struct AppSegment {
     QString application;
     qint64 startMs = 0;
     qint64 endMs = 0;
+    QString title; // foreground window title seen for this segment
 };
 
 struct AppUsage {
     QString application;
     qint64 totalMs = 0;
     QString category; // "productive" | "neutral" | "unproductive"
+    QString title;    // a representative window title (the most recent one)
 };
 
 struct WebVisit {
@@ -83,7 +85,8 @@ public:
     // Extends the currently open segment for (sessionId, monitorStreamId)
     // if application is unchanged, otherwise closes it and opens a new one.
     // Safe to call as often as metadata arrives.
-    void noteApplication(quint32 sessionId, quint32 monitorStreamId, const QString &application);
+    void noteApplication(quint32 sessionId, quint32 monitorStreamId, const QString &application,
+                         const QString &title = QString());
 
     // Same idea as noteApplication(), but url is normally empty (foreground
     // app isn't a browser, or extraction failed) -- unlike application,

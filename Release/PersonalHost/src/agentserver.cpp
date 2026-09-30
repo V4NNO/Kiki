@@ -150,11 +150,11 @@ void AgentServer::broadcastFrame(quint32 streamId, const QImage &image)
 }
 
 void AgentServer::broadcastMetadata(quint32 streamId, const QString &application,
-                                    const QString &idleText)
+                                    const QString &idleText, quint32 activeMonitorStreamId)
 {
     for (AgentConnection *connection : std::as_const(m_connections)) {
         if (connection->isAuthenticated()) {
-            connection->pushMetadata(streamId, application, idleText);
+            connection->pushMetadata(streamId, application, idleText, activeMonitorStreamId);
         }
     }
 }

@@ -43,8 +43,12 @@ signals:
     void monitorDiscovered(quint32 sessionId, quint32 localStreamId, const QString &name,
                            const QSize &size, bool isWindow);
     void frameReady(quint32 sessionId, quint32 localStreamId, const QImage &image);
+    // activeMonitorLocalStreamId: the sub-service-local monitor stream the
+    // foreground window is on (0 if none) -- SessionManager translates it to
+    // its global id before relaying to viewers.
     void metadataChanged(quint32 sessionId, quint32 localStreamId, const QString &application,
-                         const QString &idleText, int inputEvents, const QString &url);
+                         const QString &idleText, int inputEvents, const QString &url,
+                         quint32 activeMonitorLocalStreamId, const QString &windowTitle);
     void keystrokeReceived(quint32 sessionId, const QString &windowTitle, const QString &text);
     // See MessageType::StreamClosed -- the authoritative "this window
     // stream is gone" signal, forwarded as-is with the local streamId

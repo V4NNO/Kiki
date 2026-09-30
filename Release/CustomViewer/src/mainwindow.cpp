@@ -18,7 +18,6 @@
 #include <QFileDialog>
 #include <QFormLayout>
 #include <QFrame>
-#include <QGridLayout>
 #include <QHBoxLayout>
 #include <QInputDialog>
 #include <QKeyEvent>
@@ -30,9 +29,12 @@
 #include <QMenu>
 #include <QMouseEvent>
 #include <QPainter>
+#include <QPixmap>
 #include <QPushButton>
+#include <QRect>
 #include <QResizeEvent>
 #include <QScrollArea>
+#include <QSet>
 #include <QSettings>
 #include <QSignalBlocker>
 #include <QSpinBox>
@@ -41,6 +43,7 @@
 #include <QStatusBar>
 #include <QStyle>
 #include <QSysInfo>
+#include <QtMath>
 #include <QTabBar>
 #include <QTimer>
 #include <QTreeWidget>
@@ -48,6 +51,8 @@
 #include <QVBoxLayout>
 
 #include <algorithm>
+#include <climits>
+#include <cmath>
 
 namespace {
 // The real Kickidler viewer's own limit, confirmed from its extracted QML
@@ -166,6 +171,303 @@ private:
     bool m_hovered = false;
 };
 }
+
+// TopPanel.qml's primary activity row (Tracker/Reports/History/Remote
+// Control): icon (topPanel/b_<kind>_<state>.png, 20x17) + Fonts bold 11pt
+// text, 5px apart, no background at all -- only the icon/text color change
+// on hover/press/active. Text color: activated #fcfcfc, pressed #b7b7b7,
+// hovered #cfcfcf, normal #287853 (dark green, so an inactive tab all but
+// disappears into the header until touched). File scope (not the anonymous
+// namespace above) so mainwindow.h can forward-declare it and hold typed
+// m_trackerNavButton/m_historyNavButton pointers -- setActivated() isn't
+// part of QPushButton's own interface.
+class TopNavButton final : public QPushButton
+{
+public:
+    TopNavButton(const QString &kind, const QString &text, QWidget *parent)
+        : QPushButton(text, parent), m_kind(kind)
+    {
+        setObjectName(QStringLiteral("topNavButton"));
+        setIconSize(QSize(20, 17));
+        setCursor(Qt::PointingHandCursor);
+        setCheckable(true);
+        setFocusPolicy(Qt::NoFocus);
+        setStyleSheet(QStringLiteral(
+            "QPushButton#topNavButton { border: none; background: transparent; padding: 10px 0; "
+            "font-size: 11pt; font-weight: 700; }"));
+        updateState();
+    }
+
+    // The real "currentActivity" concept -- exactly one of these is
+    // activated at a time; MainWindow drives it explicitly instead of
+    // relying on checked/exclusive-group semantics, since Reports/Remote
+    // Control never actually become active (no backing feature).
+    void setActivated(bool activated)
+    {
+        setChecked(activated);
+        updateState();
+    }
+
+protected:
+    void enterEvent(QEnterEvent *event) override
+    {
+        m_hovered = true;
+        updateState();
+        QPushButton::enterEvent(event);
+    }
+    void leaveEvent(QEvent *event) override
+    {
+        m_hovered = false;
+        updateState();
+        QPushButton::leaveEvent(event);
+    }
+    void mousePressEvent(QMouseEvent *event) override
+    {
+        QPushButton::mousePressEvent(event);
+        updateState();
+    }
+    void mouseReleaseEvent(QMouseEvent *event) override
+    {
+        QPushButton::mouseReleaseEvent(event);
+        updateState();
+    }
+
+private:
+    void updateState()
+    {
+        QString state;
+        QColor color;
+        if (!isEnabled()) {
+            state = QStringLiteral("normal");
+            color = QColor(0x1c, 0x4d, 0x36); // dimmer still than normal -- disabled
+        } else if (isDown()) {
+            state = QStringLiteral("pressed");
+            color = QColor(0xb7, 0xb7, 0xb7);
+        } else if (isChecked()) {
+            state = QStringLiteral("activated");
+            color = QColor(0xfc, 0xfc, 0xfc);
+        } else if (m_hovered) {
+            state = QStringLiteral("hovered");
+            color = QColor(0xcf, 0xcf, 0xcf);
+        } else {
+            state = QStringLiteral("normal");
+            color = QColor(0x28, 0x78, 0x53);
+        }
+        setIcon(QIcon(QStringLiteral(":/topPanel/b_%1_%2.png").arg(m_kind, state)));
+        setStyleSheet(QStringLiteral(
+            "QPushButton#topNavButton { border: none; background: transparent; padding: 10px 0; "
+            "font-size: 11pt; font-weight: 700; color: %1; }").arg(color.name()));
+    }
+
+    QString m_kind;
+    bool m_hovered = false;
+};
+
+// One thumbnail in the Grids panel -- utils/GridsPanel.qml's ImageButton
+// delegate: gridsPanel/<key>_<state>.png, checkable (exclusive within the
+// panel), no text.
+class GridLayoutButton final : public QPushButton
+{
+public:
+    GridLayoutButton(const QString &assetKey, const QSize &thumbnailSize, QWidget *parent)
+        : QPushButton(parent), m_assetKey(assetKey)
+    {
+        setObjectName(QStringLiteral("gridLayoutButton"));
+        setIconSize(thumbnailSize);
+        setFixedSize(thumbnailSize + QSize(2, 20)); // topMargin/bottomMargin: 10 each
+        setCheckable(true);
+        setCursor(Qt::PointingHandCursor);
+        setFlat(true);
+        setStyleSheet(QStringLiteral("QPushButton#gridLayoutButton { border: none; background: transparent; }"));
+        updateIcon();
+    }
+
+protected:
+    void enterEvent(QEnterEvent *event) override
+    {
+        m_hovered = true;
+        updateIcon();
+        QPushButton::enterEvent(event);
+    }
+    void leaveEvent(QEvent *event) override
+    {
+        m_hovered = false;
+        updateIcon();
+        QPushButton::leaveEvent(event);
+    }
+    void mousePressEvent(QMouseEvent *event) override
+    {
+        QPushButton::mousePressEvent(event);
+        updateIcon();
+    }
+    void mouseReleaseEvent(QMouseEvent *event) override
+    {
+        QPushButton::mouseReleaseEvent(event);
+        updateIcon();
+    }
+    void checkStateSet() override
+    {
+        QPushButton::checkStateSet();
+        updateIcon();
+    }
+
+private:
+    void updateIcon()
+    {
+        const QString state = isDown() ? QStringLiteral("pressed")
+                            : isChecked() ? QStringLiteral("activated")
+                            : m_hovered ? QStringLiteral("hovered")
+                                        : QStringLiteral("normal");
+        setIcon(QIcon(QStringLiteral(":/gridsPanel/%1_%2.png").arg(m_assetKey, state)));
+    }
+
+    QString m_assetKey;
+    bool m_hovered = false;
+};
+
+// utils/GridsPanel.qml: a 200px-wide popup (gridsPanel/bg.png background,
+// #45464e-ish rounded panel) with the Horizontal/Vertical switch on top
+// (hmon/vmon icons + label, per positionMonitorsSwitch) and a scrollable
+// column of layout thumbnails below (h_* or v_* depending on the switch).
+class GridsPanel final : public QWidget
+{
+    Q_OBJECT
+
+public:
+    GridsPanel(const QString &currentLayout, bool currentVertical, QWidget *parent)
+        : QWidget(parent, Qt::Popup)
+        , m_currentLayout(currentLayout)
+        , m_vertical(currentVertical)
+    {
+        setAttribute(Qt::WA_TranslucentBackground);
+        setFixedWidth(200);
+
+        auto *root = new QVBoxLayout(this);
+        root->setContentsMargins(13, 10, 3, 10);
+        root->setSpacing(10);
+
+        auto *switchRow = new QWidget(this);
+        auto *switchLayout = new QVBoxLayout(switchRow);
+        switchLayout->setContentsMargins(10, 0, 0, 0);
+        switchLayout->setSpacing(7);
+        m_horizontalRow = new QPushButton(switchRow);
+        m_horizontalRow->setFlat(true);
+        m_horizontalRow->setCursor(Qt::PointingHandCursor);
+        m_horizontalRow->setStyleSheet(QStringLiteral("text-align: left; border: none; background: transparent;"));
+        connect(m_horizontalRow, &QPushButton::clicked, this, [this] { setVertical(false); });
+        m_verticalRow = new QPushButton(switchRow);
+        m_verticalRow->setFlat(true);
+        m_verticalRow->setCursor(Qt::PointingHandCursor);
+        m_verticalRow->setStyleSheet(QStringLiteral("text-align: left; border: none; background: transparent;"));
+        connect(m_verticalRow, &QPushButton::clicked, this, [this] { setVertical(true); });
+        switchLayout->addWidget(m_horizontalRow);
+        switchLayout->addWidget(m_verticalRow);
+        root->addWidget(switchRow);
+
+        m_scroll = new QScrollArea(this);
+        m_scroll->setWidgetResizable(true);
+        m_scroll->setFrameShape(QFrame::NoFrame);
+        m_scroll->setStyleSheet(QStringLiteral("background: transparent;"));
+        m_scroll->viewport()->setStyleSheet(QStringLiteral("background: transparent;"));
+        m_thumbHolder = new QWidget(m_scroll);
+        m_thumbLayout = new QVBoxLayout(m_thumbHolder);
+        m_thumbLayout->setContentsMargins(0, 0, 0, 0);
+        m_thumbLayout->setSpacing(0);
+        m_thumbLayout->setAlignment(Qt::AlignHCenter);
+        m_scroll->setWidget(m_thumbHolder);
+        root->addWidget(m_scroll, 1);
+
+        rebuild();
+        setMaximumHeight(560);
+    }
+
+signals:
+    void layoutChosen(const QString &layout, bool vertical);
+
+protected:
+    void paintEvent(QPaintEvent *) override
+    {
+        QPainter painter(this);
+        painter.setRenderHint(QPainter::Antialiasing);
+        painter.setPen(Qt::NoPen);
+        painter.setBrush(QColor(0x46, 0x47, 0x4e));
+        painter.drawRoundedRect(rect(), 4, 4);
+    }
+
+private:
+    void setVertical(bool vertical)
+    {
+        if (m_vertical == vertical) {
+            return;
+        }
+        m_vertical = vertical;
+        rebuild();
+    }
+
+    void rebuild()
+    {
+        updateSwitchRow();
+
+        QLayoutItem *item = nullptr;
+        while ((item = m_thumbLayout->takeAt(0)) != nullptr) {
+            delete item->widget();
+            delete item;
+        }
+
+        // application/Model/tracker/GridsPanel.qml's h_layouts/v_layouts.
+        static const QStringList kHorizontal = {
+            QStringLiteral("simple"), QStringLiteral("f44"), QStringLiteral("f33"),
+            QStringLiteral("p10f22"), QStringLiteral("f22"), QStringLiteral("f22p02f22"),
+            QStringLiteral("f22p20f22"), QStringLiteral("f34")};
+        static const QStringList kVertical = {
+            QStringLiteral("simple"), QStringLiteral("f22"), QStringLiteral("p01f22"),
+            QStringLiteral("f22p03f22"), QStringLiteral("p02f22"), QStringLiteral("p03f22"),
+            QStringLiteral("f22p02f22")};
+        const QStringList &names = m_vertical ? kVertical : kHorizontal;
+        const QSize thumbnailSize = m_vertical ? QSize(70, 99) : QSize(99, 75);
+        for (const QString &name : names) {
+            const QString assetKey = (m_vertical ? QStringLiteral("v_") : QStringLiteral("h_")) + name;
+            auto *button = new GridLayoutButton(assetKey, thumbnailSize, m_thumbHolder);
+            button->setChecked(name == m_currentLayout);
+            connect(button, &QPushButton::clicked, this, [this, name] {
+                m_currentLayout = name;
+                emit layoutChosen(name, m_vertical);
+                for (int i = 0; i < m_thumbLayout->count(); ++i) {
+                    if (auto *other = qobject_cast<QPushButton *>(m_thumbLayout->itemAt(i)->widget())) {
+                        other->setChecked(other == sender());
+                    }
+                }
+            });
+            m_thumbLayout->addWidget(button);
+        }
+    }
+
+    void updateSwitchRow()
+    {
+        const QIcon hIcon(QStringLiteral(":/gridsPanel/hmon_%1.png").arg(!m_vertical ? "active" : "inactive"));
+        const QIcon vIcon(QStringLiteral(":/gridsPanel/vmon_%1.png").arg(m_vertical ? "active" : "inactive"));
+        m_horizontalRow->setIcon(hIcon);
+        m_horizontalRow->setIconSize(QSize(11, 9));
+        m_horizontalRow->setText(QStringLiteral("  Horizontal"));
+        m_horizontalRow->setStyleSheet(QStringLiteral(
+            "text-align: left; border: none; background: transparent; color: %1;")
+            .arg(!m_vertical ? QStringLiteral("white") : QStringLiteral("#8d8d90")));
+        m_verticalRow->setIcon(vIcon);
+        m_verticalRow->setIconSize(QSize(7, 11));
+        m_verticalRow->setText(QStringLiteral("  Vertical"));
+        m_verticalRow->setStyleSheet(QStringLiteral(
+            "text-align: left; border: none; background: transparent; color: %1;")
+            .arg(m_vertical ? QStringLiteral("white") : QStringLiteral("#8d8d90")));
+    }
+
+    QString m_currentLayout;
+    bool m_vertical;
+    QPushButton *m_horizontalRow = nullptr;
+    QPushButton *m_verticalRow = nullptr;
+    QScrollArea *m_scroll = nullptr;
+    QWidget *m_thumbHolder = nullptr;
+    QVBoxLayout *m_thumbLayout = nullptr;
+};
 
 MainWindow::MainWindow(QWidget *parent)
     : QMainWindow(parent)
@@ -355,6 +657,16 @@ bool MainWindow::eventFilter(QObject *watched, QEvent *event)
     if (!m_tooltipsEnabled && event->type() == QEvent::ToolTip) {
         return true; // swallow -- matches Settings.qml's Tooltips toggle
     }
+    if (event->type() == QEvent::Resize) {
+        if (watched == m_gridScrollPage) {
+            if (auto *shadow = m_gridScrollPage->findChild<QWidget *>(QStringLiteral("gridShadow"))) {
+                shadow->setGeometry(0, 0, m_gridScrollPage->width(), shadow->height());
+            }
+        } else if (watched == m_gridScroll) {
+            // QuadratorGrid.qml re-runs mkCells4View on every size change.
+            relayoutCurrentTab();
+        }
+    }
     return QMainWindow::eventFilter(watched, event);
 }
 
@@ -413,8 +725,25 @@ void MainWindow::showAbout()
     dialog->show();
 }
 
+void MainWindow::updateStaterNode(bool online)
+{
+    if (!m_staterNodeDot) {
+        return;
+    }
+    m_staterNodeDot->setPixmap(QPixmap(online ? QStringLiteral(":/staterNodes/bg_empty.png")
+                                              : QStringLiteral(":/staterNodes/bg_offline.png")));
+    // StaterNodes.qml's tooltip: the server icon + "<name> (Online/Offline)".
+    // A rich-text QLabel tooltip lets us embed the same server glyph.
+    const QString server = m_staterNodeName.isEmpty() ? QStringLiteral("PersonalHost") : m_staterNodeName;
+    m_staterNodeDot->setToolTip(QStringLiteral(
+        "<img src=':/staterNodes/server%1.png'>&nbsp;%2 (%3)")
+        .arg(online ? QStringLiteral("_online") : QString(), server,
+             online ? QStringLiteral("Online") : QStringLiteral("Offline")));
+}
+
 void MainWindow::updateStatus(const QString &text, bool connected)
 {
+    updateStaterNode(connected);
     m_statusLabel->setText(QStringLiteral("●  %1").arg(text));
     m_statusLabel->setProperty("connected", connected);
     m_statusLabel->style()->unpolish(m_statusLabel);
@@ -437,6 +766,12 @@ void MainWindow::setAgentIdentity(const QString &agentName, const QString &sessi
     setWindowTitle(sessionName.isEmpty()
                        ? QStringLiteral("Personal Viewer -- %1").arg(agentName)
                        : QStringLiteral("Personal Viewer -- %1 / %2").arg(agentName, sessionName));
+    // StaterNodes.qml names the node in its tooltip -- use the agent's own
+    // reported name once we have it.
+    if (!agentName.isEmpty()) {
+        m_staterNodeName = agentName;
+        updateStaterNode(m_statusLabel && m_statusLabel->property("connected").toBool());
+    }
 }
 
 QString MainWindow::deviceDisplayName(quint32 sessionKey) const
@@ -536,10 +871,11 @@ void MainWindow::addMonitor(quint32 streamId, const QString &name, const QSize &
 void MainWindow::refreshTileStreamsForDevice(quint32 deviceKey)
 {
     const QList<quint32> monitorStreams = m_deviceMonitorStreams.value(deviceKey);
-    const quint32 windowStream = m_deviceWindowStreams.value(deviceKey).value(0, 0);
+    const quint32 windowStream = m_deviceActiveWindowStream.value(deviceKey, 0);
+    const quint32 activeMonitor = m_deviceActiveMonitorStream.value(deviceKey, 0);
     for (DeviceTileWidget *tile : std::as_const(m_deviceTiles)) {
         if (tile->sessionKey() == deviceKey) {
-            tile->setAvailableStreams(monitorStreams, windowStream);
+            tile->setAvailableStreams(monitorStreams, windowStream, activeMonitor);
         }
     }
 }
@@ -578,19 +914,35 @@ void MainWindow::updateFrame(quint32 streamId, const QImage &image,
                 tile->updateThumbnail(streamId, image);
             }
         }
+        // A window stream that just delivered a frame is the foreground
+        // window (only it gets live updates) -- that's the "active program"
+        // winmode follows. Re-point the tiles' winmode target when it moves.
+        if (m_windowStreamIds.contains(streamId)
+            && m_deviceActiveWindowStream.value(deviceKey) != streamId) {
+            m_deviceActiveWindowStream.insert(deviceKey, streamId);
+            refreshTileStreamsForDevice(deviceKey);
+        }
     }
 }
 
 void MainWindow::updateMetadata(quint32 streamId, const QString &application,
-                                const QString &idleText)
+                                const QString &idleText, quint32 activeMonitorStreamId)
 {
     if (MonitorWidget *monitor = m_monitors.value(streamId, nullptr)) {
         monitor->setMetadata(application, idleText);
     }
     const quint32 deviceKey = m_streamDeviceKey.value(streamId, 0);
-    if (deviceKey != 0 && m_devicePrimaryStream.value(deviceKey) == streamId) {
-        m_deviceActivity.insert(deviceKey, {application, idleText});
-        refreshTileActivity(deviceKey);
+    if (deviceKey != 0) {
+        // Every monitor's metadata carries the same active-monitor stream;
+        // update the tiles' "Show active monitor" target when it moves.
+        if (m_deviceActiveMonitorStream.value(deviceKey) != activeMonitorStreamId) {
+            m_deviceActiveMonitorStream.insert(deviceKey, activeMonitorStreamId);
+            refreshTileStreamsForDevice(deviceKey);
+        }
+        if (m_devicePrimaryStream.value(deviceKey) == streamId) {
+            m_deviceActivity.insert(deviceKey, {application, idleText});
+            refreshTileActivity(deviceKey);
+        }
     }
 }
 
@@ -639,12 +991,8 @@ void MainWindow::showProtocolError(const QString &message)
 
 void MainWindow::showTrackerPage()
 {
-    m_trackerNavButton->setObjectName(QStringLiteral("navActive"));
-    m_historyNavButton->setObjectName(QStringLiteral("navButton"));
-    style()->unpolish(m_trackerNavButton);
-    style()->polish(m_trackerNavButton);
-    style()->unpolish(m_historyNavButton);
-    style()->polish(m_historyNavButton);
+    m_trackerNavButton->setActivated(true);
+    m_historyNavButton->setActivated(false);
     m_deviceDetailView->deactivate();
     m_contentStack->setCurrentWidget(m_trackerPage);
     m_subbar->show();
@@ -653,12 +1001,8 @@ void MainWindow::showTrackerPage()
 void MainWindow::showHistoryPage()
 {
     m_subbar->hide();
-    m_historyNavButton->setObjectName(QStringLiteral("navActive"));
-    m_trackerNavButton->setObjectName(QStringLiteral("navButton"));
-    style()->unpolish(m_historyNavButton);
-    style()->polish(m_historyNavButton);
-    style()->unpolish(m_trackerNavButton);
-    style()->polish(m_trackerNavButton);
+    m_historyNavButton->setActivated(true);
+    m_trackerNavButton->setActivated(false);
     m_deviceDetailView->deactivate();
     m_contentStack->setCurrentWidget(m_historyView);
     m_historyView->activate();
@@ -740,75 +1084,26 @@ void MainWindow::setSimpleMode(bool simple)
 
 void MainWindow::openGridsPanel()
 {
-    auto *menu = new QMenu(this);
-    menu->setAttribute(Qt::WA_DeleteOnClose);
-    const int current = m_tabs.isEmpty() ? 0 : m_tabs[m_currentTabIndex].columnsOverride;
-
-    auto *autoAction = menu->addAction(QStringLiteral("Auto (dupa latimea ferestrei)"));
-    autoAction->setCheckable(true);
-    autoAction->setChecked(current == 0);
-    connect(autoAction, &QAction::triggered, this, [this]() {
-        if (!m_tabs.isEmpty()) {
-            m_tabs[m_currentTabIndex].columnsOverride = 0;
-            relayoutCurrentTab();
-        }
-    });
-    menu->addSeparator();
-
-    for (int columns = 2; columns <= 6; ++columns) {
-        QAction *action = menu->addAction(QStringLiteral("%1 coloane").arg(columns));
-        action->setCheckable(true);
-        action->setChecked(current == columns);
-        connect(action, &QAction::triggered, this, [this, columns]() {
-            if (!m_tabs.isEmpty()) {
-                m_tabs[m_currentTabIndex].columnsOverride = columns;
-                relayoutCurrentTab();
-            }
-        });
+    if (m_tabs.isEmpty()) {
+        return;
     }
-
-    // TrackerGridsPanel.qml's Horizontal/Vertical switch (`layoutIsVertical`,
-    // which changes the baseline column count from 4 to 3 before the
-    // width-based growth in columnsForCurrentWidth()) -- distinct from the
-    // fixed 2-6 picker above, matches the real panel's own toggle.
-    menu->addSeparator();
-    auto *horizontalAction = menu->addAction(QStringLiteral("Layout: Orizontal (4 coloane)"));
-    horizontalAction->setCheckable(true);
-    horizontalAction->setChecked(current == 4);
-    connect(horizontalAction, &QAction::triggered, this, [this]() {
+    const TrackerTab &tab = m_tabs[m_currentTabIndex];
+    auto *panel = new GridsPanel(tab.gridLayout, tab.gridLayoutVertical, this);
+    connect(panel, &GridsPanel::layoutChosen, this, [this](const QString &layout, bool vertical) {
         if (!m_tabs.isEmpty()) {
-            m_tabs[m_currentTabIndex].columnsOverride = 4;
+            m_tabs[m_currentTabIndex].gridLayout = layout;
+            m_tabs[m_currentTabIndex].gridLayoutVertical = vertical;
             relayoutCurrentTab();
         }
     });
-    auto *verticalAction = menu->addAction(QStringLiteral("Layout: Vertical (3 coloane)"));
-    verticalAction->setCheckable(true);
-    verticalAction->setChecked(current == 3);
-    connect(verticalAction, &QAction::triggered, this, [this]() {
-        if (!m_tabs.isEmpty()) {
-            m_tabs[m_currentTabIndex].columnsOverride = 3;
-            relayoutCurrentTab();
-        }
-    });
-
-    // TrackerGridsPanel.qml also lets you drag a whole department onto the
-    // grid to lay out its employees automatically -- there's no department
-    // model here (see EmployeePicker gap), so this stays visible-but-disabled
-    // as a placeholder for when PersonalHost grows one. Hidden entirely in
-    // Simple mode, same as the real TopPanel's department affordances.
-    if (!m_simpleMode) {
-        menu->addSeparator();
-        auto *departmentAction = menu->addAction(
-            QStringLiteral("Aseaza un departament pe grid... (necesita organizatie in grabber)"));
-        departmentAction->setEnabled(false);
-    }
 
     auto *sender = qobject_cast<QWidget *>(this->sender());
     const QPoint popupPos = sender ? sender->mapToGlobal(QPoint(0, sender->height())) : QCursor::pos();
-    menu->popup(popupPos);
+    panel->move(popupPos);
+    panel->show();
 }
 
-void MainWindow::openAddDeviceDialog()
+void MainWindow::openAddDeviceDialog(const GridFillTarget &target)
 {
     // A device can be added to a tab more than once (e.g. to watch two of
     // its monitors side by side), so the list below is never filtered by
@@ -816,7 +1111,7 @@ void MainWindow::openAddDeviceDialog()
     // kMaxTilesPerTab (matches the real Kickidler viewer); relayoutCurrentTab
     // already disables the "+" tile itself once that's hit, so this is just
     // a defensive second guard (e.g. against a stray call).
-    if (!m_tabs.isEmpty() && m_tabs[m_currentTabIndex].tiles.size() >= kMaxTilesPerTab) {
+    if (!m_tabs.isEmpty() && m_tabs[m_currentTabIndex].tileCount() >= kMaxTilesPerTab) {
         statusBar()->showMessage(
             QStringLiteral("Limita de device-uri pe acest tab a fost atinsa (25)."), 4000);
         return;
@@ -896,15 +1191,24 @@ void MainWindow::openAddDeviceDialog()
     layout->addWidget(buttons);
 
     connect(tree, &QTreeWidget::itemClicked, this,
-            [this, dialog, deviceForItem](QTreeWidgetItem *item) {
+            [this, dialog, deviceForItem, target, tabIndex = m_currentTabIndex](QTreeWidgetItem *item) {
                 if (!deviceForItem.contains(item)) {
                     return;
                 }
-                const quint32 deviceKey = deviceForItem.value(item);
-                TrackerTab &currentTab = m_tabs[m_currentTabIndex];
-                currentTab.tiles.append({m_nextTileId++, deviceKey});
-                relayoutCurrentTab();
                 dialog->close();
+                // The picker is non-modal: drop the pick if the cell it was
+                // opened for no longer exists as such (tab switched, or the
+                // cell got filled meanwhile).
+                if (tabIndex != m_currentTabIndex || m_tabs.isEmpty()) {
+                    return;
+                }
+                const TrackerTab &currentTab = m_tabs.at(m_currentTabIndex);
+                const bool isFictive = target.fictiveRow >= 0 || target.fictiveColumn >= 0;
+                if (!isFictive && target.indexInGrid >= 0 && target.indexInGrid < currentTab.cells.size()
+                    && currentTab.cells.at(target.indexInGrid).tileId != 0) {
+                    return;
+                }
+                fillTarget(target, deviceForItem.value(item));
             });
 
     dialog->show();
@@ -957,6 +1261,11 @@ void MainWindow::removeWindowStream(quint32 streamId)
     const quint32 deviceKey = m_streamDeviceKey.take(streamId);
     if (deviceKey != 0) {
         m_deviceWindowStreams[deviceKey].removeOne(streamId);
+        // If the active (foreground) window itself closed, forget it -- the
+        // next window frame to arrive re-establishes which one is active.
+        if (m_deviceActiveWindowStream.value(deviceKey) == streamId) {
+            m_deviceActiveWindowStream.remove(deviceKey);
+        }
     }
     if (MonitorWidget *monitor = m_monitors.take(streamId)) {
         // refreshOpenDeviceWindowPreviews() below (if it applies to this
@@ -1038,39 +1347,94 @@ void MainWindow::buildInterface()
     connect(aboutAction, &QAction::triggered, this, &MainWindow::showAbout);
     connect(exitAction, &QAction::triggered, this, &QWidget::close);
 
-    auto *brand = new QLabel(QStringLiteral("PERSONAL viewer"), header);
+    auto *brand = new QLabel(QStringLiteral("Kiki"), header);
     brand->setObjectName(QStringLiteral("brand"));
     brand->setFixedWidth(165);
     headerLayout->addWidget(menuButton);
     headerLayout->addWidget(brand);
     headerLayout->addStretch();
 
-    m_trackerNavButton = new QPushButton(QStringLiteral("◉  Tracker"), header);
-    m_trackerNavButton->setObjectName(QStringLiteral("navActive"));
+    // TopPanel.qml's primaryActivities row: Tracker / Reports / History /
+    // Remote Control, 25px apart. Reports and Remote Control have no
+    // backing feature in this system (no reporting engine, no remote
+    // control -- AgentSettings explicitly refuses that capability), so
+    // they're shown for visual parity but disabled rather than silently
+    // inert.
+    m_trackerNavButton = new TopNavButton(QStringLiteral("tracker"), QStringLiteral("Tracker"), header);
+    m_trackerNavButton->setActivated(true);
     connect(m_trackerNavButton, &QPushButton::clicked, this, &MainWindow::showTrackerPage);
-    auto *reports = new QPushButton(QStringLiteral("▤  Reports"), header);
-    reports->setObjectName(QStringLiteral("navButton"));
-    m_historyNavButton = new QPushButton(QStringLiteral("↶  History"), header);
-    m_historyNavButton->setObjectName(QStringLiteral("navButton"));
+    m_reportsNavButton = new TopNavButton(QStringLiteral("reports"), QStringLiteral("Reports"), header);
+    m_reportsNavButton->setEnabled(false);
+    m_reportsNavButton->setToolTip(QStringLiteral("Nu exista un motor de rapoarte in acest sistem."));
+    m_historyNavButton = new TopNavButton(QStringLiteral("history"), QStringLiteral("History"), header);
     connect(m_historyNavButton, &QPushButton::clicked, this, &MainWindow::showHistoryPage);
+    m_remoteControlNavButton = new TopNavButton(QStringLiteral("support"), QStringLiteral("Remote Control"), header);
+    m_remoteControlNavButton->setEnabled(false);
+    m_remoteControlNavButton->setToolTip(
+        QStringLiteral("Controlul de la distanta nu este permis in acest sistem."));
     headerLayout->addWidget(m_trackerNavButton);
-    headerLayout->addWidget(reports);
+    headerLayout->addSpacing(25);
+    headerLayout->addWidget(m_reportsNavButton);
+    headerLayout->addSpacing(25);
     headerLayout->addWidget(m_historyNavButton);
+    headerLayout->addSpacing(25);
+    headerLayout->addWidget(m_remoteControlNavButton);
     headerLayout->addStretch();
 
-    m_statusLabel = new QLabel(QStringLiteral("●  Deconectat"), header);
-    m_statusLabel->setObjectName(QStringLiteral("status"));
-    m_connectButton = new QPushButton(QStringLiteral("Conecteaza"), header);
-    m_connectButton->setObjectName(QStringLiteral("headerButton"));
+    // TopPanel.qml: Image{line.png} Image{line_1.png} Item{5} StaterNodes
+    // Item{5} Image{line.png} -- two adjacent 1px separators (a subtle
+    // darker-green groove, not black) before StaterNodes, one after.
+    const auto makeHeaderLine = [header](const char *asset) {
+        auto *line = new QLabel(header);
+        line->setPixmap(QPixmap(QStringLiteral(":/topPanel/%1").arg(QLatin1String(asset))));
+        line->setScaledContents(true);
+        line->setFixedSize(1, header->height());
+        return line;
+    };
+    headerLayout->addWidget(makeHeaderLine("line.png"), 0, Qt::AlignVCenter);
+    headerLayout->addWidget(makeHeaderLine("line_1.png"), 0, Qt::AlignVCenter);
+    headerLayout->addSpacing(5);
+    // ViewerControls/StaterNodes.qml: the server-status indicator(s) in the
+    // top panel -- one dot per central node in the real (multi-node)
+    // Kickidler. This system has exactly one node (PersonalHost), so it's a
+    // single dot: staterNodes/bg_empty.png (green) when connected,
+    // bg_offline.png (red) otherwise, with a hover tooltip naming the server
+    // and its state.
+    m_staterNodeDot = new QLabel(header);
+    m_staterNodeDot->setObjectName(QStringLiteral("staterNode"));
+    m_staterNodeDot->setFixedSize(16, 16);
+    // The global QWidget stylesheet gives every plain QLabel an opaque
+    // #30323a background; bg_empty/bg_offline.png don't fill their full
+    // 16x16 canvas, so without this the dot sits in a visible dark square.
+    m_staterNodeDot->setStyleSheet(QStringLiteral("background: transparent;"));
+    headerLayout->addWidget(m_staterNodeDot, 0, Qt::AlignVCenter);
+    headerLayout->addSpacing(5);
+    headerLayout->addWidget(makeHeaderLine("line.png"), 0, Qt::AlignVCenter);
+    headerLayout->addSpacing(10);
+    updateStaterNode(false);
+
+    // TopPanel.qml's header has no status text or connect/disconnect
+    // button at all -- StaterNodes above is the only connection indicator
+    // (a dot + tooltip). Live status text and the Connect/Disconnect action
+    // now live in the Connection settings dialog instead (see
+    // buildInterface()'s m_settingsDialog and updateStatus()).
+    // TopPanel.qml's maximize/minimize button (topPanel/b_maximize_*.png /
+    // b_minimize_*.png, 38x38) -- real icons, not a Unicode glyph (which
+    // rendered as broken corner brackets, not an actual expand icon).
     auto *fullScreenButton = new QToolButton(header);
     fullScreenButton->setObjectName(QStringLiteral("headerIcon"));
-    fullScreenButton->setText(QStringLiteral("⛶"));
-    connect(m_connectButton, &QPushButton::clicked, this, &MainWindow::connectOrDisconnect);
-    connect(fullScreenButton, &QToolButton::clicked, this, [this] {
+    fullScreenButton->setIconSize(QSize(38, 38));
+    fullScreenButton->setAutoRaise(true);
+    const auto updateFullScreenIcon = [this, fullScreenButton] {
+        fullScreenButton->setIcon(QIcon(isFullScreen()
+            ? QStringLiteral(":/topPanel/b_minimize_normal.png")
+            : QStringLiteral(":/topPanel/b_maximize_normal.png")));
+    };
+    updateFullScreenIcon();
+    connect(fullScreenButton, &QToolButton::clicked, this, [this, updateFullScreenIcon] {
         isFullScreen() ? showNormal() : showFullScreen();
+        updateFullScreenIcon();
     });
-    headerLayout->addWidget(m_statusLabel);
-    headerLayout->addWidget(m_connectButton);
     headerLayout->addWidget(fullScreenButton);
     rootLayout->addWidget(header);
 
@@ -1144,60 +1508,47 @@ void MainWindow::buildInterface()
     m_gridScrollPage->setAttribute(Qt::WA_StyledBackground);
     m_gridScrollPage->setStyleSheet(QStringLiteral(
         "QWidget#gridScrollPage { background-image: url(:/activeCell/grayHatching.png); background-repeat: repeat; }"));
+    // TrackerQuadratorGrid.qml: the ScrollView sits 4/4/4/3 (left/top/
+    // right/bottom) inside the hatched background; the mainbgshaddow.png
+    // strip is drawn OVER the top edge (an overlay Image, not a row that
+    // takes layout space).
     auto *gridScrollLayout = new QVBoxLayout(m_gridScrollPage);
-    gridScrollLayout->setContentsMargins(0, 0, 0, 0);
+    gridScrollLayout->setContentsMargins(4, 4, 4, 3);
     gridScrollLayout->setSpacing(0);
-    // TrackerQuadratorGrid.qml: mainbgshaddow.png tiled along the top.
+    m_gridScroll = new QScrollArea(m_gridScrollPage);
+    // Content size is set by relayoutCurrentTab() (QuadratorGrid.qml sizes
+    // cells from the ScrollView's own size, not from the viewport).
+    m_gridScroll->setWidgetResizable(false);
+    m_gridScroll->setFrameShape(QFrame::NoFrame);
+    m_gridScroll->setObjectName(QStringLiteral("gridScroll"));
+    // Controls/ScrollView.qml: a 5px handle inside vscroll margins 4/1/3/2
+    // (left/top/right/bottom) -> 12px wide bar; hscroll margins 2/4/0/3 ->
+    // 12px high bar. These are the vscrollWidth/hscrollHeight the cell sizing
+    // in relayoutCurrentTab() reserves.
+    m_gridScroll->setStyleSheet(QStringLiteral(
+        "QScrollArea#gridScroll { background: transparent; }"
+        "QScrollBar:vertical { background: transparent; width: 12px; margin: 1px 3px 2px 4px; }"
+        "QScrollBar::handle:vertical { background: #5a5b63; border-radius: 2px; min-height: 30px; }"
+        "QScrollBar:horizontal { background: transparent; height: 12px; margin: 4px 0px 3px 2px; }"
+        "QScrollBar::handle:horizontal { background: #5a5b63; border-radius: 2px; min-width: 30px; }"
+        "QScrollBar::add-line, QScrollBar::sub-line { width: 0; height: 0; }"
+        "QScrollBar::add-page, QScrollBar::sub-page { background: none; }"));
+    m_gridScroll->viewport()->setStyleSheet(QStringLiteral("background: transparent;"));
+    m_monitorContainer = new QWidget(m_gridScroll);
+    m_monitorContainer->setObjectName(QStringLiteral("monitorArea"));
+    m_monitorContainer->setStyleSheet(QStringLiteral("QWidget#monitorArea { background: transparent; }"));
+    m_gridScroll->setWidget(m_monitorContainer);
+    gridScrollLayout->addWidget(m_gridScroll, 1);
     auto *gridShadow = new QWidget(m_gridScrollPage);
     gridShadow->setObjectName(QStringLiteral("gridShadow"));
     gridShadow->setAttribute(Qt::WA_StyledBackground);
-    gridShadow->setFixedHeight(3);
+    gridShadow->setAttribute(Qt::WA_TransparentForMouseEvents);
     gridShadow->setStyleSheet(QStringLiteral(
         "QWidget#gridShadow { background-image: url(:/tracker/grid/mainbgshaddow.png); background-repeat: repeat-x; }"));
-    gridScrollLayout->addWidget(gridShadow);
-    auto *scroll = new QScrollArea(m_gridScrollPage);
-    scroll->setWidgetResizable(true);
-    scroll->setFrameShape(QFrame::NoFrame);
-    scroll->setStyleSheet(QStringLiteral("QScrollArea { background: transparent; }"));
-    scroll->viewport()->setStyleSheet(QStringLiteral("background: transparent;"));
-    m_monitorContainer = new QWidget(scroll);
-    m_monitorContainer->setObjectName(QStringLiteral("monitorArea"));
-    m_monitorContainer->setStyleSheet(QStringLiteral("QWidget#monitorArea { background: transparent; }"));
-    m_monitorGrid = new QGridLayout(m_monitorContainer);
-    // ScrollView margins 4/4/4/3 (the shadow strip above already takes 3 of
-    // the top 4), cells 3px apart.
-    m_monitorGrid->setContentsMargins(4, 1, 4, 3);
-    m_monitorGrid->setHorizontalSpacing(3);
-    m_monitorGrid->setVerticalSpacing(3);
-    scroll->setWidget(m_monitorContainer);
-    gridScrollLayout->addWidget(scroll, 1);
+    const QSize shadowSize = QPixmap(QStringLiteral(":/tracker/grid/mainbgshaddow.png")).size();
+    gridShadow->setFixedHeight(qMax(1, shadowSize.height()));
+    gridShadow->raise(); // kept full-width by eventFilter()
     m_gridStack->addWidget(m_gridScrollPage);
-
-    // TrackerDefaultPrompt.qml: centered message + "Add" button, shown
-    // instead of the grid when the current tab is completely empty.
-    m_emptyPrompt = new QWidget(m_gridStack);
-    auto *emptyLayout = new QVBoxLayout(m_emptyPrompt);
-    emptyLayout->addStretch();
-    auto *emptyIcon = new QLabel(QStringLiteral("▦"), m_emptyPrompt);
-    emptyIcon->setAlignment(Qt::AlignCenter);
-    emptyIcon->setStyleSheet(QStringLiteral("color: #55575f; font-size: 48pt;"));
-    emptyLayout->addWidget(emptyIcon);
-    auto *emptyText = new QLabel(
-        QStringLiteral("Nu ai adaugat niciun device in acest tab inca."), m_emptyPrompt);
-    emptyText->setAlignment(Qt::AlignCenter);
-    emptyText->setStyleSheet(QStringLiteral("color: #9fa5ae; font-size: 11pt;"));
-    emptyLayout->addWidget(emptyText);
-    auto *emptyAddButton = new QPushButton(QStringLiteral("+  Adauga device"), m_emptyPrompt);
-    emptyAddButton->setObjectName(QStringLiteral("primaryButton"));
-    emptyAddButton->setFixedWidth(200);
-    connect(emptyAddButton, &QPushButton::clicked, this, &MainWindow::openAddDeviceDialog);
-    auto *emptyButtonRow = new QHBoxLayout;
-    emptyButtonRow->addStretch();
-    emptyButtonRow->addWidget(emptyAddButton);
-    emptyButtonRow->addStretch();
-    emptyLayout->addLayout(emptyButtonRow);
-    emptyLayout->addStretch();
-    m_gridStack->addWidget(m_emptyPrompt);
 
     contentRow->addWidget(m_gridStack, 1);
 
@@ -1311,13 +1662,16 @@ void MainWindow::buildInterface()
     notice->setWordWrap(true);
     notice->setObjectName(QStringLiteral("privacy"));
     settingsLayout->addWidget(notice);
+    // The header itself has no status text or connect/disconnect button
+    // (matches TopPanel.qml -- StaterNodes' dot+tooltip is the only
+    // in-header indicator); this dialog is where the detailed live status
+    // and the actual connect/disconnect action live instead.
+    m_statusLabel = new QLabel(QStringLiteral("●  Deconectat"), m_settingsDialog);
+    m_statusLabel->setObjectName(QStringLiteral("status"));
+    settingsLayout->addWidget(m_statusLabel);
     auto *buttons = new QDialogButtonBox(QDialogButtonBox::Close, m_settingsDialog);
-    auto *connectNow = buttons->addButton(QStringLiteral("Connect now"),
-                                           QDialogButtonBox::AcceptRole);
-    connect(connectNow, &QPushButton::clicked, this, [this] {
-        m_settingsDialog->hide();
-        connectOrDisconnect();
-    });
+    m_connectButton = buttons->addButton(QStringLiteral("Connect"), QDialogButtonBox::AcceptRole);
+    connect(m_connectButton, &QPushButton::clicked, this, &MainWindow::connectOrDisconnect);
     connect(buttons, &QDialogButtonBox::rejected, m_settingsDialog, &QDialog::hide);
     settingsLayout->addWidget(buttons);
 }
@@ -1332,7 +1686,7 @@ void MainWindow::applyStyle()
     const int baseFontPt = qMax(6, qRound(9 * m_fontScale));
     setStyleSheet(QStringLiteral(R"(
         QMainWindow, QWidget { background: #30323a; color: #e7eaed; font-family: "Segoe UI"; font-size: %1pt; }
-        QFrame#header { background: #1da06f; border: none; }
+        QFrame#header { background: #299f6c; border: none; }
         QFrame#subbar { background: #292c33; border-bottom: 1px solid #17191e; }
         QPushButton#trackerPanelButton { color: #a2a2a4; background: transparent; border: none; padding: 0;
                                          font-family: Roboto; font-size: 12px; font-weight: 700; text-align: left; }
@@ -1342,12 +1696,8 @@ void MainWindow::applyStyle()
         QLabel#brand { background: #199466; color: white; padding-left: 18px; font-size: 14pt; font-weight: 700; }
         QToolButton#menuButton { background: #188c62; color: white; border: none; font-size: 20pt; }
         QToolButton#menuButton:hover { background: #147a55; }
-        QPushButton#navActive, QPushButton#navButton { border: none; background: transparent; padding: 10px 18px; font-size: 11pt; font-weight: 700; }
-        QPushButton#navActive { color: white; }
-        QPushButton#navButton { color: #126648; }
-        QPushButton#navButton:hover { color: white; }
-        QPushButton#navButton:disabled { color: #6f747d; }
-        QPushButton#headerButton, QToolButton#headerIcon { background: rgba(0,0,0,0.10); color: white; border: 1px solid rgba(255,255,255,0.22); padding: 5px 9px; }
+        QToolButton#headerIcon { background: transparent; border: none; padding: 0; }
+        QToolButton#headerIcon:hover { background: rgba(0,0,0,0.10); }
         QLabel#status { color: #d9fff1; padding: 0 10px; }
         QLabel#status[connected="true"] { color: white; }
         QPushButton#flatButton { color: #b8bdc5; background: transparent; border: none; padding: 6px; }
@@ -1376,6 +1726,7 @@ void MainWindow::applyStyle()
         QPushButton:disabled { color: #6f747d; }
         QCheckBox { spacing: 8px; }
         QScrollArea { background: transparent; }
+        QToolTip { background: #23252b; color: #e7eaed; border: 1px solid #4d515b; padding: 3px 6px; }
         QMenu { background: #353840; color: white; border: 1px solid #202228; padding: 5px; }
         QMenu::item { padding: 10px 28px; }
         QMenu::item:selected { background: #1da06f; }
@@ -1403,7 +1754,7 @@ void MainWindow::clearMonitors()
         monitor->deleteLater();
     }
     for (TrackerTab &tab : m_tabs) {
-        tab.tiles.clear();
+        tab.cells.clear();
     }
     m_selectedStream = 0;
     m_agentLabel->hide();
@@ -1423,46 +1774,307 @@ void MainWindow::refreshHistoryDevices()
     m_historyView->setDevices(deviceNames, m_deviceMonitorStreams, m_monitorNames);
 }
 
-int MainWindow::columnsForCurrentWidth() const
+namespace {
+// TrackerQuadratorGrid.qml / Controls/ScrollView.qml constants: 3px between
+// cells, a 5px scroll handle plus its 4+3 margins = 12px for either bar, and
+// 60px-thick fictive half-cells.
+constexpr int kGridSpacing = 3;
+constexpr int kGridScrollBarSize = 12;
+constexpr int kFictiveCellSize = 60;
+constexpr int kGridBestColumns = 2;
+constexpr int kGridBestRows = 2;
+
+struct CellSpan { int begin; int end; };
+
+// QuadratorGrid.qml's makeCellSize(), line for line: `amount` cells share
+// `size` (with `spacing` before, between and after them); the first
+// bigAmount get ceil(cellSize), the rest floor(cellSize); entries past
+// `amount` (up to amountWithExtra) continue the same pattern, which is what
+// gives overflow rows the same height as the visible ones.
+QList<CellSpan> makeCellSize(int size, int amount, int amountWithExtra, int spacing)
 {
-    const int availableWidth = qMax(300, m_monitorContainer ? m_monitorContainer->width() : width());
-    return qMax(4, availableWidth / 315);
+    QList<CellSpan> res;
+    if (amount) {
+        const double cellSize = static_cast<double>(size - (amount + 1) * spacing) / amount;
+        const int bigCellSize = static_cast<int>(std::ceil(cellSize));
+        const int smallCellSize = static_cast<int>(std::floor(cellSize));
+        const int bigAmount = static_cast<int>(std::floor(amount - (bigCellSize - cellSize) * amount + 0.5));
+        int accumuler = spacing;
+        for (int idx = 0; idx < amountWithExtra; ++idx) {
+            const int cell = idx < bigAmount ? bigCellSize : smallCellSize;
+            res.append({accumuler, accumuler + cell});
+            accumuler += cell + spacing;
+        }
+    }
+    return res;
 }
 
-int MainWindow::effectiveColumns() const
+int ceilDiv(int value, int divisor)
 {
-    if (m_tabs.isEmpty()) {
-        return columnsForCurrentWidth();
-    }
-    const int overrideColumns = m_tabs[m_currentTabIndex].columnsOverride;
-    return overrideColumns > 0 ? overrideColumns : columnsForCurrentWidth();
+    return divisor > 0 ? (value + divisor - 1) / divisor : 0;
 }
+
+// TrackerQuadrator.qml's trimTail(): drops trailing empty cells.
+template <typename Cells>
+void trimTail(Cells &cells)
+{
+    while (!cells.isEmpty() && cells.constLast().tileId == 0) {
+        cells.removeLast();
+    }
+}
+
+// TrackerQuadrator.qml's collapseEmptyRowsColumns(): removes fully empty
+// rows, then fully empty columns, never going below gridBestRows/Columns.
+// Returns {columns, rows}.
+template <typename Cells>
+QPair<int, int> collapseEmptyRowsColumns(Cells &cells, int columns, int rows)
+{
+    const auto occupied = [&cells](int index) {
+        return index >= 0 && index < cells.size() && cells.at(index).tileId != 0;
+    };
+    for (int row = 0; row < rows && rows > kGridBestRows;) {
+        bool empty = true;
+        for (int column = 0; column < columns; ++column) {
+            if (occupied(row * columns + column)) {
+                empty = false;
+                break;
+            }
+        }
+        if (empty) {
+            const int start = qMin(row * columns, static_cast<int>(cells.size()));
+            cells.remove(start, qMin(columns, static_cast<int>(cells.size()) - start));
+            --rows;
+        } else {
+            ++row;
+        }
+    }
+    for (int column = 0; column < columns && columns > kGridBestColumns;) {
+        bool empty = true;
+        for (int row = 0; row < rows; ++row) {
+            if (occupied(row * columns + column)) {
+                empty = false;
+                break;
+            }
+        }
+        if (empty) {
+            for (int row = rows - 1; row >= 0; --row) {
+                const int index = row * columns + column;
+                if (index < cells.size()) {
+                    cells.removeAt(index);
+                }
+            }
+            --columns;
+        } else {
+            ++column;
+        }
+    }
+    return {qMax(columns, kGridBestColumns), qMax(rows, kGridBestRows)};
+}
+} // namespace
 
 void MainWindow::relayoutCurrentTab()
 {
-    // Full rebuild each time -- tab switches and device add/remove are rare
-    // interactive events, not a hot path, so simplicity wins over
-    // incremental diffing here.
-    QLayoutItem *item = nullptr;
-    while ((item = m_monitorGrid->takeAt(0)) != nullptr) {
-        if (QWidget *widget = item->widget()) {
-            widget->hide();
-            widget->setParent(nullptr);
-        }
-        delete item;
+    // Full rebuild each time, like QuadratorGrid.qml's mkCells4View (re-run
+    // on every cells/size/layout change).
+    for (QWidget *widget : std::as_const(m_emptyCellWidgets)) {
+        widget->hide();
+        widget->deleteLater();
+    }
+    m_emptyCellWidgets.clear();
+    for (DeviceTileWidget *tile : std::as_const(m_deviceTiles)) {
+        tile->hide();
     }
 
-    if (m_tabs.isEmpty()) {
+    if (m_tabs.isEmpty() || !m_gridScroll) {
         return;
     }
     const TrackerTab &tab = m_tabs[m_currentTabIndex];
     if (m_gridStack) {
-        m_gridStack->setCurrentWidget(tab.tiles.isEmpty() ? m_emptyPrompt : m_gridScrollPage);
+        m_gridStack->setCurrentWidget(m_gridScrollPage);
     }
-    const int columns = effectiveColumns();
 
-    int index = 0;
-    for (const TrackerTab::TileEntry &entry : tab.tiles) {
+    const QString &layout = tab.gridLayout;
+    const bool isSimple = layout == QStringLiteral("simple");
+    const bool vertical = tab.gridLayoutVertical;
+    const int rows4View = isSimple ? tab.gridRows : (vertical ? 5 : 4);
+    const int columns4View = isSimple ? tab.gridColumns : (vertical ? 2 : 4);
+    if (rows4View <= 0 || columns4View <= 0) {
+        return;
+    }
+    // QuadratorGrid.qml binds hscrollVisible = ("simple" === layout) and
+    // vscrollVisible = true; the scroll bars' room is always reserved.
+    const bool hscrollVisible = isSimple;
+    const int targetWidth = m_gridScroll->width();
+    const int targetHeight = m_gridScroll->height();
+
+    struct ViewCell {
+        quint32 tileId = 0; // 0 = empty cell
+        QList<int> indices;
+        GridFillTarget target;
+        QRect rect;
+    };
+    QList<ViewCell> cells;
+
+    int mincellsForLayout = 1;
+    if (isSimple) {
+        mincellsForLayout = 0;
+    } else if (layout == QStringLiteral("f22p02f22") || layout == QStringLiteral("f22p03f22")
+               || layout == QStringLiteral("f22p20f22")) {
+        mincellsForLayout = 2;
+    }
+    for (int idx = 0; idx < qMax(static_cast<int>(tab.cells.size()), mincellsForLayout); ++idx) {
+        ViewCell cell;
+        cell.tileId = idx < tab.cells.size() ? tab.cells.at(idx).tileId : 0;
+        cell.target.indexInGrid = static_cast<int>(cells.size());
+        cells.append(cell);
+    }
+
+    // The named templates: which grid indices (row-major over columns4View)
+    // the first one or two cells span. Every other cell takes the next
+    // unused index, so cell 0 is always the (first) big cell.
+    const int l0 = 0;
+    const int l1 = l0 + columns4View;
+    const int l2 = l1 + columns4View;
+    const int l3 = l2 + columns4View;
+    const auto block = [columns4View](int firstRowBegin, int col, int colSpan, int rowSpan) {
+        QList<int> indices;
+        for (int r = 0; r < rowSpan; ++r) {
+            for (int c = 0; c < colSpan; ++c) {
+                indices.append(firstRowBegin + r * columns4View + col + c);
+            }
+        }
+        return indices;
+    };
+    const int n = static_cast<int>(cells.size());
+    if (layout == QStringLiteral("f44")) {
+        if (columns4View >= 4 && n >= 1) cells[0].indices = block(l0, 0, 4, 4);
+    } else if (layout == QStringLiteral("f33")) {
+        if (columns4View >= 3 && n >= 1) cells[0].indices = block(l0, 0, 3, 3);
+    } else if (layout == QStringLiteral("p10f22")) {
+        if (columns4View >= 2 && n >= 1) cells[0].indices = block(l0, (columns4View - 2) / 2, 2, 2);
+    } else if (layout == QStringLiteral("p02f22")) {
+        if (columns4View >= 2 && n >= 2) cells[0].indices = block(l2, 0, 2, 2);
+    } else if (layout == QStringLiteral("p01f22")) {
+        if (columns4View >= 2 && n >= 2) cells[0].indices = block(l1, 0, 2, 2);
+    } else if (layout == QStringLiteral("p03f22")) {
+        if (columns4View >= 2 && n >= 2) cells[0].indices = block(l3, 0, 2, 2);
+    } else if (layout == QStringLiteral("f22")) {
+        if (columns4View >= 2 && n >= 1) cells[0].indices = block(l0, 0, 2, 2);
+    } else if (layout == QStringLiteral("f22p02f22")) {
+        if (columns4View >= 2 && n >= 2) {
+            cells[0].indices = block(l0, 0, 2, 2);
+            cells[1].indices = block(l2, 0, 2, 2);
+        }
+    } else if (layout == QStringLiteral("f22p03f22")) {
+        if (columns4View >= 2 && n >= 2) {
+            cells[0].indices = block(l0, 0, 2, 2);
+            cells[1].indices = block(l3, 0, 2, 2);
+        }
+    } else if (layout == QStringLiteral("f22p20f22")) {
+        if (columns4View >= 4 && n >= 2) {
+            cells[0].indices = block(l0, 0, 2, 2);
+            cells[1].indices = block(l0, 2, 2, 2);
+        }
+    } else if (layout == QStringLiteral("f34")) {
+        if (columns4View >= 3 && n >= 1) cells[0].indices = block(l0, 0, 3, 4);
+    }
+
+    // calculatedRows is only how far makeCellSize continues the row
+    // pattern; extra headroom on top of the original's +5 changes nothing
+    // visible and keeps spanning cells from ever indexing past it.
+    const int calculatedRows = qMax(rows4View, ceilDiv(n, columns4View)) + 5 + 32;
+    const QList<CellSpan> cellPosX =
+        makeCellSize(targetWidth - kGridScrollBarSize, columns4View, columns4View, kGridSpacing);
+    const QList<CellSpan> cellPosY = makeCellSize(
+        targetHeight - (hscrollVisible ? kGridScrollBarSize : 0), rows4View, calculatedRows, kGridSpacing);
+    const auto spanX = [&cellPosX](int column) {
+        return cellPosX.at(qBound(0, column, static_cast<int>(cellPosX.size()) - 1));
+    };
+    const auto spanY = [&cellPosY](int row) {
+        return cellPosY.at(qBound(0, row, static_cast<int>(cellPosY.size()) - 1));
+    };
+    QSet<int> usedIndices;
+    int maxIndex = 0;
+
+    for (ViewCell &cell : cells) {
+        const QList<int> indices = cell.indices.isEmpty() ? QList<int>{0} : cell.indices;
+        int xBegin = INT_MAX, xEnd = INT_MIN, yBegin = INT_MAX, yEnd = INT_MIN;
+        for (int index : indices) {
+            while (usedIndices.contains(index)) {
+                ++index;
+            }
+            usedIndices.insert(index);
+            maxIndex = qMax(maxIndex, index);
+            const int column = index % columns4View;
+            const int row = index / columns4View;
+            xBegin = qMin(xBegin, spanX(column).begin);
+            xEnd = qMax(xEnd, spanX(column).end);
+            yBegin = qMin(yBegin, spanY(row).begin);
+            yEnd = qMax(yEnd, spanY(row).end);
+        }
+        cell.rect = QRect(xBegin, yBegin, xEnd - xBegin, yEnd - yBegin);
+    }
+
+    // Fill the rest of the base grid (and pad the last row) with empty cells.
+    for (int index = 0; index < rows4View * columns4View || index <= maxIndex || index % columns4View != 0;
+         ++index) {
+        if (usedIndices.contains(index)) {
+            continue;
+        }
+        usedIndices.insert(index);
+        maxIndex = qMax(maxIndex, index);
+        const CellSpan x = spanX(index % columns4View);
+        const CellSpan y = spanY(index / columns4View);
+        ViewCell cell;
+        cell.target.indexInGrid = static_cast<int>(cells.size());
+        cell.rect = QRect(x.begin, y.begin, x.end - x.begin, y.end - y.begin);
+        cells.append(cell);
+    }
+
+    const int visibleRows = ceilDiv(maxIndex + 1, columns4View);
+    const int fictiveBegin = static_cast<int>(cells.size());
+
+    // The fictive half-cells: a 60px row below the grid (every layout) and,
+    // for "simple", a 60px column to its right -- outside the viewport-sized
+    // grid, reached by scrolling.
+    for (int column = 0; column < columns4View; ++column) {
+        ViewCell cell;
+        cell.target = {static_cast<int>(cells.size()), visibleRows, column};
+        const CellSpan x = spanX(column);
+        cell.rect = QRect(x.begin, spanY(visibleRows - 1).end + kGridSpacing, x.end - x.begin, kFictiveCellSize);
+        cells.append(cell);
+    }
+    if (isSimple) {
+        for (int row = 0; row < visibleRows; ++row) {
+            ViewCell cell;
+            cell.target = {-1, row, columns4View};
+            const CellSpan y = spanY(row);
+            cell.rect = QRect(spanX(columns4View - 1).end + kGridSpacing, y.begin, kFictiveCellSize, y.end - y.begin);
+            cells.append(cell);
+        }
+    }
+
+    // TrackerQuadrator.qml's cellsLimitReached: the "+" of every empty cell
+    // (fictive ones included) goes inert at the cap.
+    const bool limitReached = tab.tileCount() >= kMaxTilesPerTab;
+    QRect childrenRect;
+    for (int i = 0; i < cells.size(); ++i) {
+        const ViewCell &cell = cells.at(i);
+        const QRect rect(cell.rect.topLeft(), QSize(qMax(0, cell.rect.width()), qMax(0, cell.rect.height())));
+        childrenRect = childrenRect.isNull() ? rect : childrenRect.united(rect);
+        if (cell.tileId == 0) {
+            auto *addTile = new AddDeviceTileWidget(m_monitorContainer);
+            addTile->setFictive(i >= fictiveBegin);
+            addTile->setLimitReached(limitReached);
+            connect(addTile, &AddDeviceTileWidget::addRequested, this,
+                    [this, target = cell.target] { openAddDeviceDialog(target); });
+            addTile->setGeometry(rect);
+            addTile->show();
+            m_emptyCellWidgets.append(addTile);
+            continue;
+        }
+
+        const TrackerTab::TileEntry &entry = tab.cells.at(cell.target.indexInGrid);
         DeviceTileWidget *tile = m_deviceTiles.value(entry.tileId, nullptr);
         if (!tile) {
             tile = new DeviceTileWidget(entry.deviceKey, deviceDisplayName(entry.deviceKey),
@@ -1476,7 +2088,8 @@ void MainWindow::relayoutCurrentTab()
             });
             m_deviceTiles.insert(entry.tileId, tile);
             tile->setAvailableStreams(m_deviceMonitorStreams.value(entry.deviceKey),
-                                      m_deviceWindowStreams.value(entry.deviceKey).value(0, 0));
+                                      m_deviceActiveWindowStream.value(entry.deviceKey, 0),
+                                      m_deviceActiveMonitorStream.value(entry.deviceKey, 0));
             for (quint32 monitorStream : m_deviceMonitorStreams.value(entry.deviceKey)) {
                 if (MonitorWidget *monitor = m_monitors.value(monitorStream, nullptr)) {
                     tile->updateThumbnail(monitorStream, monitor->currentFrame());
@@ -1490,47 +2103,110 @@ void MainWindow::relayoutCurrentTab()
             tile->setActivity(activity.first, activity.second, deviceCategory(entry.deviceKey, activity.first));
         }
         tile->setParent(m_monitorContainer);
+        tile->setGeometry(rect);
         tile->show();
-        m_monitorGrid->addWidget(tile, index / columns, index % columns);
-        ++index;
     }
 
-    // Trailing "+" tile(s): a full placeholder grid when the tab is empty
-    // (matches the reference UI's empty-tab state), otherwise just one
-    // trailing add-tile after the real devices -- dimmed with a "limit
-    // reached" tooltip once the tab hits kMaxTilesPerTab (see
-    // AddDeviceTileWidget::setLimitReached).
-    const bool limitReached = tab.tiles.size() >= kMaxTilesPerTab;
-    const int addTileCount = tab.tiles.isEmpty() ? qMax(4, columns * 2) : 1;
-    for (int i = 0; i < addTileCount; ++i) {
-        auto *addTile = new AddDeviceTileWidget(m_monitorContainer);
-        addTile->setLimitReached(limitReached);
-        connect(addTile, &AddDeviceTileWidget::addRequested, this, &MainWindow::openAddDeviceDialog);
-        m_monitorGrid->addWidget(addTile, index / columns, index % columns);
-        ++index;
+    // TrackerQuadratorGrid.qml's content item: sized to its children (+ the
+    // trailing spacing) along a scrolling axis, else to the ScrollView minus
+    // the reserved scroll bar and 1px.
+    const int contentWidth = hscrollVisible ? childrenRect.right() + 1 + kGridSpacing
+                                            : targetWidth - kGridScrollBarSize - 1;
+    const int contentHeight = childrenRect.bottom() + 1 + kGridSpacing;
+    m_monitorContainer->resize(qMax(0, contentWidth), qMax(0, contentHeight));
+}
+
+void MainWindow::fillTarget(const GridFillTarget &target, quint32 deviceKey)
+{
+    // QuadratorGrid.qml's onWantFill: in "simple" a fictive cell turns into
+    // the index it will have once the grid has grown to include it; any
+    // other layout just fills the cell's own slot.
+    if (m_tabs.isEmpty()) {
+        return;
     }
+    const TrackerTab &tab = m_tabs.at(m_currentTabIndex);
+    if (tab.gridLayout != QStringLiteral("simple")) {
+        fillCell(target.indexInGrid, deviceKey, false, 0, 0);
+        return;
+    }
+    if (target.fictiveRow >= 0 || target.fictiveColumn >= 0) {
+        const int columns = qMax(target.fictiveColumn + 1, tab.gridColumns);
+        const int rows = qMax(target.fictiveRow + 1, tab.gridRows);
+        fillCell(target.fictiveRow * columns + target.fictiveColumn, deviceKey, true, columns, rows);
+        return;
+    }
+    fillCell(target.indexInGrid, deviceKey, true, 0, 0);
+}
+
+void MainWindow::fillCell(int cell, quint32 deviceKey, bool canCollapse, int minColumns, int minRows)
+{
+    // TrackerQuadrator.qml's grid onWantFill: grow the grid to minColumns
+    // (inserting an empty cell at the end of every row, so existing cells
+    // keep their row/column) and minRows first, then fill that exact cell.
+    if (m_tabs.isEmpty() || cell < 0) {
+        return;
+    }
+    TrackerTab &tab = m_tabs[m_currentTabIndex];
+    QList<TrackerTab::TileEntry> &cells = tab.cells;
+    int columns = qMax(tab.gridColumns, kGridBestColumns);
+    int rows = qMax(ceilDiv(static_cast<int>(cells.size()), columns), kGridBestRows);
+    while (minColumns > columns) {
+        for (int idx = columns; idx < cells.size(); idx += columns + 1) {
+            cells.insert(idx, TrackerTab::TileEntry{0, 0});
+        }
+        ++columns;
+    }
+    while (minRows > rows) {
+        ++rows;
+    }
+    while (cells.size() <= cell) {
+        cells.append(TrackerTab::TileEntry{0, 0});
+    }
+    cells[cell] = TrackerTab::TileEntry{m_nextTileId++, deviceKey};
+    if (canCollapse) {
+        const QPair<int, int> shape = collapseEmptyRowsColumns(cells, columns, rows);
+        columns = shape.first;
+        rows = shape.second;
+    }
+    tab.gridColumns = columns;
+    tab.gridRows = rows;
+    relayoutCurrentTab();
 }
 
 void MainWindow::removeTile(quint32 tileId)
 {
-    // fullCell.wantFree: the tile leaves the current tab.
+    // TrackerQuadrator.qml's grid onWantFree: the cell becomes an empty hole
+    // in place (only trailing holes are trimmed); "simple" then collapses
+    // any fully empty row/column.
     if (m_tabs.isEmpty()) {
         return;
     }
-    QList<TrackerTab::TileEntry> &tiles = m_tabs[m_currentTabIndex].tiles;
-    tiles.erase(std::remove_if(tiles.begin(), tiles.end(),
-                               [tileId](const TrackerTab::TileEntry &entry) { return entry.tileId == tileId; }),
-                tiles.end());
+    TrackerTab &tab = m_tabs[m_currentTabIndex];
+    QList<TrackerTab::TileEntry> &cells = tab.cells;
+    for (TrackerTab::TileEntry &entry : cells) {
+        if (entry.tileId == tileId) {
+            entry = TrackerTab::TileEntry{0, 0};
+        }
+    }
     if (DeviceTileWidget *tile = m_deviceTiles.take(tileId)) {
         tile->deleteLater();
     }
+    trimTail(cells);
+    int columns = qMax(tab.gridColumns, kGridBestColumns);
+    int rows = qMax(ceilDiv(static_cast<int>(cells.size()), columns), kGridBestRows);
+    if (tab.gridLayout == QStringLiteral("simple")) {
+        const QPair<int, int> shape = collapseEmptyRowsColumns(cells, columns, rows);
+        columns = shape.first;
+        rows = shape.second;
+    }
+    tab.gridColumns = columns;
+    tab.gridRows = rows;
     relayoutCurrentTab();
 }
 
 void MainWindow::resizeEvent(QResizeEvent *event)
 {
     QMainWindow::resizeEvent(event);
-    relayoutCurrentTab();
 }
 
 void MainWindow::loadSettings()
@@ -1594,3 +2270,6 @@ void MainWindow::saveSettings() const
     }
     settings.endArray();
 }
+
+// GridsPanel declares Q_OBJECT in this .cpp, so AUTOMOC needs this.
+#include "mainwindow.moc"

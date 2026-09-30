@@ -238,7 +238,8 @@ void SubServiceHost::writeEncodedFrame(quint32 streamId, const QByteArray &encod
 }
 
 void SubServiceHost::pushMetadata(quint32 streamId, const QString &application,
-                                  const QString &idleText, int inputEvents, const QString &url)
+                                  const QString &idleText, int inputEvents, const QString &url,
+                                  quint32 activeMonitorStreamId, const QString &windowTitle)
 {
     if (!m_socket) {
         return;
@@ -247,7 +248,10 @@ void SubServiceHost::pushMetadata(quint32 streamId, const QString &application,
             QJsonObject{{QStringLiteral("application"), application},
                         {QStringLiteral("idle"), idleText},
                         {QStringLiteral("inputEvents"), inputEvents},
-                        {QStringLiteral("url"), url}});
+                        {QStringLiteral("url"), url},
+                        {QStringLiteral("activeMonitor"),
+                         static_cast<qint64>(activeMonitorStreamId)},
+                        {QStringLiteral("windowTitle"), windowTitle}});
 }
 
 void SubServiceHost::pushKeystroke(const QString &windowTitle, const QString &text)
