@@ -2111,7 +2111,7 @@ HistoryView::HistoryView(ViewerConnection &connection, QWidget *parent)
     // Date/Pressing period/Application/Title/Keystrokes. The Application
     // column is a placeholder (always "--") until HistoryKeystrokeEntry
     // actually carries an application field -- see the KeylogRow/
-    // groupKeystrokeEntries comment above; it needs a PersonalHost change,
+    // groupKeystrokeEntries comment above; it needs a KikiHost change,
     // not just a client-side one, so it's deferred. Lives in a popup dialog
     // (see onKeylogTableClicked), not as a mode of the main page.
     m_textLog = new QTableWidget(0, 5, this);

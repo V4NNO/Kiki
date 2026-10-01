@@ -431,7 +431,7 @@ private:
     // The streamId used for every non-video History query (days, activity,
     // app segments, running apps, categories, keystrokes) -- the device's
     // first/primary monitor. These values are session-wide already (see
-    // DeviceDetailView's identical assumption); PersonalHost just happens to
+    // DeviceDetailView's identical assumption); KikiHost just happens to
     // record them once per monitor, so any one of the device's streams has
     // the full picture -- no merging across monitors needed.
     quint32 currentStreamId() const;
@@ -510,7 +510,7 @@ private:
     // Audio.qml: only visible at Time step = 1s in the real app (finer
     // steps are the only ones granular enough for audio to make sense
     // alongside). Always disabled here regardless -- no audio capture
-    // exists anywhere in this project (PersonalHost/PersonalSubService).
+    // exists anywhere in this project (KikiHost/KikiSubService).
     QPushButton *m_muteButton = nullptr;
     TimelineWidget *m_timeline = nullptr;
     // Video.qml's centered "excuse" text over the video area

@@ -54,7 +54,7 @@ public:
     // view's scroll area (their ownership/lifetime stays with whoever
     // created them -- this view just becomes their visual parent while
     // shown). primaryStreamId is used for the History queries and the idle
-    // banner (application/idle/url are session-wide, but PersonalHost
+    // banner (application/idle/url are session-wide, but KikiHost
     // records them once per monitor -- any one monitor of the session has
     // the full picture, see sessionmanager.cpp). windowPreviews is one
     // MonitorWidget per currently open window on that device (see
@@ -69,7 +69,7 @@ public:
     // stream set changes while its Programs page is the one currently open,
     // instead of leaving it a frozen snapshot from showDevice().
     void refreshWindowPreviews(const QList<MonitorWidget *> &windowPreviews);
-    // PersonalHost's WTS session state ("active"/"connected"/"disconnected"/
+    // KikiHost's WTS session state ("active"/"connected"/"disconnected"/
     // "idle"/"other") -- drives the big StatusIcon placeholder on Monitors
     // (Windows.qml's instantStatusIcon), same mapping as DeviceTileWidget.
     void setSessionState(const QString &state);

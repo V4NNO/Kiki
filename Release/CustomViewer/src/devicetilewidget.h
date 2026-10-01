@@ -33,7 +33,7 @@ public:
     // m_deviceActiveMonitorStream).
     void setAvailableStreams(const QList<quint32> &monitorStreamIds, quint32 windowStreamId,
                              quint32 activeMonitorStreamId);
-    // PersonalHost's WTS session state ("active"/"connected"/"disconnected"/
+    // KikiHost's WTS session state ("active"/"connected"/"disconnected"/
     // "idle"/"other"), mapped onto StatusIcon kinds.
     void setSessionState(const QString &state);
     // The grabber's live activity: the foreground application, its idle

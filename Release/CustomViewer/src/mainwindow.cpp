@@ -757,7 +757,7 @@ void MainWindow::showAbout()
     layout->setContentsMargins(24, 24, 24, 24);
     layout->setSpacing(10);
 
-    auto *brand = new QLabel(QStringLiteral("Personal Screen Viewer"), dialog);
+    auto *brand = new QLabel(QStringLiteral("Kiki Viewer"), dialog);
     brand->setStyleSheet(QStringLiteral("font-size: 16pt; font-weight: 700; color: #1da06f;"));
     layout->addWidget(brand);
 
@@ -809,7 +809,7 @@ void MainWindow::updateStaterNode(bool online)
                                               : QStringLiteral(":/staterNodes/bg_offline.png")));
     // StaterNodes.qml's tooltip: the server icon + "<name> (Online/Offline)".
     // A rich-text QLabel tooltip lets us embed the same server glyph.
-    const QString server = m_staterNodeName.isEmpty() ? QStringLiteral("PersonalHost") : m_staterNodeName;
+    const QString server = m_staterNodeName.isEmpty() ? QStringLiteral("KikiHost") : m_staterNodeName;
     m_staterNodeDot->setToolTip(QStringLiteral(
         "<img src=':/staterNodes/server%1.png'>&nbsp;%2 (%3)")
         .arg(online ? QStringLiteral("_online") : QString(), server,
@@ -839,8 +839,8 @@ void MainWindow::setAgentIdentity(const QString &agentName, const QString &sessi
     // the timers in the constructor), this identity goes in the window
     // title instead so the information isn't just dropped.
     setWindowTitle(sessionName.isEmpty()
-                       ? QStringLiteral("Personal Viewer -- %1").arg(agentName)
-                       : QStringLiteral("Personal Viewer -- %1 / %2").arg(agentName, sessionName));
+                       ? QStringLiteral("Viewer -- %1").arg(agentName)
+                       : QStringLiteral("Viewer -- %1 / %2").arg(agentName, sessionName));
     // StaterNodes.qml names the node in its tooltip -- use the agent's own
     // reported name once we have it.
     if (!agentName.isEmpty()) {
@@ -1378,7 +1378,7 @@ void MainWindow::openAddDeviceDialog(const GridFillTarget &target)
 
     // utils/EmployeePicker.qml equivalent: real one is a full Organization ->
     // Department -> Employee -> Session tree with search and an "online
-    // only" filter. We have no department/organization model (PersonalHost
+    // only" filter. We have no department/organization model (KikiHost
     // just reports flat connected sessions), so this is a single-level tree
     // under one "Toate device-urile" root instead of real departments --
     // but search and the online filter are real and wired against actual
@@ -1398,7 +1398,7 @@ void MainWindow::openAddDeviceDialog(const GridFillTarget &target)
     tree->setItemDelegate(new EmployeeRowDelegate(tree));
     // Simple mode hides the department-shaped root label entirely (there's
     // no department model behind it anyway); Advanced mode shows it as a
-    // placeholder for where real departments would nest once PersonalHost
+    // placeholder for where real departments would nest once KikiHost
     // has an org model.
     QTreeWidgetItem *root = m_simpleMode ? tree->invisibleRootItem()
                                          : new QTreeWidgetItem(tree, {QStringLiteral("Toate device-urile")});
@@ -1568,7 +1568,7 @@ void MainWindow::removeWindowStream(quint32 streamId)
 
 void MainWindow::buildInterface()
 {
-    setWindowTitle(QStringLiteral("Personal Viewer"));
+    setWindowTitle(QStringLiteral("Viewer"));
     // Tall enough that History's controls block (buttons/timeline/toggle/
     // Activity-Efficiency) isn't clipped at the bottom by default -- see
     // HistoryView's m_videoColumn maximumHeight comment.
@@ -1682,7 +1682,7 @@ void MainWindow::buildInterface()
     headerLayout->addSpacing(5);
     // ViewerControls/StaterNodes.qml: the server-status indicator(s) in the
     // top panel -- one dot per central node in the real (multi-node)
-    // Kickidler. This system has exactly one node (PersonalHost), so it's a
+    // Kickidler. This system has exactly one node (KikiHost), so it's a
     // single dot: staterNodes/bg_empty.png (green) when connected,
     // bg_offline.png (red) otherwise, with a hover tooltip naming the server
     // and its state.
@@ -2517,7 +2517,7 @@ void MainWindow::loadSettings()
     m_simpleMode = settings.value(QStringLiteral("preferences/simpleMode"), false).toBool();
 
     // Local rename overrides -- keyed by deviceKey, which is only stable
-    // for as long as PersonalHost keeps reporting the same sessionId for
+    // for as long as KikiHost keeps reporting the same sessionId for
     // that machine (see the member comment). Best-effort until there's a
     // real, persistent employee identity to key on instead.
     m_deviceNameOverrides.clear();

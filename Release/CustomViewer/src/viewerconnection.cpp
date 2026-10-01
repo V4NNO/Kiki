@@ -213,7 +213,7 @@ void ViewerConnection::onSslErrors(const QList<QSslError> &errors)
 void ViewerConnection::sendClientHello()
 {
     QJsonObject object{
-        {QStringLiteral("client"), QStringLiteral("PersonalScreenViewer")},
+        {QStringLiteral("client"), QStringLiteral("viewer")},
         {QStringLiteral("version"), QStringLiteral("0.1.0")},
         {QStringLiteral("token"), m_token},
         {QStringLiteral("capabilities"), QJsonObject{

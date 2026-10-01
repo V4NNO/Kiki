@@ -49,7 +49,7 @@ public:
     void stopDemo();
     bool isConnected() const;
 
-    // History (Faza 2): served by PersonalHost over this same connection,
+    // History (Faza 2): served by KikiHost over this same connection,
     // so it works whether or not viewer and host are on the same machine.
     // No-ops (silently) against an agent that never announces support --
     // the request just gets an {"error":...} response, surfaced via
@@ -74,10 +74,10 @@ signals:
     void statusChanged(const QString &status, bool connected);
     void agentIdentified(const QString &agentName, const QString &sessionName);
     // sessionUsername/sessionState are empty/"" when the agent has no
-    // notion of Windows sessions (single-process PersonalScreenAgent, demo
-    // mode); PersonalHost fills them in so the viewer can group monitors
+    // notion of Windows sessions (single-process KikiAgent, demo
+    // mode); KikiHost fills them in so the viewer can group monitors
     // by the session/user they belong to.
-    // isWindow: true for a PersonalSubService's ActiveWindowCapture live
+    // isWindow: true for a KikiSubService's ActiveWindowCapture live
     // preview stream, not a real monitor -- see
     // SubServiceHost::kActiveWindowStreamId.
     void monitorDiscovered(quint32 streamId, const QString &name, const QSize &size,
@@ -163,7 +163,7 @@ private:
     QHash<quint32, StreamState> m_streams;
     QTimer m_demoTimer;
     // Auto-reconnect: fires while m_wantConnected and the socket is down, so
-    // the viewer re-attaches on its own after `sc stop/start PersonalHost`.
+    // the viewer re-attaches on its own after `sc stop/start KikiHost`.
     QTimer m_reconnectTimer;
     QString m_host;
     quint16 m_port = 0;

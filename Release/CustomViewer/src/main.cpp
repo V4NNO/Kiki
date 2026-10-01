@@ -8,8 +8,8 @@
 int main(int argc, char *argv[])
 {
     QApplication application(argc, argv);
-    QCoreApplication::setOrganizationName(QStringLiteral("PersonalTools"));
-    QCoreApplication::setApplicationName(QStringLiteral("PersonalScreenViewer"));
+    QCoreApplication::setOrganizationName(QStringLiteral("Kiki"));
+    QCoreApplication::setApplicationName(QStringLiteral("viewer"));
     QCoreApplication::setApplicationVersion(QStringLiteral("0.1.0"));
     // The Roboto faces embedded in the real viewer.exe (resources/fonts).
     for (const QString &font : {QStringLiteral(":/fonts/Roboto-Regular.ttf"),

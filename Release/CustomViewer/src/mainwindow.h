@@ -99,18 +99,18 @@ private slots:
     void openGridsPanel();
     // TrackerFiltersPanel.qml equivalent -- toggles a side panel listing
     // violation-rule categories. There's no rule engine anywhere in this
-    // system (PersonalHost has no concept of a "violation"), so the panel
+    // system (KikiHost has no concept of a "violation"), so the panel
     // is structural/visual only for now: it shows the category tree and a
     // trash drop target the same as the original, but nothing is wired to
     // actual detection yet. Kept separate from the rule engine so the UI
-    // is ready the day PersonalHost gains one.
+    // is ready the day KikiHost gains one.
     void toggleFiltersPanel(bool visible);
     // TopPanel.qml's main menu has a "Simple/Advanced mode" switch that
     // swaps the whole organization model (departments/roles) in the real
     // app. We have no department model to swap, so this only toggles
     // whether department-shaped affordances (the Grids panel's "assign
     // department" entry, the tree root label in the add-device picker)
-    // are shown -- a stub for when PersonalHost grows an org model.
+    // are shown -- a stub for when KikiHost grows an org model.
     void setSimpleMode(bool simple);
     void openDeviceDetail(quint32 sessionKey);
     void closeDeviceDetail();
@@ -194,8 +194,8 @@ protected:
     QHash<quint32, QString> m_monitorNames;
 
     // Device (session) bookkeeping. A "device key" is sessionId when the
-    // agent reports one (PersonalHost), or the streamId itself otherwise
-    // (demo mode / single-session PersonalScreenAgent) -- same fallback
+    // agent reports one (KikiHost), or the streamId itself otherwise
+    // (demo mode / single-session KikiAgent) -- same fallback
     // MonitorInfo grouping has always used.
     QHash<quint32, QString> m_deviceUsernames; // key: deviceKey
     // Local-only rename override (see DeviceDetailView::renameRequested) --
@@ -203,14 +203,14 @@ protected:
     QHash<quint32, QString> m_deviceNameOverrides;
     QHash<quint32, quint32> m_devicePrimaryStream; // key: deviceKey -> first-seen streamId
     QHash<quint32, QList<quint32>> m_deviceMonitorStreams; // key: deviceKey
-    // Latest WTS session state PersonalHost reported for this device
+    // Latest WTS session state KikiHost reported for this device
     // (sessionmanager.cpp's wtsStateToString: "active"/"connected"/
     // "disconnected"/"idle"/"other") -- real backend data that was
     // previously received and discarded (see addMonitor()). Drives the
     // tile status badge (StatusIcon.qml equivalent) and the add-device
     // picker's "online only" filter. The original also distinguishes
     // locked-screen/screensaver/"video watch disabled"/removed-employee,
-    // none of which PersonalHost currently reports -- those stay as the
+    // none of which KikiHost currently reports -- those stay as the
     // generic "connecting" fallback until the grabber is extended.
     QHash<quint32, QString> m_deviceSessionState; // key: deviceKey
     // When each device's connection state last changed -- drives the employee

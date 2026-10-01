@@ -542,7 +542,7 @@ DeviceDetailView::DeviceDetailView(ViewerConnection &connection, QWidget *parent
     connect(m_keyloggerSearch, &QLineEdit::textChanged, this, &DeviceDetailView::filterKeyloggerTable);
     keyloggerToolbarLayout->addWidget(m_keyloggerSearch, 1);
     auto *hideSystemKeysCheck = new QCheckBox(QStringLiteral("Hide system keys"), keyloggerToolbar);
-    // Inert: PersonalHost's keylogger doesn't tag which characters are
+    // Inert: KikiHost's keylogger doesn't tag which characters are
     // control/system keys vs. printable text (see keylogger.cpp) -- there's
     // nothing to filter by yet, so this stays visible but has no effect
     // until that tagging exists.
@@ -728,7 +728,7 @@ DeviceDetailView::DeviceDetailView(ViewerConnection &connection, QWidget *parent
                 m_keystrokesLoaded = true;
                 rebuildKeyloggerTable();
                 // utils/Keystream.qml's two distinct messages: "disabled"
-                // isn't a state PersonalHost reports (there's no per-device
+                // isn't a state KikiHost reports (there's no per-device
                 // keylogger on/off flag in the protocol -- it's always on),
                 // so the only real distinction left is "no data yet" vs.
                 // "server confirmed nothing today".

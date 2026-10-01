@@ -7,6 +7,10 @@ ghidra-work/
 # Executabile generate local
 *.exe
 
+# Directoare de build CMake - artefacte generate, se reconstruiesc local
+build/
+build-*/
+
 # Istoric local PersonalHost (Faza 2) - capturi si baza SQLite, nu se comite
 GrabberHistory/
 
