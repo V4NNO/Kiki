@@ -26,8 +26,22 @@ ViewerConnection::ViewerConnection(QObject *parent)
     connect(&m_socket, &QSslSocket::readyRead, this, &ViewerConnection::onReadyRead);
     connect(&m_socket, &QSslSocket::errorOccurred, this, &ViewerConnection::onSocketError);
     connect(&m_socket, &QSslSocket::sslErrors, this, &ViewerConnection::onSslErrors);
+    connect(&m_socket, &QSslSocket::disconnected, this, [this] {
+        if (m_wantConnected) {
+            emit statusChanged(QStringLiteral("Deconectat; reincercare..."), false);
+            scheduleReconnect();
+        }
+    });
     connect(&m_demoTimer, &QTimer::timeout, this, &ViewerConnection::renderDemoFrame);
     m_demoTimer.setInterval(100);
+    // Retry a dropped/refused connection every 2s until it comes back.
+    m_reconnectTimer.setInterval(2000);
+    m_reconnectTimer.setSingleShot(true);
+    connect(&m_reconnectTimer, &QTimer::timeout, this, [this] {
+        if (m_wantConnected && m_socket.state() == QAbstractSocket::UnconnectedState) {
+            attemptConnect();
+        }
+    });
 }
 
 void ViewerConnection::connectToAgent(const QString &host, quint16 port,
@@ -35,8 +49,10 @@ void ViewerConnection::connectToAgent(const QString &host, quint16 port,
                                       const QString &certificateSha256)
 {
     stopDemo();
+    m_reconnectTimer.stop();
     m_socket.abort();
     m_host = host.trimmed();
+    m_port = port;
     m_token = token;
     m_useTls = useTls;
     m_certificateSha256 = normalizedFingerprint(certificateSha256);
@@ -53,16 +69,32 @@ void ViewerConnection::connectToAgent(const QString &host, quint16 port,
         return;
     }
 
-    emit statusChanged(QStringLiteral("Conectare la %1:%2...").arg(m_host).arg(port), false);
+    m_wantConnected = true;
+    attemptConnect();
+}
+
+void ViewerConnection::attemptConnect()
+{
+    m_frameReader.clear();
+    emit statusChanged(QStringLiteral("Conectare la %1:%2...").arg(m_host).arg(m_port), false);
     if (m_useTls) {
-        m_socket.connectToHostEncrypted(m_host, port);
+        m_socket.connectToHostEncrypted(m_host, m_port);
     } else {
-        m_socket.connectToHost(m_host, port);
+        m_socket.connectToHost(m_host, m_port);
+    }
+}
+
+void ViewerConnection::scheduleReconnect()
+{
+    if (m_wantConnected && !m_reconnectTimer.isActive()) {
+        m_reconnectTimer.start();
     }
 }
 
 void ViewerConnection::disconnectFromAgent()
 {
+    m_wantConnected = false;
+    m_reconnectTimer.stop();
     if (m_socket.state() != QAbstractSocket::UnconnectedState) {
         m_socket.disconnectFromHost();
     }
@@ -70,6 +102,8 @@ void ViewerConnection::disconnectFromAgent()
 
 void ViewerConnection::startDemo()
 {
+    m_wantConnected = false;
+    m_reconnectTimer.stop();
     disconnectFromAgent();
     m_demoMode = true;
     m_demoSequence = 0;
@@ -116,6 +150,7 @@ bool ViewerConnection::isConnected() const
 
 void ViewerConnection::onSocketConnected()
 {
+    m_reconnectTimer.stop(); // reattached -- stop retrying
     if (!m_useTls) {
         sendClientHello();
         emit statusChanged(QStringLiteral("Conectat; autentificare in curs..."), false);
@@ -142,10 +177,19 @@ void ViewerConnection::onReadyRead()
 void ViewerConnection::onSocketError(QAbstractSocket::SocketError error)
 {
     Q_UNUSED(error)
-    if (!m_demoMode) {
-        emit statusChanged(QStringLiteral("Deconectat"), false);
-        emit protocolError(m_socket.errorString());
+    if (m_demoMode) {
+        return;
     }
+    if (m_wantConnected) {
+        // Server down / refused while we still want a connection: keep
+        // retrying quietly (no error popup spam) until it comes back, which
+        // is what flips the StaterNode dot back to green on restart.
+        emit statusChanged(QStringLiteral("Deconectat; reincercare..."), false);
+        scheduleReconnect();
+        return;
+    }
+    emit statusChanged(QStringLiteral("Deconectat"), false);
+    emit protocolError(m_socket.errorString());
 }
 
 void ViewerConnection::onSslErrors(const QList<QSslError> &errors)

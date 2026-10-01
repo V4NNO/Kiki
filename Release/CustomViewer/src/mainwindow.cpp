@@ -40,6 +40,7 @@
 #include <QSpinBox>
 #include <QStackedWidget>
 #include <QStandardPaths>
+#include <QStyledItemDelegate>
 #include <QStatusBar>
 #include <QStyle>
 #include <QSysInfo>
@@ -120,6 +121,80 @@ private:
 }
 
 namespace {
+// employeePicker/department/employee/Header.qml: a 7px ring bullet (green
+// #28A36F online, red #ED5B4C offline), the name in white, and a right-
+// aligned "online from / offline since <date>" at 30% opacity. Roles:
+// Qt::UserRole = offline (bool), Qt::UserRole+1 = the timestamp text.
+class EmployeeRowDelegate final : public QStyledItemDelegate
+{
+public:
+    static constexpr int kOfflineRole = Qt::UserRole;
+    static constexpr int kTimestampRole = Qt::UserRole + 1;
+    static constexpr int kDeviceKeyRole = Qt::UserRole + 2;
+
+    using QStyledItemDelegate::QStyledItemDelegate;
+
+    QSize sizeHint(const QStyleOptionViewItem &option, const QModelIndex &index) const override
+    {
+        QSize s = QStyledItemDelegate::sizeHint(option, index);
+        s.setHeight(qMax(s.height(), 26));
+        return s;
+    }
+
+    void paint(QPainter *painter, const QStyleOptionViewItem &option,
+               const QModelIndex &index) const override
+    {
+        painter->save();
+        painter->setRenderHint(QPainter::Antialiasing);
+        const QRect r = option.rect;
+        if (option.state & QStyle::State_Selected) {
+            painter->fillRect(r, QColor(255, 255, 255, 26));
+        } else if (option.state & QStyle::State_MouseOver) {
+            painter->fillRect(r, QColor(255, 255, 255, 20));
+        }
+        // Ring bullet.
+        const bool offline = index.data(kOfflineRole).toBool();
+        const QColor ring = offline ? QColor(0xED, 0x5B, 0x4C) : QColor(0x28, 0xA3, 0x6F);
+        const int d = 7;
+        const int bx = r.left() + 10;
+        const int by = r.center().y() - d / 2;
+        QPen pen(ring);
+        pen.setWidth(1);
+        painter->setPen(pen);
+        painter->setBrush(Qt::NoBrush);
+        painter->drawEllipse(QRectF(bx + 0.5, by + 0.5, d, d));
+
+        const int textLeft = bx + d + 6;
+        const int rightPad = 10;
+        QFont nameFont(QStringLiteral("Roboto"));
+        nameFont.setPixelSize(12);
+        nameFont.setBold(true);
+        const QString timestamp = index.data(kTimestampRole).toString();
+        QFont tsFont(QStringLiteral("Roboto"));
+        tsFont.setPixelSize(11);
+        // Timestamp right-aligned, white @30%.
+        int tsWidth = 0;
+        if (!timestamp.isEmpty()) {
+            tsWidth = QFontMetrics(tsFont).horizontalAdvance(timestamp) + 12;
+            painter->setFont(tsFont);
+            QColor ts(Qt::white);
+            ts.setAlphaF(0.3);
+            painter->setPen(ts);
+            painter->drawText(QRect(r.right() - rightPad - tsWidth, r.top(), tsWidth, r.height()),
+                              Qt::AlignRight | Qt::AlignVCenter, timestamp);
+        }
+        // Name, elided to the space left of the timestamp.
+        painter->setFont(nameFont);
+        painter->setPen(Qt::white);
+        const int nameWidth = qMax(10, r.right() - rightPad - tsWidth - 4 - textLeft);
+        painter->drawText(QRect(textLeft, r.top(), nameWidth, r.height()),
+                          Qt::AlignLeft | Qt::AlignVCenter,
+                          QFontMetrics(nameFont).elidedText(index.data(Qt::DisplayRole).toString(),
+                                                            Qt::ElideMiddle, nameWidth));
+        painter->restore();
+    }
+};
+
 // TrackerPanel.qml's Grids/Filters: icon (b_<kind>_normal/hovered/pressed)
 // + Fonts.rr_medium_b text, #a2a2a4 normally, white hovered, #717276 pressed.
 class TrackerPanelButton final : public QPushButton
@@ -801,6 +876,12 @@ void MainWindow::addMonitor(quint32 streamId, const QString &name, const QSize &
         return;
     }
     const quint32 deviceKey = sessionId != 0 ? sessionId : streamId;
+    // Stamp when this device's connection state last changed, for the
+    // "online from / offline since <date>" line in the employee picker
+    // (employeePicker/Header.qml's getTimestampText).
+    if (!m_deviceStateSince.contains(deviceKey) || m_deviceSessionState.value(deviceKey) != sessionState) {
+        m_deviceStateSince.insert(deviceKey, QDateTime::currentDateTime());
+    }
     if (!sessionState.isEmpty()) {
         m_deviceSessionState.insert(deviceKey, sessionState);
         for (DeviceTileWidget *tile : std::as_const(m_deviceTiles)) {
@@ -1019,9 +1100,180 @@ void MainWindow::switchTab(int index)
 
 void MainWindow::addNewTab()
 {
-    const int number = m_tabs.size() + 1;
-    m_tabs.append(TrackerTab{QStringLiteral("New tab_%1").arg(number), {}});
-    m_tabBar->addTab(QStringLiteral("• New tab_%1").arg(number));
+    // DialogWithBipanelEmployeeSelector.qml ("Add department"): pick a name
+    // and any number of employees at once (left = available, right =
+    // selected), then create the tab pre-filled with them. We have no
+    // department model, so the left side is a single "Conection List" group
+    // of the currently connected devices (as the screenshot shows without
+    // departments).
+    auto *dialog = new QDialog(this);
+    dialog->setAttribute(Qt::WA_DeleteOnClose);
+    dialog->setWindowTitle(QStringLiteral("Add department"));
+    dialog->setModal(true);
+    dialog->setMinimumSize(527, 500);
+    auto *layout = new QVBoxLayout(dialog);
+    layout->setContentsMargins(20, 20, 20, 16);
+    layout->setSpacing(10);
+
+    auto *nameRow = new QHBoxLayout;
+    auto *nameLabel = new QLabel(QStringLiteral("Department name"), dialog);
+    nameLabel->setStyleSheet(QStringLiteral("color: white; font-weight: 600;"));
+    auto *nameEdit = new QLineEdit(dialog);
+    nameEdit->setPlaceholderText(QStringLiteral("New tab"));
+    nameRow->addWidget(nameLabel);
+    nameRow->addWidget(nameEdit, 1);
+    layout->addLayout(nameRow);
+
+    auto *searchRow = new QHBoxLayout;
+    auto *searchLabel = new QLabel(QStringLiteral("Add employee"), dialog);
+    searchLabel->setStyleSheet(QStringLiteral("color: white; font-weight: 600;"));
+    auto *searchEdit = new QLineEdit(dialog);
+    searchEdit->setPlaceholderText(QStringLiteral("Enter employee name"));
+    searchRow->addWidget(searchLabel);
+    searchRow->addWidget(searchEdit, 1);
+    layout->addLayout(searchRow);
+
+    auto *onlineOnlyCheck = new QCheckBox(QStringLiteral("Show online employees only"), dialog);
+    layout->addWidget(onlineOnlyCheck);
+
+    auto *countLabel = new QLabel(dialog);
+    countLabel->setStyleSheet(QStringLiteral(
+        "color: white; background: #3a3d45; border: 1px solid #4d515b; padding: 4px 8px;"));
+    layout->addWidget(countLabel, 0, Qt::AlignLeft);
+
+    // Bipanel: left = available (a "Conection List" group of devices), right
+    // = selected. Clicking a row moves it across.
+    auto *panels = new QHBoxLayout;
+    panels->setSpacing(10);
+    auto *available = new QTreeWidget(dialog);
+    available->setHeaderHidden(true);
+    available->setRootIsDecorated(false);
+    available->setIndentation(14);
+    available->setItemDelegate(new EmployeeRowDelegate(available));
+    auto *selected = new QTreeWidget(dialog);
+    selected->setHeaderHidden(true);
+    selected->setRootIsDecorated(false);
+    selected->setIndentation(0);
+    selected->setItemDelegate(new EmployeeRowDelegate(selected));
+    panels->addWidget(available, 1);
+    panels->addWidget(selected, 1);
+    layout->addLayout(panels, 1);
+
+    // "Conection List" group header (green, non-selectable).
+    auto *group = new QTreeWidgetItem(available, {QStringLiteral("Conection List")});
+    group->setFlags(Qt::ItemIsEnabled);
+    group->setForeground(0, QColor(0x28, 0xa3, 0x6f));
+    QFont groupFont = group->font(0);
+    groupFont.setBold(true);
+    group->setFont(0, groupFont);
+    available->expandAll();
+
+    const auto makeDeviceItem = [this](quint32 deviceKey) {
+        auto *item = new QTreeWidgetItem({deviceDisplayName(deviceKey)});
+        const bool offline = m_deviceSessionState.value(deviceKey) == QStringLiteral("disconnected");
+        item->setData(0, EmployeeRowDelegate::kOfflineRole, offline);
+        const QDateTime since = m_deviceStateSince.value(deviceKey);
+        if (since.isValid()) {
+            const QString when = since.toString(QStringLiteral("M/d/yyyy HH:mm"));
+            item->setData(0, EmployeeRowDelegate::kTimestampRole,
+                          offline ? QStringLiteral("offline since %1").arg(when)
+                                  : QStringLiteral("online from %1").arg(when));
+        }
+        item->setData(0, EmployeeRowDelegate::kDeviceKeyRole, deviceKey);
+        return item;
+    };
+    for (auto it = m_devicePrimaryStream.cbegin(); it != m_devicePrimaryStream.cend(); ++it) {
+        group->addChild(makeDeviceItem(it.key()));
+    }
+
+    auto updateCount = [countLabel, selected] {
+        countLabel->setText(QStringLiteral("Selected %1/%2")
+                                .arg(selected->topLevelItemCount())
+                                .arg(kMaxTilesPerTab));
+    };
+    updateCount();
+
+    auto applyFilter = [group, available, onlineOnlyCheck, searchEdit] {
+        const QString needle = searchEdit->text().trimmed();
+        const bool onlineOnly = onlineOnlyCheck->isChecked();
+        for (int i = 0; i < group->childCount(); ++i) {
+            QTreeWidgetItem *child = group->child(i);
+            const bool offline = child->data(0, EmployeeRowDelegate::kOfflineRole).toBool();
+            const bool okSearch = needle.isEmpty() || child->text(0).contains(needle, Qt::CaseInsensitive);
+            child->setHidden(!(okSearch && (!onlineOnly || !offline)));
+        }
+        Q_UNUSED(available);
+    };
+    connect(searchEdit, &QLineEdit::textChanged, dialog, applyFilter);
+    connect(onlineOnlyCheck, &QCheckBox::toggled, dialog, applyFilter);
+
+    // Move a device to the selected side (respecting the 25 cap).
+    connect(available, &QTreeWidget::itemClicked, dialog,
+            [=](QTreeWidgetItem *item, int) {
+                if (!item || item == group || item->isHidden()) {
+                    return;
+                }
+                if (selected->topLevelItemCount() >= kMaxTilesPerTab) {
+                    return;
+                }
+                const quint32 deviceKey = item->data(0, EmployeeRowDelegate::kDeviceKeyRole).toUInt();
+                delete item; // remove from the available group
+                selected->addTopLevelItem(makeDeviceItem(deviceKey));
+                updateCount();
+            });
+    // Click a selected row to put it back.
+    connect(selected, &QTreeWidget::itemClicked, dialog,
+            [=](QTreeWidgetItem *item, int) {
+                if (!item) {
+                    return;
+                }
+                const quint32 deviceKey = item->data(0, EmployeeRowDelegate::kDeviceKeyRole).toUInt();
+                delete item;
+                group->addChild(makeDeviceItem(deviceKey));
+                applyFilter();
+                updateCount();
+            });
+
+    auto *buttonRow = new QHBoxLayout;
+    buttonRow->addStretch(1);
+    auto *cancelButton = new QPushButton(QStringLiteral("Cancel"), dialog);
+    auto *okButton = new QPushButton(QStringLiteral("OK"), dialog);
+    okButton->setObjectName(QStringLiteral("primaryButton"));
+    buttonRow->addWidget(cancelButton);
+    buttonRow->addWidget(okButton);
+    layout->addLayout(buttonRow);
+    connect(cancelButton, &QPushButton::clicked, dialog, &QDialog::close);
+    connect(okButton, &QPushButton::clicked, dialog, [=] {
+        QList<quint32> deviceKeys;
+        for (int i = 0; i < selected->topLevelItemCount(); ++i) {
+            deviceKeys.append(selected->topLevelItem(i)->data(0, EmployeeRowDelegate::kDeviceKeyRole).toUInt());
+        }
+        const QString title = nameEdit->text().trimmed().isEmpty()
+            ? QStringLiteral("New tab_%1").arg(m_tabs.size() + 1)
+            : nameEdit->text().trimmed();
+        createTabWithDevices(title, deviceKeys);
+        dialog->close();
+    });
+
+    dialog->show();
+}
+
+void MainWindow::createTabWithDevices(const QString &title, const QList<quint32> &deviceKeys)
+{
+    // TrackerQuadrator.qml's enplaceFullCells: grid shape is derived once from
+    // the employee count (columns = max(ceil(sqrt(n)), 2), rows = max(ceil(n/
+    // columns), 2)), then every employee gets a cell.
+    TrackerTab tab;
+    tab.title = title;
+    for (quint32 deviceKey : deviceKeys) {
+        tab.cells.append({m_nextTileId++, deviceKey});
+    }
+    const int n = deviceKeys.size();
+    const int columns = qMax(static_cast<int>(std::ceil(std::sqrt(static_cast<double>(n)))), 2);
+    tab.gridColumns = columns;
+    tab.gridRows = qMax(n > 0 ? qCeil(static_cast<double>(n) / columns) : 0, 2);
+    m_tabs.append(tab);
+    m_tabBar->addTab(QStringLiteral("• %1").arg(title));
     m_tabBar->setCurrentIndex(m_tabs.size() - 1);
 }
 
@@ -1140,6 +1392,10 @@ void MainWindow::openAddDeviceDialog(const GridFillTarget &target)
 
     auto *tree = new QTreeWidget(dialog);
     tree->setHeaderHidden(true);
+    tree->setRootIsDecorated(!m_simpleMode);
+    tree->setIndentation(m_simpleMode ? 0 : 16);
+    tree->setMouseTracking(true);
+    tree->setItemDelegate(new EmployeeRowDelegate(tree));
     // Simple mode hides the department-shaped root label entirely (there's
     // no department model behind it anyway); Advanced mode shows it as a
     // placeholder for where real departments would nest once PersonalHost
@@ -1157,7 +1413,18 @@ void MainWindow::openAddDeviceDialog(const GridFillTarget &target)
         const quint32 deviceKey = it.key();
         auto *deviceItem = new QTreeWidgetItem(root, {deviceDisplayName(deviceKey)});
         const bool offline = m_deviceSessionState.value(deviceKey) == QStringLiteral("disconnected");
-        deviceItem->setData(0, Qt::UserRole, offline);
+        deviceItem->setData(0, EmployeeRowDelegate::kOfflineRole, offline);
+        // "online from / offline since <date>" (employeePicker getTimestampText).
+        const QDateTime since = m_deviceStateSince.value(deviceKey);
+        QString timestamp;
+        if (since.isValid()) {
+            const QString when = since.toString(QStringLiteral("M/d/yyyy HH:mm"));
+            timestamp = offline ? QStringLiteral("offline since %1").arg(when)
+                                : QStringLiteral("online from %1").arg(when);
+        } else {
+            timestamp = offline ? QStringLiteral("Offline") : QString();
+        }
+        deviceItem->setData(0, EmployeeRowDelegate::kTimestampRole, timestamp);
         deviceForItem.insert(deviceItem, deviceKey);
     }
     tree->expandAll();
@@ -1186,30 +1453,49 @@ void MainWindow::openAddDeviceDialog(const GridFillTarget &target)
     connect(searchEdit, &QLineEdit::textChanged, dialog, applyFilter);
     connect(onlineOnlyCheck, &QCheckBox::toggled, dialog, applyFilter);
 
-    auto *buttons = new QDialogButtonBox(QDialogButtonBox::Cancel, dialog);
-    connect(buttons, &QDialogButtonBox::rejected, dialog, &QDialog::close);
-    layout->addWidget(buttons);
+    // EmployeeSelector.qml: Cancel + a green "Ok". Selection first, then Ok
+    // confirms (Ok is disabled until an employee row is selected).
+    auto *buttonRow = new QHBoxLayout;
+    buttonRow->addStretch(1);
+    auto *cancelButton = new QPushButton(QStringLiteral("Cancel"), dialog);
+    auto *okButton = new QPushButton(QStringLiteral("Ok"), dialog);
+    okButton->setObjectName(QStringLiteral("primaryButton")); // green, see applyStyle()
+    okButton->setEnabled(false);
+    buttonRow->addWidget(cancelButton);
+    buttonRow->addWidget(okButton);
+    layout->addLayout(buttonRow);
+    connect(cancelButton, &QPushButton::clicked, dialog, &QDialog::close);
 
-    connect(tree, &QTreeWidget::itemClicked, this,
-            [this, dialog, deviceForItem, target, tabIndex = m_currentTabIndex](QTreeWidgetItem *item) {
-                if (!deviceForItem.contains(item)) {
-                    return;
-                }
-                dialog->close();
-                // The picker is non-modal: drop the pick if the cell it was
-                // opened for no longer exists as such (tab switched, or the
-                // cell got filled meanwhile).
-                if (tabIndex != m_currentTabIndex || m_tabs.isEmpty()) {
-                    return;
-                }
-                const TrackerTab &currentTab = m_tabs.at(m_currentTabIndex);
-                const bool isFictive = target.fictiveRow >= 0 || target.fictiveColumn >= 0;
-                if (!isFictive && target.indexInGrid >= 0 && target.indexInGrid < currentTab.cells.size()
-                    && currentTab.cells.at(target.indexInGrid).tileId != 0) {
-                    return;
-                }
-                fillTarget(target, deviceForItem.value(item));
-            });
+    // Shared confirm: fill the target cell with the selected device, honoring
+    // the non-modal guards (tab switched / cell already filled meanwhile).
+    auto confirm = [this, dialog, deviceForItem, target, tabIndex = m_currentTabIndex](QTreeWidgetItem *item) {
+        if (!item || !deviceForItem.contains(item)) {
+            return;
+        }
+        dialog->close();
+        if (tabIndex != m_currentTabIndex || m_tabs.isEmpty()) {
+            return;
+        }
+        const TrackerTab &currentTab = m_tabs.at(m_currentTabIndex);
+        const bool isFictive = target.fictiveRow >= 0 || target.fictiveColumn >= 0;
+        if (!isFictive && target.indexInGrid >= 0 && target.indexInGrid < currentTab.cells.size()
+            && currentTab.cells.at(target.indexInGrid).tileId != 0) {
+            return;
+        }
+        fillTarget(target, deviceForItem.value(item));
+    };
+
+    // Single click selects (enables Ok); double click confirms directly.
+    connect(tree, &QTreeWidget::itemSelectionChanged, dialog, [tree, okButton, deviceForItem] {
+        const QList<QTreeWidgetItem *> selected = tree->selectedItems();
+        okButton->setEnabled(!selected.isEmpty() && deviceForItem.contains(selected.first()));
+    });
+    connect(okButton, &QPushButton::clicked, dialog, [tree, confirm] {
+        const QList<QTreeWidgetItem *> selected = tree->selectedItems();
+        confirm(selected.isEmpty() ? nullptr : selected.first());
+    });
+    connect(tree, &QTreeWidget::itemDoubleClicked, dialog,
+            [confirm](QTreeWidgetItem *item, int) { confirm(item); });
 
     dialog->show();
 }

@@ -2630,6 +2630,8 @@ C:/Users/IonSacaliuc/OneDrive - Utilities One Inc/Desktop/SCRIPTS/KickDecompile/
  mdp:C:/Users/IonSacaliuc/OneDrive - Utilities One Inc/Desktop/SCRIPTS/KickDecompile/Release/PersonalSubService/src/activityprobe.h
 C:/Users/IonSacaliuc/OneDrive - Utilities One Inc/Desktop/SCRIPTS/KickDecompile/Release/PersonalSubService/src/dxgicapture.cpp
 C:/Users/IonSacaliuc/OneDrive - Utilities One Inc/Desktop/SCRIPTS/KickDecompile/Release/PersonalSubService/src/frameprotocol.cpp
+C:/Users/IonSacaliuc/OneDrive - Utilities One Inc/Desktop/SCRIPTS/KickDecompile/Release/PersonalSubService/src/indicatoroverlay.cpp
+C:/Users/IonSacaliuc/OneDrive - Utilities One Inc/Desktop/SCRIPTS/KickDecompile/Release/PersonalSubService/src/keylogger.cpp
 C:/Users/IonSacaliuc/OneDrive - Utilities One Inc/Desktop/SCRIPTS/KickDecompile/Release/PersonalSubService/src/windowlistcapture.h
  mmc:Q_OBJECT
  mdp:C:/Qt/6.11.2/mingw_64/include/QtCore/QObject
@@ -2981,9 +2983,6 @@ C:/Users/IonSacaliuc/OneDrive - Utilities One Inc/Desktop/SCRIPTS/KickDecompile/
  mdp:C:/Qt/Tools/mingw1310_64/x86_64-w64-mingw32/include/wchar.h
  mdp:C:/Users/IonSacaliuc/OneDrive - Utilities One Inc/Desktop/SCRIPTS/KickDecompile/Release/PersonalSubService/build-current/PersonalSubService_autogen/moc_predefs.h
  mdp:C:/Users/IonSacaliuc/OneDrive - Utilities One Inc/Desktop/SCRIPTS/KickDecompile/Release/PersonalSubService/src/windowlistcapture.h
-C:/Users/IonSacaliuc/OneDrive - Utilities One Inc/Desktop/SCRIPTS/KickDecompile/Release/PersonalSubService/src/keylogger.cpp
-C:/Users/IonSacaliuc/OneDrive - Utilities One Inc/Desktop/SCRIPTS/KickDecompile/Release/PersonalSubService/src/indicatoroverlay.cpp
-C:/Users/IonSacaliuc/OneDrive - Utilities One Inc/Desktop/SCRIPTS/KickDecompile/Release/PersonalSubService/src/main.cpp
 C:/Users/IonSacaliuc/OneDrive - Utilities One Inc/Desktop/SCRIPTS/KickDecompile/Release/PersonalSubService/src/browserurlprobe.cpp
  mmc:Q_OBJECT
  mid:browserurlprobe.moc
@@ -3572,6 +3571,7 @@ C:/Users/IonSacaliuc/OneDrive - Utilities One Inc/Desktop/SCRIPTS/KickDecompile/
  mdp:C:/Users/IonSacaliuc/OneDrive - Utilities One Inc/Desktop/SCRIPTS/KickDecompile/Release/PersonalSubService/build-current/PersonalSubService_autogen/moc_predefs.h
  mdp:C:/Users/IonSacaliuc/OneDrive - Utilities One Inc/Desktop/SCRIPTS/KickDecompile/Release/PersonalSubService/src/browserurlprobe.cpp
  mdp:C:/Users/IonSacaliuc/OneDrive - Utilities One Inc/Desktop/SCRIPTS/KickDecompile/Release/PersonalSubService/src/browserurlprobe.h
+C:/Users/IonSacaliuc/OneDrive - Utilities One Inc/Desktop/SCRIPTS/KickDecompile/Release/PersonalSubService/src/main.cpp
 C:/Users/IonSacaliuc/OneDrive - Utilities One Inc/Desktop/SCRIPTS/KickDecompile/Release/PersonalSubService/src/screencapture.cpp
 C:/Users/IonSacaliuc/OneDrive - Utilities One Inc/Desktop/SCRIPTS/KickDecompile/Release/PersonalSubService/src/subservicehost.cpp
 C:/Users/IonSacaliuc/OneDrive - Utilities One Inc/Desktop/SCRIPTS/KickDecompile/Release/PersonalSubService/src/browserurlprobe.h

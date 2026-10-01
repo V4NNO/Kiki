@@ -56,7 +56,7 @@ void IndicatorOverlay::updateText()
         ? QStringLiteral("%1 ECRANUL ESTE TRANSMIS — %2 vizualizator(i) conectat(i)")
               .arg(dot)
               .arg(m_viewerCount)
-        : QStringLiteral("%1 AGENT ACTIV — asteapta conexiuni").arg(dot));
+        : QStringLiteral("%1 AGENT ACTIV").arg(dot));
     // Text length changes (idle vs "N viewers"), so the pill's width has
     // to be recomputed every time, not just once at startup.
     adjustSize();

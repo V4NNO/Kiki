@@ -2,6 +2,7 @@
 
 #include "viewerconnection.h"
 
+#include <QDateTime>
 #include <QHash>
 #include <QList>
 #include <QMainWindow>
@@ -82,6 +83,9 @@ private slots:
 
     void switchTab(int index);
     void addNewTab();
+    // DialogWithBipanelEmployeeSelector.qml's confirm: create a tab named
+    // `title` pre-filled with these devices (grid shape from enplaceFullCells).
+    void createTabWithDevices(const QString &title, const QList<quint32> &deviceKeys);
     void closeTab(int index);
     // ViewerControls/Tabs.qml: drag-reorder and double-click-to-rename.
     void moveTab(int from, int to);
@@ -209,6 +213,9 @@ protected:
     // none of which PersonalHost currently reports -- those stay as the
     // generic "connecting" fallback until the grabber is extended.
     QHash<quint32, QString> m_deviceSessionState; // key: deviceKey
+    // When each device's connection state last changed -- drives the employee
+    // picker's "online from / offline since <date>" column.
+    QHash<quint32, QDateTime> m_deviceStateSince; // key: deviceKey
     // Reverse lookup for updateFrame() to find which device (and so which
     // tiles) a given streamId belongs to, for the tile video selector --
     // covers both monitor and window streams.

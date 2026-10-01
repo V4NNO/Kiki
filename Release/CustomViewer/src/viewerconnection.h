@@ -140,6 +140,13 @@ private:
     };
 
     void sendClientHello();
+    // Opens the socket with the stored connection params -- shared by the
+    // initial connectToAgent() and the auto-reconnect timer.
+    void attemptConnect();
+    // Re-arms the reconnect timer while the viewer still wants to be
+    // connected (not demo, not an intentional disconnect) -- this is what
+    // brings the StaterNode dot back to green after the server restarts.
+    void scheduleReconnect();
     void parseAvailableMessages();
     void processMessage(const ViewerProtocol::Header &header, const QByteArray &payload);
     void processJsonMessage(const ViewerProtocol::Header &header, const QByteArray &payload);
@@ -155,11 +162,18 @@ private:
     ViewerProtocol::PsvFrameReader m_frameReader;
     QHash<quint32, StreamState> m_streams;
     QTimer m_demoTimer;
+    // Auto-reconnect: fires while m_wantConnected and the socket is down, so
+    // the viewer re-attaches on its own after `sc stop/start PersonalHost`.
+    QTimer m_reconnectTimer;
     QString m_host;
+    quint16 m_port = 0;
     QString m_token;
     QString m_certificateSha256;
     bool m_useTls = true;
     bool m_demoMode = false;
+    // True between connectToAgent() and disconnectFromAgent()/startDemo():
+    // the user wants a live connection, so drops trigger a reconnect.
+    bool m_wantConnected = false;
     quint64 m_demoSequence = 0;
 };
 
