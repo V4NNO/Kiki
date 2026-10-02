@@ -22,6 +22,7 @@
 #include <QScrollArea>
 #include <QSignalBlocker>
 #include <QSizePolicy>
+#include <QSettings>
 #include <QSlider>
 #include <QToolButton>
 #include <QStackedWidget>
@@ -35,6 +36,7 @@
 #include <QPixmap>
 
 #include <algorithm>
+#include <cmath>
 #include <utility>
 
 namespace {
@@ -689,7 +691,6 @@ DeviceDetailView::DeviceDetailView(ViewerConnection &connection, QWidget *parent
                 }
                 m_categories = categories;
                 updateInfoPanel();
-                updateViolationsChart(); // efficiency colors depend on categories
             });
     connect(&m_connection, &ViewerConnection::historyEmployeeCategoriesReceived, this,
             [this](quint32 streamId, const QHash<QString, QString> &categories) {
@@ -698,25 +699,6 @@ DeviceDetailView::DeviceDetailView(ViewerConnection &connection, QWidget *parent
                 }
                 m_employeeCategories = categories;
                 updateInfoPanel();
-                updateViolationsChart(); // efficiency colors depend on categories
-            });
-    // Violations chart data (Activity histogram + Efficiency bands), stored
-    // per day and combined over the current window.
-    connect(&m_connection, &ViewerConnection::historyActivityReceived, this,
-            [this](quint32 streamId, const QString &day, const QList<HistoryActivitySample> &samples) {
-                if (streamId != m_primaryStreamId || !m_violRequestedDays.contains(day)) {
-                    return;
-                }
-                m_violActivityByDay.insert(day, samples);
-                updateViolationsChart();
-            });
-    connect(&m_connection, &ViewerConnection::historyAppSegmentsReceived, this,
-            [this](quint32 streamId, const QString &day, const QList<HistoryAppSegment> &segments) {
-                if (streamId != m_primaryStreamId || !m_violRequestedDays.contains(day)) {
-                    return;
-                }
-                m_violSegmentsByDay.insert(day, segments);
-                updateViolationsChart();
             });
     connect(&m_connection, &ViewerConnection::historyKeystrokesReceived, this,
             [this](quint32 streamId, const QString &day, const QList<HistoryKeystrokeEntry> &entries) {
@@ -831,6 +813,7 @@ void DeviceDetailView::buildViolationsPage(QWidget *page)
     m_violAxis->setFixedHeight(30);
     axisLay->addWidget(m_violAxis, 1);
     auto *shiftRight = new QToolButton(axisRow);
+    m_violShiftRight = shiftRight;
     shiftRight->setText(QStringLiteral("›"));
     shiftRight->setFixedWidth(18);
     shiftRight->setStyleSheet(shiftLeft->styleSheet());
@@ -843,6 +826,7 @@ void DeviceDetailView::buildViolationsPage(QWidget *page)
     m_violChart->setFillMode(true);
     m_violChart->setGridLeft(kViolGridLeft);
     lay->addWidget(m_violChart, 1);
+    m_violChartsModel = new HistoryChartsModel(m_connection, m_violChart, this);
 
     // Range + Step selectors at the bottom (Control.qml).
     auto *controls = new QWidget(page);
@@ -900,35 +884,84 @@ void DeviceDetailView::buildViolationsPage(QWidget *page)
 
     lay->addWidget(controls);
 
+    // ChartsModel.qml onChartTimeRangeChanged: back to the live window, the
+    // step re-picked for the new range.
     connect(m_violRangeSlider, &QSlider::valueChanged, this, [this](int value) {
         m_violRangeIndex = qBound(0, value, kViolRangeCount - 1);
+        m_violLive = true;
         applyViolationsStepForRange();
         reloadViolationsData();
     });
     connect(m_violStepSlider, &QSlider::valueChanged, this, [this](int value) {
         const QList<int> &allowed = kViolRangeSteps[m_violRangeIndex];
         if (value >= 0 && value < allowed.size()) {
-            m_violStepIndex = allowed.at(value);
+            setViolationsStepIndex(allowed.at(value));
+            saveViolationsState();
             reloadViolationsData();
         }
     });
+    // chartTimeWantLeft / chartTimeWantRight: one range back / forward (not
+    // past now), leaving the live window.
     connect(shiftLeft, &QToolButton::clicked, this, [this] {
-        const qint64 end = m_violWindowEndMs > 0 ? m_violWindowEndMs : QDateTime::currentMSecsSinceEpoch();
-        m_violWindowEndMs = end - kViolRangeSec[m_violRangeIndex] * 1000;
+        m_violLive = false;
+        m_violBeginMs -= kViolRangeSec[m_violRangeIndex] * 1000;
         reloadViolationsData();
     });
     connect(shiftRight, &QToolButton::clicked, this, [this] {
-        if (m_violWindowEndMs <= 0) {
-            return; // already at "now"
-        }
-        m_violWindowEndMs += kViolRangeSec[m_violRangeIndex] * 1000;
-        if (m_violWindowEndMs >= QDateTime::currentMSecsSinceEpoch()) {
-            m_violWindowEndMs = 0; // back to live "now"
-        }
+        m_violLive = false;
+        m_violBeginMs = qMin(m_violBeginMs + kViolRangeSec[m_violRangeIndex] * 1000,
+                             QDateTime::currentMSecsSinceEpoch());
         reloadViolationsData();
     });
+    // chartTimeAutoMoveCounter: the live window follows now every second.
+    m_violAutoMoveTimer = new QTimer(this);
+    m_violAutoMoveTimer->setInterval(1000);
+    connect(m_violAutoMoveTimer, &QTimer::timeout, this, [this] {
+        if (m_leftStack->currentWidget() == m_violationsPage) {
+            reloadViolationsData();
+        }
+    });
+    m_violAutoMoveTimer->start();
 
+    // TrackerQuadratorActiveCell.load(): chartTimeRangeIndex (the step
+    // picked for it), then chartTimeStepIndex -- both "|| 0".
+    const QSettings settings;
+    m_violRangeIndex = qBound(0, settings.value(QStringLiteral("activeCellState/chartTimeRangeIndex"), 0).toInt(),
+                              kViolRangeCount - 1);
+    const int savedStep = settings.value(QStringLiteral("activeCellState/chartTimeStepIndex"), 0).toInt();
+    {
+        const QSignalBlocker blocker(m_violRangeSlider);
+        m_violRangeSlider->setValue(m_violRangeIndex);
+    }
     applyViolationsStepForRange();
+    const QList<int> &allowed = kViolRangeSteps[m_violRangeIndex];
+    const int stepPosition = qBound(0, savedStep, int(allowed.size()) - 1);
+    setViolationsStepIndex(allowed.at(stepPosition));
+    {
+        const QSignalBlocker blocker(m_violStepSlider);
+        m_violStepSlider->setValue(stepPosition);
+    }
+    saveViolationsState();
+}
+
+void DeviceDetailView::setViolationsStepIndex(int stepIndex)
+{
+    // ChartsModel.qml onChartTimeStepChanged: the marks the chosen step
+    // gives become the target the next range change aims for.
+    if (stepIndex == m_violStepIndex) {
+        return;
+    }
+    m_violStepIndex = stepIndex;
+    m_violLive = true;
+    m_violLastMarks = static_cast<double>(kViolRangeSec[m_violRangeIndex]) / kViolStepSec[stepIndex];
+}
+
+void DeviceDetailView::saveViolationsState() const
+{
+    QSettings settings;
+    settings.setValue(QStringLiteral("activeCellState/chartTimeRangeIndex"), m_violRangeIndex);
+    settings.setValue(QStringLiteral("activeCellState/chartTimeStepIndex"),
+                      kViolRangeSteps[m_violRangeIndex].indexOf(m_violStepIndex));
 }
 
 void DeviceDetailView::applyViolationsStepForRange()
@@ -936,18 +969,27 @@ void DeviceDetailView::applyViolationsStepForRange()
     if (!m_violStepSlider || !m_violStepLabels) {
         return;
     }
+    // ChartsModel.qml updateChartTimeStep(): the steps timeRangeInit allows
+    // for this range, and of them the first whose marks (range / step) are
+    // nearest lastChartTimeMarks.
     const QList<int> &allowed = kViolRangeSteps[m_violRangeIndex];
-    // Keep the current step if it's valid for this range, else pick the last
-    // (coarsest) allowed step.
-    int pos = allowed.indexOf(m_violStepIndex);
-    if (pos < 0) {
-        pos = allowed.size() - 1;
-        m_violStepIndex = allowed.at(pos);
+    const double rangeValue = kViolRangeSec[m_violRangeIndex];
+    int nearest = -1;
+    double nearestDelta = 1e100;
+    for (int i = 0; i < allowed.size(); ++i) {
+        const double delta = std::abs(m_violLastMarks - rangeValue / kViolStepSec[allowed.at(i)]);
+        if (delta < nearestDelta) {
+            nearest = i;
+            nearestDelta = delta;
+        }
+    }
+    if (nearest >= 0) {
+        setViolationsStepIndex(allowed.at(nearest));
     }
     {
-        QSignalBlocker blocker(m_violStepSlider);
+        const QSignalBlocker blocker(m_violStepSlider);
         m_violStepSlider->setRange(0, allowed.size() - 1);
-        m_violStepSlider->setValue(pos);
+        m_violStepSlider->setValue(qMax(0, int(allowed.indexOf(m_violStepIndex))));
     }
     // Rebuild the step labels for the allowed set.
     auto *oldLay = m_violStepLabels->layout();
@@ -967,58 +1009,37 @@ void DeviceDetailView::applyViolationsStepForRange()
     auto *host = new QVBoxLayout(m_violStepLabels);
     host->setContentsMargins(0, 0, 0, 0);
     host->addWidget(built);
+    saveViolationsState();
 }
 
 void DeviceDetailView::reloadViolationsData()
 {
-    if (!m_violChart || m_primaryStreamId == 0) {
+    if (!m_violChart || m_violStepIndex < 0) {
         return;
     }
     const qint64 rangeMs = kViolRangeSec[m_violRangeIndex] * 1000;
     const qint64 stepMs = kViolStepSec[m_violStepIndex] * 1000;
-    qint64 endMs = m_violWindowEndMs > 0 ? m_violWindowEndMs : QDateTime::currentMSecsSinceEpoch();
-    // Align the window edge to a step boundary (in local time) so the axis
-    // ticks land on round times -- TrackerQuadratorActiveCell.qml floors
-    // "now" to the step the same way.
-    const qint64 tzOffMs = QDateTime::currentDateTime().offsetFromUtc() * 1000LL;
-    endMs = ((endMs + tzOffMs) / stepMs) * stepMs - tzOffMs;
-    const qint64 startMs = endMs - rangeMs;
-    m_violChart->setRange(startMs, endMs);
-    m_violChart->setStepMs(stepMs);
-    m_violAxis->setRange(startMs, endMs);
+    const qint64 now = QDateTime::currentMSecsSinceEpoch();
+    // chartTimeBeginAmortisseur: live, the window ends at now floored to the
+    // step in local time (now - ((now - tzOffset) % step)).
+    if (m_violLive || m_violBeginMs == 0) {
+        const qint64 tzOffMs = QDateTime::currentDateTime().offsetFromUtc() * 1000LL;
+        const qint64 alignedNow = now - ((now + tzOffMs) % stepMs);
+        m_violBeginMs = alignedNow - rangeMs;
+    }
+    const qint64 beginMs = m_violBeginMs;
+    const qint64 endMs = beginMs + rangeMs;
+    m_violChart->setRange(beginMs, endMs);
+    m_violChart->setChartStepMs(stepMs);
+    m_violAxis->setRange(beginMs, endMs);
     m_violAxis->setStepMs(stepMs);
-
-    // Query every day the window touches (data is stored per day); keep only
-    // those days so stale ones don't linger.
-    m_violRequestedDays.clear();
-    QDate day = QDateTime::fromMSecsSinceEpoch(startMs).date();
-    const QDate lastDay = QDateTime::fromMSecsSinceEpoch(endMs).date();
-    for (; day <= lastDay; day = day.addDays(1)) {
-        const QString key = day.toString(QStringLiteral("yyyyMMdd"));
-        m_violRequestedDays.insert(key);
-        m_connection.requestHistoryActivity(m_primaryStreamId, key);
-        m_connection.requestHistoryAppSegments(m_primaryStreamId, key);
+    // Filters.qml: the right shift is enabled while now > timeEnd + timeStep.
+    if (m_violShiftRight) {
+        m_violShiftRight->setEnabled(now > endMs + stepMs);
     }
-    updateViolationsChart();
-}
-
-void DeviceDetailView::updateViolationsChart()
-{
-    if (!m_violChart) {
-        return;
+    if (m_primaryStreamId != 0) {
+        m_violChartsModel->setQuery(m_primaryStreamId, beginMs, endMs, stepMs);
     }
-    QList<HistoryActivitySample> activity;
-    QList<HistoryAppSegment> segments;
-    for (const QString &day : std::as_const(m_violRequestedDays)) {
-        activity += m_violActivityByDay.value(day);
-        segments += m_violSegmentsByDay.value(day);
-    }
-    QHash<QString, QString> categories = m_categories;
-    for (auto it = m_employeeCategories.cbegin(); it != m_employeeCategories.cend(); ++it) {
-        categories.insert(it.key(), it.value());
-    }
-    m_violChart->setActivity(activity);
-    m_violChart->setEfficiency(segments, categories);
 }
 
 void DeviceDetailView::showDevice(quint32 sessionKey, const QString &displayName,
@@ -1055,13 +1076,10 @@ void DeviceDetailView::showDevice(quint32 sessionKey, const QString &displayName
     m_activeApplication.clear();
     updateInfoPanel();
     // Reset the Violations chart to a fresh "now"-anchored window.
-    m_violWindowEndMs = 0;
-    m_violActivityByDay.clear();
-    m_violSegmentsByDay.clear();
-    m_violRequestedDays.clear();
-    if (m_violChart) {
-        m_violChart->setActivity({});
-        m_violChart->setEfficiency({}, {});
+    m_violLive = true;
+    m_violBeginMs = 0;
+    if (m_violChartsModel) {
+        m_violChartsModel->clear();
     }
     m_tabSwitch->setCurrentIndex(1);
     switchSubTab(1);
@@ -1247,6 +1265,9 @@ void DeviceDetailView::onCategorizationRequested(const QString &resource)
             m_employeeCategories[resource] = dialog.employeeCategory();
         }
         m_connection.setAppCategory(m_primaryStreamId, resource, dialog.employeeCategory(), true);
+    }
+    if (m_violChartsModel) {
+        m_violChartsModel->applicationsChanged();
     }
     updateInfoPanel();
 }

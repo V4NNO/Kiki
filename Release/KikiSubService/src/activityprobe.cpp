@@ -21,6 +21,37 @@ bool isSessionLocked()
     CloseDesktop(desktop);
     return false;
 }
+
+// The real grabber's sessionStateShooter reports inSaver via
+// SystemParametersInfoA(SPI_GETSCREENSAVERRUNNING) on a timer
+// (tlsservice.exe FUN_14005cab0); the node stores it in
+// online_session_saver, which -- like lock and idle -- subtracts from
+// volume_activity.
+bool isScreensaverRunning()
+{
+    BOOL running = FALSE;
+    if (!SystemParametersInfo(SPI_GETSCREENSAVERRUNNING, 0, &running, 0)) {
+        return false;
+    }
+    return running != FALSE;
+}
+
+// Seconds since the last keyboard/mouse input, as the grabber's InputTracker
+// reports inputIdlesSec (tlsservice.exe): GetLastInputInfo is the combined
+// last-input clock, i.e. the "both devices idle" value the node turns into
+// an online_session_idle range (threshold 1s, FUN_140597870). Unlike the
+// human-facing idleText below, this is reported continuously, with no 60s
+// floor, so History's Activity can subtract short idle gaps the way the
+// original does.
+double idleSecondsNow()
+{
+    LASTINPUTINFO lastInput;
+    lastInput.cbSize = sizeof(LASTINPUTINFO);
+    if (!GetLastInputInfo(&lastInput)) {
+        return 0.0;
+    }
+    return static_cast<double>(GetTickCount() - lastInput.dwTime) / 1000.0;
+}
 }
 
 class ActivityProbe::Worker : public QObject
@@ -41,7 +72,11 @@ public slots:
     }
 
 signals:
-    void activityChanged(const QString &application, const QString &idleText);
+    // idleSeconds / screensaver are the raw session-state the node turns into
+    // online_session_idle / online_session_saver ranges; idleText is only the
+    // human-facing "Idle/Locked HH:MM:SS" the tile shows (60s floor kept).
+    void activityChanged(const QString &application, const QString &idleText, double idleSeconds,
+                         bool screensaver);
 
 private slots:
     void poll()
@@ -66,8 +101,14 @@ private slots:
             }
         }
 
+        const bool locked = isSessionLocked();
+        // Raw idle seconds and screensaver state for history; the tile text is
+        // derived from them but keeps its 60s idle floor.
+        const double idleSeconds = locked ? 0.0 : idleSecondsNow();
+        const bool screensaver = locked ? false : isScreensaverRunning();
+
         QString idleText;
-        if (isSessionLocked()) {
+        if (locked) {
             const qint64 nowMs = QDateTime::currentMSecsSinceEpoch();
             if (m_lockStartMs == 0) {
                 m_lockStartMs = nowMs;
@@ -79,25 +120,21 @@ private slots:
                            .arg(lockedSeconds % 60, 2, 10, QLatin1Char('0'));
         } else {
             m_lockStartMs = 0;
-            LASTINPUTINFO lastInput;
-            lastInput.cbSize = sizeof(LASTINPUTINFO);
-            if (GetLastInputInfo(&lastInput)) {
-                const DWORD idleMs = GetTickCount() - lastInput.dwTime;
-                const qint64 idleSeconds = idleMs / 1000;
-                if (idleSeconds >= 60) {
-                    idleText = QStringLiteral("Idle %1:%2:%3")
-                                   .arg(idleSeconds / 3600, 2, 10, QLatin1Char('0'))
-                                   .arg((idleSeconds % 3600) / 60, 2, 10, QLatin1Char('0'))
-                                   .arg(idleSeconds % 60, 2, 10, QLatin1Char('0'));
-                }
+            const qint64 idleWhole = static_cast<qint64>(idleSeconds);
+            if (idleWhole >= 60) {
+                idleText = QStringLiteral("Idle %1:%2:%3")
+                               .arg(idleWhole / 3600, 2, 10, QLatin1Char('0'))
+                               .arg((idleWhole % 3600) / 60, 2, 10, QLatin1Char('0'))
+                               .arg(idleWhole % 60, 2, 10, QLatin1Char('0'));
             }
         }
 
-        if (application != m_lastApplication || idleText != m_lastIdleText) {
-            m_lastApplication = application;
-            m_lastIdleText = idleText;
-            emit activityChanged(application, idleText);
-        }
+        // Always emit: idleSeconds / screensaver change every poll and the
+        // host needs them to keep the session's online/idle/saver ranges
+        // current, not only when the foreground app or the tile text changes.
+        m_lastApplication = application;
+        m_lastIdleText = idleText;
+        emit activityChanged(application, idleText, idleSeconds, screensaver);
     }
 
 private:
@@ -119,10 +156,11 @@ public:
 public slots:
     void init()
     {
-        emit activityChanged(QStringLiteral("unknown"), QString());
+        emit activityChanged(QStringLiteral("unknown"), QString(), 0.0, false);
     }
 signals:
-    void activityChanged(const QString &application, const QString &idleText);
+    void activityChanged(const QString &application, const QString &idleText, double idleSeconds,
+                         bool screensaver);
 };
 
 #endif

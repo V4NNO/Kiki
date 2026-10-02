@@ -1369,8 +1369,19 @@ void MainWindow::openAddDeviceDialog(const GridFillTarget &target)
         return;
     }
 
+    // Only one picker at a time: clicking a "+" while the window is already
+    // open just brings it back to the front instead of stacking a second
+    // copy (the real Kickidler viewer is single-instance here too).
+    if (m_addDeviceDialog) {
+        m_addDeviceDialog->show();
+        m_addDeviceDialog->raise();
+        m_addDeviceDialog->activateWindow();
+        return;
+    }
+
     auto *dialog = new QDialog(this);
     dialog->setAttribute(Qt::WA_DeleteOnClose);
+    m_addDeviceDialog = dialog;
     dialog->setWindowTitle(QStringLiteral("Select an Employee"));
     dialog->setModal(false);
     dialog->setMinimumSize(420, 440);

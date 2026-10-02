@@ -188,7 +188,9 @@ void SessionIngest::processMessage(const ViewerProtocol::Header &header, const Q
                                  object.value(QStringLiteral("url")).toString(),
                                  static_cast<quint32>(
                                      object.value(QStringLiteral("activeMonitor")).toDouble()),
-                                 object.value(QStringLiteral("windowTitle")).toString());
+                                 object.value(QStringLiteral("windowTitle")).toString(),
+                                 object.value(QStringLiteral("idleSeconds")).toDouble(),
+                                 object.value(QStringLiteral("screensaver")).toBool());
         }
         break;
     }

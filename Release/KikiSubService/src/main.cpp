@@ -129,20 +129,38 @@ int main(int argc, char *argv[])
     auto currentApplication = std::make_shared<QString>();
     auto currentIdleText = std::make_shared<QString>();
     auto currentUrl = std::make_shared<QString>();
+    // Raw session-state behind the History Activity bar's volume_activity
+    // (see ActivityProbe): seconds since last input and whether the
+    // screensaver is running.
+    auto currentIdleSeconds = std::make_shared<double>(0.0);
+    auto currentScreensaver = std::make_shared<bool>(false);
 
     // Pushes the current (application, idle, url) snapshot for every
     // monitor -- shared by every trigger that should cause an immediate
     // metadata push (app change, url change) plus the periodic sampler
     // below (which supplies the real inputEvents count).
-    auto pushCurrentMetadata = [&host, &capture, currentApplication, currentIdleText,
-                                currentUrl](int inputEvents) {
+    auto pushCurrentMetadata = [&host, &capture, currentApplication, currentIdleText, currentUrl,
+                                currentIdleSeconds, currentScreensaver](int inputEvents) {
         // Same for every monitor this push -- which display currently holds
         // the foreground window (the tile's "Show active monitor" target).
         const quint32 activeMonitor = capture.foregroundMonitorStreamId();
         const QString windowTitle = foregroundWindowTitleForMetadata();
+        // inputEvents is a session-wide count (keystrokes/clicks across the
+        // whole machine, not per display), and the host records it once per
+        // session -- so attach it to a single monitor this push and send 0
+        // on the rest, instead of fanning the same count out to every
+        // monitor (which would otherwise multiply the recorded activity by
+        // the number of screens plugged in). idleSeconds/screensaver are
+        // session-wide too, so they ride the same single monitor.
+        bool sessionFieldsSent = false;
         for (const MonitorInfo &monitor : capture.monitors()) {
-            host.pushMetadata(monitor.streamId, *currentApplication, *currentIdleText, inputEvents,
-                              *currentUrl, activeMonitor, windowTitle);
+            const int eventsForThisMonitor = sessionFieldsSent ? 0 : inputEvents;
+            const double idleForThisMonitor = sessionFieldsSent ? 0.0 : *currentIdleSeconds;
+            const bool saverForThisMonitor = sessionFieldsSent ? false : *currentScreensaver;
+            sessionFieldsSent = true;
+            host.pushMetadata(monitor.streamId, *currentApplication, *currentIdleText,
+                              eventsForThisMonitor, *currentUrl, activeMonitor, windowTitle,
+                              idleForThisMonitor, saverForThisMonitor);
         }
     };
 
@@ -181,10 +199,13 @@ int main(int argc, char *argv[])
     });
     diagTimer.start();
     QObject::connect(&activityProbe, &ActivityProbe::activityChanged, &application,
-                     [currentApplication, currentIdleText,
-                      pushCurrentMetadata](const QString &application_, const QString &idleText) {
+                     [currentApplication, currentIdleText, currentIdleSeconds, currentScreensaver,
+                      pushCurrentMetadata](const QString &application_, const QString &idleText,
+                                           double idleSeconds, bool screensaver) {
                          *currentApplication = application_;
                          *currentIdleText = idleText;
+                         *currentIdleSeconds = idleSeconds;
+                         *currentScreensaver = screensaver;
                          pushCurrentMetadata(0);
                      });
     QObject::connect(&browserUrlProbe, &BrowserUrlProbe::urlChanged, &application,

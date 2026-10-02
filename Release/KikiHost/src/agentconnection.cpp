@@ -335,6 +335,17 @@ void AgentConnection::handleHistoryQuery(const ViewerProtocol::Header &header, c
     const QJsonObject request = document.object();
     const QString action = request.value(QStringLiteral("action")).toString();
     const quint32 monitorStreamId = header.streamId;
+    // Day-scoped queries take an explicit [startMs, stopMs) range when the
+    // viewer sends one (History works on multi-day / custom periods); else
+    // the local day. "day" is echoed back either way, as the reply's key.
+    const QString day = request.value(QStringLiteral("day")).toString();
+    const auto [rangeStart, rangeStop] = [&request, &day]() -> QPair<qint64, qint64> {
+        if (request.contains(QStringLiteral("startMs")) && request.contains(QStringLiteral("stopMs"))) {
+            return {static_cast<qint64>(request.value(QStringLiteral("startMs")).toDouble()),
+                    static_cast<qint64>(request.value(QStringLiteral("stopMs")).toDouble())};
+        }
+        return HistoryRecorder::dayBounds(day);
+    }();
 
     if (!m_historyRecorder) {
         sendJson(ViewerProtocol::MessageType::HistoryQuery, monitorStreamId,
@@ -349,8 +360,7 @@ void AgentConnection::handleHistoryQuery(const ViewerProtocol::Header &header, c
                 QJsonObject{{QStringLiteral("action"), action},
                             {QStringLiteral("days"), QJsonArray::fromStringList(days)}});
     } else if (action == QStringLiteral("listFrames")) {
-        const QString day = request.value(QStringLiteral("day")).toString();
-        const QList<qint64> timestamps = m_historyRecorder->listFrameTimestamps(monitorStreamId, day);
+        const QList<qint64> timestamps = m_historyRecorder->listFrameTimestamps(monitorStreamId, rangeStart, rangeStop);
         QJsonArray array;
         for (qint64 timestamp : timestamps) {
             array.append(timestamp);
@@ -372,9 +382,8 @@ void AgentConnection::handleHistoryQuery(const ViewerProtocol::Header &header, c
         m_socket->write(ViewerProtocol::encodeMessage(ViewerProtocol::MessageType::HistoryFrame,
                                                        monitorStreamId, 0, jpeg, timestampMs));
     } else if (action == QStringLiteral("listActivity")) {
-        const QString day = request.value(QStringLiteral("day")).toString();
         QJsonArray array;
-        for (const ActivitySample &sample : m_historyRecorder->listActivity(monitorStreamId, day)) {
+        for (const ActivitySample &sample : m_historyRecorder->listActivity(monitorStreamId, rangeStart, rangeStop)) {
             array.append(QJsonObject{{QStringLiteral("timestampMs"), sample.timestampMs},
                                      {QStringLiteral("inputEvents"), sample.inputEvents}});
         }
@@ -383,9 +392,8 @@ void AgentConnection::handleHistoryQuery(const ViewerProtocol::Header &header, c
                             {QStringLiteral("day"), day},
                             {QStringLiteral("samples"), array}});
     } else if (action == QStringLiteral("listAppSegments")) {
-        const QString day = request.value(QStringLiteral("day")).toString();
         QJsonArray array;
-        for (const AppSegment &segment : m_historyRecorder->listAppSegments(monitorStreamId, day)) {
+        for (const AppSegment &segment : m_historyRecorder->listAppSegments(monitorStreamId, rangeStart, rangeStop)) {
             array.append(QJsonObject{{QStringLiteral("application"), segment.application},
                                      {QStringLiteral("startMs"), segment.startMs},
                                      {QStringLiteral("endMs"), segment.endMs},
@@ -396,9 +404,8 @@ void AgentConnection::handleHistoryQuery(const ViewerProtocol::Header &header, c
                             {QStringLiteral("day"), day},
                             {QStringLiteral("segments"), array}});
     } else if (action == QStringLiteral("listRunningApplications")) {
-        const QString day = request.value(QStringLiteral("day")).toString();
         QJsonArray array;
-        for (const AppUsage &usage : m_historyRecorder->listRunningApplications(monitorStreamId, day)) {
+        for (const AppUsage &usage : m_historyRecorder->listRunningApplications(monitorStreamId, rangeStart, rangeStop)) {
             array.append(QJsonObject{{QStringLiteral("application"), usage.application},
                                      {QStringLiteral("totalMs"), usage.totalMs},
                                      {QStringLiteral("category"), usage.category},
@@ -409,9 +416,8 @@ void AgentConnection::handleHistoryQuery(const ViewerProtocol::Header &header, c
                             {QStringLiteral("day"), day},
                             {QStringLiteral("applications"), array}});
     } else if (action == QStringLiteral("listWebPages")) {
-        const QString day = request.value(QStringLiteral("day")).toString();
         QJsonArray array;
-        for (const WebUsage &usage : m_historyRecorder->listWebPages(monitorStreamId, day)) {
+        for (const WebUsage &usage : m_historyRecorder->listWebPages(monitorStreamId, rangeStart, rangeStop)) {
             array.append(QJsonObject{{QStringLiteral("url"), usage.url},
                                      {QStringLiteral("totalMs"), usage.totalMs}});
         }
@@ -420,9 +426,8 @@ void AgentConnection::handleHistoryQuery(const ViewerProtocol::Header &header, c
                             {QStringLiteral("day"), day},
                             {QStringLiteral("pages"), array}});
     } else if (action == QStringLiteral("listWebVisits")) {
-        const QString day = request.value(QStringLiteral("day")).toString();
         QJsonArray array;
-        for (const WebVisit &visit : m_historyRecorder->listWebVisits(monitorStreamId, day)) {
+        for (const WebVisit &visit : m_historyRecorder->listWebVisits(monitorStreamId, rangeStart, rangeStop)) {
             array.append(QJsonObject{{QStringLiteral("url"), visit.url},
                                      {QStringLiteral("startMs"), visit.startMs},
                                      {QStringLiteral("endMs"), visit.endMs}});
@@ -463,7 +468,6 @@ void AgentConnection::handleHistoryQuery(const ViewerProtocol::Header &header, c
                             {QStringLiteral("application"), application},
                             {QStringLiteral("category"), category}});
     } else if (action == QStringLiteral("listKeystrokes")) {
-        const QString day = request.value(QStringLiteral("day")).toString();
         quint32 sessionId = 0;
         for (const MonitorInfo &monitor : std::as_const(m_monitors)) {
             if (monitor.streamId == monitorStreamId) {
@@ -472,7 +476,7 @@ void AgentConnection::handleHistoryQuery(const ViewerProtocol::Header &header, c
             }
         }
         QJsonArray array;
-        for (const KeystrokeEntry &entry : m_historyRecorder->listKeystrokes(sessionId, day)) {
+        for (const KeystrokeEntry &entry : m_historyRecorder->listKeystrokes(sessionId, rangeStart, rangeStop)) {
             array.append(QJsonObject{{QStringLiteral("timestampMs"), entry.timestampMs},
                                      {QStringLiteral("windowTitle"), entry.windowTitle},
                                      {QStringLiteral("text"), entry.text}});
@@ -481,6 +485,44 @@ void AgentConnection::handleHistoryQuery(const ViewerProtocol::Header &header, c
                 QJsonObject{{QStringLiteral("action"), action},
                             {QStringLiteral("day"), day},
                             {QStringLiteral("entries"), array}});
+    } else if (action == QStringLiteral("chartSeries")) {
+        // ChartsModel.qml's Selector: kind "activity" (K_activity,
+        // RF_serieInSessionsCombined) or "productivity" (K_byProductivity,
+        // RF_multiSerieInSessionsCombinedSimple) over [startMs, stopMs) at
+        // granulaMs. One serie per session marker -- this host records one
+        // session (username) per employee.
+        const QString kind = request.value(QStringLiteral("kind")).toString();
+        const qint64 granulaMs = static_cast<qint64>(request.value(QStringLiteral("granulaMs")).toDouble());
+        const bool productivity = kind == QStringLiteral("productivity");
+        const QList<ChartPoint> points =
+            productivity ? m_historyRecorder->chartProductivity(monitorStreamId, rangeStart, rangeStop, granulaMs)
+                         : m_historyRecorder->chartActivity(monitorStreamId, rangeStart, rangeStop, granulaMs);
+        QJsonArray moments;
+        QJsonArray values;
+        for (const ChartPoint &point : points) {
+            moments.append(point.pointMs);
+            if (productivity) {
+                values.append(QJsonArray{point.volumes[0], point.volumes[1], point.volumes[2],
+                                         point.volumes[3]});
+            } else {
+                values.append(point.value);
+            }
+        }
+        QJsonArray series;
+        if (!points.isEmpty()) {
+            series.append(QJsonObject{
+                {QStringLiteral("userName"), m_historyRecorder->usernameForStream(monitorStreamId)},
+                {QStringLiteral("moment"), moments},
+                {QStringLiteral("value"), values}});
+        }
+        sendJson(ViewerProtocol::MessageType::HistoryQuery, monitorStreamId,
+                QJsonObject{{QStringLiteral("action"), action},
+                            {QStringLiteral("kind"), kind},
+                            {QStringLiteral("tag"), request.value(QStringLiteral("tag"))},
+                            {QStringLiteral("startMs"), rangeStart},
+                            {QStringLiteral("stopMs"), rangeStop},
+                            {QStringLiteral("granulaMs"), granulaMs},
+                            {QStringLiteral("series"), series}});
     }
 }
 

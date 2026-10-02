@@ -48,7 +48,8 @@ private slots:
     void onFrameReady(quint32 sessionId, quint32 localStreamId, const QImage &image);
     void onMetadataChanged(quint32 sessionId, quint32 localStreamId, const QString &application,
                            const QString &idleText, int inputEvents, const QString &url,
-                           quint32 activeMonitorLocalStreamId, const QString &windowTitle);
+                           quint32 activeMonitorLocalStreamId, const QString &windowTitle,
+                           double idleSeconds, bool screensaver);
     void onKeystrokeReceived(quint32 sessionId, const QString &windowTitle, const QString &text);
     // See MessageType::StreamClosed / SessionIngest::streamClosed.
     void onStreamClosed(quint32 sessionId, quint32 localStreamId);

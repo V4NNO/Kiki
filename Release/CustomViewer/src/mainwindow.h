@@ -6,6 +6,7 @@
 #include <QHash>
 #include <QList>
 #include <QMainWindow>
+#include <QPointer>
 #include <QSet>
 
 class QAction;
@@ -166,6 +167,10 @@ protected:
     QLineEdit *m_fingerprintEdit = nullptr;
     QCheckBox *m_tlsCheck = nullptr;
     QDialog *m_settingsDialog = nullptr;
+    // The non-modal "Select an Employee" picker opened from a tile's "+".
+    // Tracked so a second "+" click raises the existing window instead of
+    // stacking another copy (QPointer auto-nulls on WA_DeleteOnClose).
+    QPointer<QDialog> m_addDeviceDialog;
     QPushButton *m_connectButton = nullptr;
     QLabel *m_statusLabel = nullptr;
     // ViewerControls/StaterNodes.qml: the single-node server-status dot in

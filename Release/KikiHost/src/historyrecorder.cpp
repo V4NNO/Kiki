@@ -3,13 +3,197 @@
 #include <QDateTime>
 #include <QDir>
 #include <QFile>
+#include <QMap>
 #include <QSqlError>
 #include <QSqlQuery>
 
 #include <algorithm>
 
 namespace {
-constexpr auto kConnectionName = "personalhost_history";
+constexpr auto kConnectionName = "kiki_history";
+
+// More than this without any metadata push from a session (the subservice
+// pushes at least every 10s) and the session counts as not reporting: the
+// online range is closed and a new one opens on the next push.
+constexpr qint64 kOnlineGapMs = 35 * 1000;
+
+// "Idle HH:MM:SS" / "Locked HH:MM:SS" (activityprobe.cpp) -> kind + how long
+// the state has lasted, in ms. Empty kind for anything else (active).
+QPair<QString, qint64> parseIdleText(const QString &idleText)
+{
+    const QString trimmed = idleText.trimmed();
+    QString kind;
+    QString rest;
+    if (trimmed.startsWith(QStringLiteral("Locked "))) {
+        kind = QStringLiteral("lock");
+        rest = trimmed.mid(7);
+    } else if (trimmed.startsWith(QStringLiteral("Idle "))) {
+        kind = QStringLiteral("idle");
+        rest = trimmed.mid(5);
+    } else {
+        return {};
+    }
+    const QStringList parts = rest.split(QLatin1Char(':'));
+    if (parts.size() != 3) {
+        return {kind, 0};
+    }
+    const qint64 seconds = parts.at(0).toLongLong() * 3600 + parts.at(1).toLongLong() * 60
+                           + parts.at(2).toLongLong();
+    return {kind, qMax<qint64>(0, seconds) * 1000};
+}
+
+// FUN_14077f300: the chart granula (ms) -> the dpc level table it reads
+// ("1m"/"5m"/"15m"/"1h", as seconds) and the bucket length S (seconds)
+// obs_aligned_point() aligns to.
+QPair<qint64, qint64> nodeLevelAndStep(qint64 granulaMs)
+{
+    if (granulaMs < 300000) {
+        return {60, 60};
+    }
+    if (granulaMs < 600000) {
+        return {300, 300};
+    }
+    if (granulaMs < 900000) {
+        return {300, 600};
+    }
+    if (granulaMs < 1200000) {
+        return {900, 900};
+    }
+    if (granulaMs < 1800000) {
+        return {300, 1200};
+    }
+    if (granulaMs < 3600000) {
+        return {900, 1800};
+    }
+    if (granulaMs < 7200000) {
+        return {3600, 3600};
+    }
+    if (granulaMs < 14400000) {
+        return {3600, 7200};
+    }
+    if (granulaMs < 28800000) {
+        return {3600, 14400};
+    }
+    if (granulaMs < 43200000) {
+        return {3600, 28800};
+    }
+    if (granulaMs < 86400000) {
+        return {3600, 43200};
+    }
+    return {3600, 86400};
+}
+
+// obs_aligned_point(entity, granulaSec) = entity - MOD(EPOCH(entity),
+// granulaSec) seconds (node.exe's embedded schema): aligned on the epoch,
+// node timestamps being UTC -- not on local midnight.
+qint64 alignedPoint(qint64 ms, qint64 stepMs)
+{
+    qint64 rem = ms % stepMs;
+    if (rem < 0) {
+        rem += stepMs;
+    }
+    return ms - rem;
+}
+
+qint64 alignUp(qint64 ms, qint64 stepMs)
+{
+    const qint64 down = alignedPoint(ms, stepMs);
+    return down == ms ? ms : down + stepMs;
+}
+
+using Ranges = QList<QPair<qint64, qint64>>;
+
+// Sorted, non-overlapping union of ranges.
+Ranges mergeRanges(Ranges ranges)
+{
+    std::sort(ranges.begin(), ranges.end());
+    Ranges merged;
+    for (const auto &range : std::as_const(ranges)) {
+        if (range.second <= range.first) {
+            continue;
+        }
+        if (!merged.isEmpty() && range.first <= merged.last().second) {
+            merged.last().second = qMax(merged.last().second, range.second);
+        } else {
+            merged.append(range);
+        }
+    }
+    return merged;
+}
+
+// a \ b for merged range lists (FUN_14085eae0's set difference).
+Ranges subtractRanges(const Ranges &a, const Ranges &b)
+{
+    Ranges result;
+    int j = 0;
+    for (const auto &range : a) {
+        qint64 from = range.first;
+        while (j < b.size() && b.at(j).second <= from) {
+            ++j;
+        }
+        int k = j;
+        while (k < b.size() && b.at(k).first < range.second) {
+            if (b.at(k).first > from) {
+                result.append({from, b.at(k).first});
+            }
+            from = qMax(from, b.at(k).second);
+            ++k;
+        }
+        if (from < range.second) {
+            result.append({from, range.second});
+        }
+    }
+    return result;
+}
+
+// a n b for merged range lists.
+Ranges intersectRanges(const Ranges &a, const Ranges &b)
+{
+    Ranges result;
+    int i = 0;
+    int j = 0;
+    while (i < a.size() && j < b.size()) {
+        const qint64 from = qMax(a.at(i).first, b.at(j).first);
+        const qint64 to = qMin(a.at(i).second, b.at(j).second);
+        if (from < to) {
+            result.append({from, to});
+        }
+        if (a.at(i).second < b.at(j).second) {
+            ++i;
+        } else {
+            ++j;
+        }
+    }
+    return result;
+}
+
+// Adds every piece of [from, to) to the S-aligned bucket it falls in.
+template <typename Add>
+void forEachBucketPiece(qint64 from, qint64 to, qint64 stepMs, Add add)
+{
+    while (from < to) {
+        const qint64 bucket = alignedPoint(from, stepMs);
+        const qint64 pieceEnd = qMin(to, bucket + stepMs);
+        add(bucket, pieceEnd - from);
+        from = pieceEnd;
+    }
+}
+
+// employee_to_application_rating.rating: 1 productive, 2 neutral,
+// 3 nonProductive, 0 (or no rule) none.
+int ratingIndex(const QString &category)
+{
+    if (category == QStringLiteral("productive")) {
+        return 1;
+    }
+    if (category == QStringLiteral("neutral")) {
+        return 2;
+    }
+    if (category == QStringLiteral("unproductive")) {
+        return 3;
+    }
+    return 0;
+}
 }
 
 HistoryRecorder::HistoryRecorder(QString historyDir, QObject *parent)
@@ -68,17 +252,34 @@ bool HistoryRecorder::start(QString *error)
     query.exec(QStringLiteral(
         "CREATE INDEX IF NOT EXISTS idx_frames_monitor_time ON frames(monitor_stream_id, timestamp_ms)"));
 
+    // Input activity is a property of the whole session (the employee), not
+    // of a single monitor -- the real Kickidler node stores it in
+    // online_session_input_volume / online_session_idle keyed only by
+    // online_session_id, never by a display. Keying it by session_username
+    // keeps it independent of how many monitors are plugged in (or which one
+    // the viewer happens to look at first). The legacy session_id/
+    // monitor_stream_id columns stay for old databases but are written as 0.
     query.exec(QStringLiteral(
         "CREATE TABLE IF NOT EXISTS activity ("
         "  id INTEGER PRIMARY KEY AUTOINCREMENT,"
         "  session_id INTEGER NOT NULL,"
         "  monitor_stream_id INTEGER NOT NULL,"
         "  timestamp_ms INTEGER NOT NULL,"
-        "  input_count INTEGER NOT NULL"
+        "  input_count INTEGER NOT NULL,"
+        "  session_username TEXT NOT NULL DEFAULT ''"
         ")"));
+    // Migration for databases created before activity was session-scoped
+    // (fails harmlessly when the column already exists).
+    query.exec(QStringLiteral("ALTER TABLE activity ADD COLUMN session_username TEXT NOT NULL DEFAULT ''"));
     query.exec(QStringLiteral(
-        "CREATE INDEX IF NOT EXISTS idx_activity_monitor_time ON activity(monitor_stream_id, timestamp_ms)"));
+        "CREATE INDEX IF NOT EXISTS idx_activity_user_time ON activity(session_username, timestamp_ms)"));
 
+    // Like activity, the foreground application is a property of the session
+    // (the employee), not of a display -- the real node stores it in
+    // online_session_program keyed only by online_session_id. Keyed by
+    // session_username so Efficiency is independent of the monitor count /
+    // which monitor the viewer looks at first. Legacy session_id/
+    // monitor_stream_id columns stay for old databases but are written as 0.
     query.exec(QStringLiteral(
         "CREATE TABLE IF NOT EXISTS app_segments ("
         "  id INTEGER PRIMARY KEY AUTOINCREMENT,"
@@ -87,14 +288,16 @@ bool HistoryRecorder::start(QString *error)
         "  application TEXT NOT NULL,"
         "  start_ms INTEGER NOT NULL,"
         "  end_ms INTEGER NOT NULL,"
-        "  title TEXT NOT NULL DEFAULT ''"
+        "  title TEXT NOT NULL DEFAULT '',"
+        "  session_username TEXT NOT NULL DEFAULT ''"
         ")"));
-    query.exec(QStringLiteral(
-        "CREATE INDEX IF NOT EXISTS idx_app_segments_monitor_time "
-        "ON app_segments(monitor_stream_id, start_ms)"));
-    // Migration for databases created before app_segments carried a window
-    // title (fails harmlessly when the column already exists).
+    // Migrations for databases created before app_segments carried a window
+    // title / was session-scoped (fail harmlessly when the column exists).
     query.exec(QStringLiteral("ALTER TABLE app_segments ADD COLUMN title TEXT NOT NULL DEFAULT ''"));
+    query.exec(QStringLiteral("ALTER TABLE app_segments ADD COLUMN session_username TEXT NOT NULL DEFAULT ''"));
+    query.exec(QStringLiteral(
+        "CREATE INDEX IF NOT EXISTS idx_app_segments_user_time "
+        "ON app_segments(session_username, start_ms)"));
 
     query.exec(QStringLiteral(
         "CREATE TABLE IF NOT EXISTS web_visits ("
@@ -108,6 +311,33 @@ bool HistoryRecorder::start(QString *error)
     query.exec(QStringLiteral(
         "CREATE INDEX IF NOT EXISTS idx_web_visits_monitor_time "
         "ON web_visits(monitor_stream_id, start_ms)"));
+
+    // The node's online_session life (minus online_session_nodata) and its
+    // online_session_lock / online_session_idle ranges, session-scoped by the
+    // employee username: dpc volume_total is |online \ nodata| and
+    // volume_activity |online \ nodata \ (lock u saver u idle)| per minute
+    // (nodeDpc.cpp, FUN_140853600 / FUN_140856ee0 / FUN_140856e10).
+    query.exec(QStringLiteral(
+        "CREATE TABLE IF NOT EXISTS session_online ("
+        "  id INTEGER PRIMARY KEY AUTOINCREMENT,"
+        "  session_username TEXT NOT NULL,"
+        "  begin_ms INTEGER NOT NULL,"
+        "  end_ms INTEGER NOT NULL"
+        ")"));
+    query.exec(QStringLiteral(
+        "CREATE INDEX IF NOT EXISTS idx_session_online_user_time "
+        "ON session_online(session_username, begin_ms)"));
+    query.exec(QStringLiteral(
+        "CREATE TABLE IF NOT EXISTS session_inactive ("
+        "  id INTEGER PRIMARY KEY AUTOINCREMENT,"
+        "  session_username TEXT NOT NULL,"
+        "  kind TEXT NOT NULL,"
+        "  begin_ms INTEGER NOT NULL,"
+        "  end_ms INTEGER NOT NULL"
+        ")"));
+    query.exec(QStringLiteral(
+        "CREATE INDEX IF NOT EXISTS idx_session_inactive_user_time "
+        "ON session_inactive(session_username, begin_ms)"));
 
     query.exec(QStringLiteral(
         "CREATE TABLE IF NOT EXISTS keystrokes ("
@@ -271,7 +501,19 @@ QStringList HistoryRecorder::listDays(quint32 monitorStreamId) const
     return days;
 }
 
-QList<qint64> HistoryRecorder::listFrameTimestamps(quint32 monitorStreamId, const QString &day) const
+QPair<qint64, qint64> HistoryRecorder::dayBounds(const QString &day)
+{
+    // Local midnight to the next local midnight, so a DST day is 23/25h.
+    const QDate date = QDate::fromString(day, QStringLiteral("yyyyMMdd"));
+    if (!date.isValid()) {
+        return {0, 0};
+    }
+    return {QDateTime(date, QTime(0, 0)).toMSecsSinceEpoch(),
+            QDateTime(date.addDays(1), QTime(0, 0)).toMSecsSinceEpoch()};
+}
+
+QList<qint64> HistoryRecorder::listFrameTimestamps(quint32 monitorStreamId, qint64 startMs,
+                                                   qint64 stopMs) const
 {
     if (!m_database.isOpen()) {
         return {};
@@ -279,10 +521,10 @@ QList<qint64> HistoryRecorder::listFrameTimestamps(quint32 monitorStreamId, cons
     QSqlQuery query(m_database);
     query.prepare(QStringLiteral(
         "SELECT timestamp_ms FROM frames WHERE monitor_stream_id = ? "
-        "AND strftime('%Y%m%d', timestamp_ms / 1000, 'unixepoch', 'localtime') = ? "
-        "ORDER BY timestamp_ms ASC"));
+        "AND timestamp_ms >= ? AND timestamp_ms < ? ORDER BY timestamp_ms ASC"));
     query.addBindValue(monitorStreamId);
-    query.addBindValue(day);
+    query.addBindValue(startMs);
+    query.addBindValue(stopMs);
     QList<qint64> timestamps;
     if (query.exec()) {
         while (query.next()) {
@@ -335,32 +577,34 @@ QByteArray HistoryRecorder::readFrame(quint32 monitorStreamId, qint64 timestampM
     return file.readAll();
 }
 
-void HistoryRecorder::recordActivity(quint32 sessionId, quint32 monitorStreamId, int inputEvents)
+void HistoryRecorder::recordActivity(const QString &sessionUsername, int inputEvents)
 {
     if (!m_database.isOpen()) {
         return;
     }
     QSqlQuery query(m_database);
     query.prepare(QStringLiteral(
-        "INSERT INTO activity (session_id, monitor_stream_id, timestamp_ms, input_count) "
-        "VALUES (?, ?, ?, ?)"));
-    query.addBindValue(sessionId);
-    query.addBindValue(monitorStreamId);
+        "INSERT INTO activity (session_id, monitor_stream_id, timestamp_ms, input_count, session_username) "
+        "VALUES (0, 0, ?, ?, ?)"));
     query.addBindValue(QDateTime::currentMSecsSinceEpoch());
     query.addBindValue(inputEvents);
+    query.addBindValue(sessionUsername);
     if (!query.exec()) {
         emit logMessage(
             QStringLiteral("Nu am putut scrie randul de activitate: %1").arg(query.lastError().text()));
     }
 }
 
-void HistoryRecorder::noteApplication(quint32 sessionId, quint32 monitorStreamId,
+void HistoryRecorder::noteApplication(quint32 sessionId, const QString &sessionUsername,
                                       const QString &application, const QString &title)
 {
     if (!m_database.isOpen() || application.isEmpty()) {
         return;
     }
-    const quint64 key = (static_cast<quint64>(sessionId) << 32) | monitorStreamId;
+    // One open segment per session, not per monitor: the subservice sends the
+    // same foreground app for every monitor each tick, so keying by session
+    // collapses those into a single extend instead of one segment per screen.
+    const quint64 key = sessionId;
     const qint64 now = QDateTime::currentMSecsSinceEpoch();
     auto it = m_openSegments.find(key);
 
@@ -378,14 +622,13 @@ void HistoryRecorder::noteApplication(quint32 sessionId, quint32 monitorStreamId
 
     QSqlQuery insert(m_database);
     insert.prepare(QStringLiteral(
-        "INSERT INTO app_segments (session_id, monitor_stream_id, application, start_ms, end_ms, title) "
-        "VALUES (?, ?, ?, ?, ?, ?)"));
-    insert.addBindValue(sessionId);
-    insert.addBindValue(monitorStreamId);
+        "INSERT INTO app_segments (session_id, monitor_stream_id, application, start_ms, end_ms, title, session_username) "
+        "VALUES (0, 0, ?, ?, ?, ?, ?)"));
     insert.addBindValue(application);
     insert.addBindValue(now);
     insert.addBindValue(now);
     insert.addBindValue(title);
+    insert.addBindValue(sessionUsername);
     if (!insert.exec()) {
         emit logMessage(
             QStringLiteral("Nu am putut scrie segmentul de aplicatie: %1").arg(insert.lastError().text()));
@@ -441,6 +684,101 @@ void HistoryRecorder::noteUrl(quint32 sessionId, quint32 monitorStreamId, const 
         return;
     }
     m_openWebSegments[key] = OpenWebSegment{url, insert.lastInsertId().toLongLong()};
+}
+
+void HistoryRecorder::noteSessionState(const QString &sessionUsername, const QString &idleText,
+                                       double idleSeconds, bool screensaver)
+{
+    if (!m_database.isOpen() || sessionUsername.isEmpty()) {
+        return;
+    }
+    const qint64 now = QDateTime::currentMSecsSinceEpoch();
+
+    // Online: one range while pushes keep coming; a longer silence is "no
+    // data" and splits it (online_session minus online_session_nodata).
+    auto online = m_openOnline.find(sessionUsername);
+    if (online != m_openOnline.end() && now - online->endMs <= kOnlineGapMs) {
+        if (now > online->endMs) {
+            QSqlQuery update(m_database);
+            update.prepare(QStringLiteral("UPDATE session_online SET end_ms = ? WHERE id = ?"));
+            update.addBindValue(now);
+            update.addBindValue(online->rowId);
+            update.exec();
+            online->endMs = now;
+        }
+    } else {
+        QSqlQuery insert(m_database);
+        insert.prepare(QStringLiteral(
+            "INSERT INTO session_online (session_username, begin_ms, end_ms) VALUES (?, ?, ?)"));
+        insert.addBindValue(sessionUsername);
+        insert.addBindValue(now);
+        insert.addBindValue(now);
+        if (!insert.exec()) {
+            emit logMessage(QStringLiteral("Nu am putut scrie intervalul online: %1")
+                                .arg(insert.lastError().text()));
+            return;
+        }
+        m_openOnline[sessionUsername] = OpenRange{insert.lastInsertId().toLongLong(), now, now};
+        // Whatever inactive ranges were open belonged to the previous online
+        // range; they ended with it.
+        for (const QString &kind :
+             {QStringLiteral("lock"), QStringLiteral("idle"), QStringLiteral("saver")}) {
+            m_openInactive.remove(sessionUsername + QLatin1Char('\x1f') + kind);
+        }
+    }
+
+    // The three independent inactive kinds, each its own range (they overlap
+    // freely; volume_activity subtracts their union). lock comes from the
+    // "Locked HH:MM:SS" text (dated back by its elapsed seconds); idle from
+    // the raw GetLastInputInfo seconds, threshold 1s, dated back like the
+    // node (FUN_1402f7960); saver from the screensaver flag (no backdating
+    // info, so it starts when first seen).
+    const auto [textKind, textElapsedMs] = parseIdleText(idleText);
+    const bool locked = textKind == QStringLiteral("lock");
+    updateInactiveRange(sessionUsername, QStringLiteral("lock"), locked, now - textElapsedMs, now);
+    updateInactiveRange(sessionUsername, QStringLiteral("idle"),
+                        !locked && idleSeconds >= 1.0,
+                        now - static_cast<qint64>(idleSeconds * 1000.0), now);
+    updateInactiveRange(sessionUsername, QStringLiteral("saver"), !locked && screensaver, now, now);
+}
+
+void HistoryRecorder::updateInactiveRange(const QString &username, const QString &kind, bool active,
+                                          qint64 wantBeginMs, qint64 nowMs)
+{
+    const QString key = username + QLatin1Char('\x1f') + kind;
+    auto open = m_openInactive.find(key);
+    if (!active) {
+        m_openInactive.remove(key);
+        return;
+    }
+    if (open != m_openInactive.end()) {
+        if (nowMs > open->endMs) {
+            QSqlQuery update(m_database);
+            update.prepare(QStringLiteral("UPDATE session_inactive SET end_ms = ? WHERE id = ?"));
+            update.addBindValue(nowMs);
+            update.addBindValue(open->rowId);
+            update.exec();
+            open->endMs = nowMs;
+        }
+        return;
+    }
+    // Opening a new range: never reach before the current online range begins.
+    qint64 beginMs = qMin(wantBeginMs, nowMs);
+    const OpenRange online = m_openOnline.value(username);
+    beginMs = qMax(beginMs, online.beginMs);
+    QSqlQuery insert(m_database);
+    insert.prepare(QStringLiteral(
+        "INSERT INTO session_inactive (session_username, kind, begin_ms, end_ms) VALUES (?, ?, ?, ?)"));
+    insert.addBindValue(username);
+    insert.addBindValue(kind);
+    insert.addBindValue(beginMs);
+    insert.addBindValue(nowMs);
+    if (!insert.exec()) {
+        emit logMessage(QStringLiteral("Nu am putut scrie intervalul inactiv: %1")
+                            .arg(insert.lastError().text()));
+        return;
+    }
+    m_openInactive[key] = OpenRange{insert.lastInsertId().toLongLong(), beginMs, nowMs};
 }
 
 void HistoryRecorder::recordKeystroke(quint32 sessionId, const QString &windowTitle,
@@ -549,18 +887,25 @@ QString HistoryRecorder::category(const QString &application) const
     return QStringLiteral("none");
 }
 
-QList<ActivitySample> HistoryRecorder::listActivity(quint32 monitorStreamId, const QString &day) const
+QList<ActivitySample> HistoryRecorder::listActivity(quint32 monitorStreamId, qint64 startMs,
+                                                   qint64 stopMs) const
 {
     if (!m_database.isOpen()) {
         return {};
     }
+    // Activity is session-scoped (see recordActivity): resolve whatever
+    // monitor stream the viewer asked for to its session's employee, then
+    // return that whole session's activity. Any monitor of the device --
+    // even one whose screen has since been unplugged -- resolves to the same
+    // username, so the chart no longer depends on which monitor is "first".
+    const QString username = usernameForStream(monitorStreamId);
     QSqlQuery query(m_database);
     query.prepare(QStringLiteral(
-        "SELECT timestamp_ms, input_count FROM activity WHERE monitor_stream_id = ? "
-        "AND strftime('%Y%m%d', timestamp_ms / 1000, 'unixepoch', 'localtime') = ? "
-        "ORDER BY timestamp_ms ASC"));
-    query.addBindValue(monitorStreamId);
-    query.addBindValue(day);
+        "SELECT timestamp_ms, input_count FROM activity WHERE session_username = ? "
+        "AND timestamp_ms >= ? AND timestamp_ms < ? ORDER BY timestamp_ms ASC"));
+    query.addBindValue(username);
+    query.addBindValue(startMs);
+    query.addBindValue(stopMs);
     QList<ActivitySample> samples;
     if (query.exec()) {
         while (query.next()) {
@@ -570,18 +915,25 @@ QList<ActivitySample> HistoryRecorder::listActivity(quint32 monitorStreamId, con
     return samples;
 }
 
-QList<AppSegment> HistoryRecorder::listAppSegments(quint32 monitorStreamId, const QString &day) const
+QList<AppSegment> HistoryRecorder::listAppSegments(quint32 monitorStreamId, qint64 startMs,
+                                                   qint64 stopMs) const
 {
     if (!m_database.isOpen()) {
         return {};
     }
+    // Session-scoped like activity: resolve the requested monitor stream to
+    // its employee and return the whole session's segments, so Efficiency no
+    // longer depends on which monitor is asked for (or is still plugged in).
+    // Every segment overlapping [startMs, stopMs) -- one that began before
+    // midnight still belongs to the next day for the part it lasted into it.
+    const QString username = usernameForStream(monitorStreamId);
     QSqlQuery query(m_database);
     query.prepare(QStringLiteral(
-        "SELECT application, start_ms, end_ms, title FROM app_segments WHERE monitor_stream_id = ? "
-        "AND strftime('%Y%m%d', start_ms / 1000, 'unixepoch', 'localtime') = ? "
-        "ORDER BY start_ms ASC"));
-    query.addBindValue(monitorStreamId);
-    query.addBindValue(day);
+        "SELECT application, start_ms, end_ms, title FROM app_segments WHERE session_username = ? "
+        "AND start_ms < ? AND end_ms > ? ORDER BY start_ms ASC"));
+    query.addBindValue(username);
+    query.addBindValue(stopMs);
+    query.addBindValue(startMs);
     QList<AppSegment> segments;
     if (query.exec()) {
         while (query.next()) {
@@ -592,15 +944,16 @@ QList<AppSegment> HistoryRecorder::listAppSegments(quint32 monitorStreamId, cons
     return segments;
 }
 
-QList<AppUsage> HistoryRecorder::listRunningApplications(quint32 monitorStreamId,
-                                                          const QString &day) const
+QList<AppUsage> HistoryRecorder::listRunningApplications(quint32 monitorStreamId, qint64 startMs,
+                                                          qint64 stopMs) const
 {
     QHash<QString, qint64> totals;
     QHash<QString, QString> latestTitle;
     // Segments come back oldest-first, so the last non-empty title seen for
     // an app is its most recent window title.
-    for (const AppSegment &segment : listAppSegments(monitorStreamId, day)) {
-        totals[segment.application] += qMax<qint64>(0, segment.endMs - segment.startMs);
+    for (const AppSegment &segment : listAppSegments(monitorStreamId, startMs, stopMs)) {
+        totals[segment.application] +=
+            qMax<qint64>(0, qMin(segment.endMs, stopMs) - qMax(segment.startMs, startMs));
         if (!segment.title.isEmpty()) {
             latestTitle[segment.application] = segment.title;
         }
@@ -614,7 +967,8 @@ QList<AppUsage> HistoryRecorder::listRunningApplications(quint32 monitorStreamId
     return usage;
 }
 
-QList<WebVisit> HistoryRecorder::listWebVisits(quint32 monitorStreamId, const QString &day) const
+QList<WebVisit> HistoryRecorder::listWebVisits(quint32 monitorStreamId, qint64 startMs,
+                                               qint64 stopMs) const
 {
     if (!m_database.isOpen()) {
         return {};
@@ -622,10 +976,10 @@ QList<WebVisit> HistoryRecorder::listWebVisits(quint32 monitorStreamId, const QS
     QSqlQuery query(m_database);
     query.prepare(QStringLiteral(
         "SELECT url, start_ms, end_ms FROM web_visits WHERE monitor_stream_id = ? "
-        "AND strftime('%Y%m%d', start_ms / 1000, 'unixepoch', 'localtime') = ? "
-        "ORDER BY start_ms ASC"));
+        "AND start_ms < ? AND end_ms > ? ORDER BY start_ms ASC"));
     query.addBindValue(monitorStreamId);
-    query.addBindValue(day);
+    query.addBindValue(stopMs);
+    query.addBindValue(startMs);
     QList<WebVisit> visits;
     if (query.exec()) {
         while (query.next()) {
@@ -636,11 +990,12 @@ QList<WebVisit> HistoryRecorder::listWebVisits(quint32 monitorStreamId, const QS
     return visits;
 }
 
-QList<WebUsage> HistoryRecorder::listWebPages(quint32 monitorStreamId, const QString &day) const
+QList<WebUsage> HistoryRecorder::listWebPages(quint32 monitorStreamId, qint64 startMs,
+                                              qint64 stopMs) const
 {
     QHash<QString, qint64> totals;
-    for (const WebVisit &visit : listWebVisits(monitorStreamId, day)) {
-        totals[visit.url] += qMax<qint64>(0, visit.endMs - visit.startMs);
+    for (const WebVisit &visit : listWebVisits(monitorStreamId, startMs, stopMs)) {
+        totals[visit.url] += qMax<qint64>(0, qMin(visit.endMs, stopMs) - qMax(visit.startMs, startMs));
     }
     QList<WebUsage> usage;
     for (auto it = totals.cbegin(); it != totals.cend(); ++it) {
@@ -666,7 +1021,8 @@ QList<QPair<QString, QString>> HistoryRecorder::listCategories() const
     return categories;
 }
 
-QList<KeystrokeEntry> HistoryRecorder::listKeystrokes(quint32 sessionId, const QString &day) const
+QList<KeystrokeEntry> HistoryRecorder::listKeystrokes(quint32 sessionId, qint64 startMs,
+                                                      qint64 stopMs) const
 {
     if (!m_database.isOpen()) {
         return {};
@@ -674,10 +1030,10 @@ QList<KeystrokeEntry> HistoryRecorder::listKeystrokes(quint32 sessionId, const Q
     QSqlQuery query(m_database);
     query.prepare(QStringLiteral(
         "SELECT timestamp_ms, window_title, text FROM keystrokes WHERE session_id = ? "
-        "AND strftime('%Y%m%d', timestamp_ms / 1000, 'unixepoch', 'localtime') = ? "
-        "ORDER BY timestamp_ms ASC"));
+        "AND timestamp_ms >= ? AND timestamp_ms < ? ORDER BY timestamp_ms ASC"));
     query.addBindValue(sessionId);
-    query.addBindValue(day);
+    query.addBindValue(startMs);
+    query.addBindValue(stopMs);
     QList<KeystrokeEntry> entries;
     if (query.exec()) {
         while (query.next()) {
@@ -686,4 +1042,168 @@ QList<KeystrokeEntry> HistoryRecorder::listKeystrokes(quint32 sessionId, const Q
         }
     }
     return entries;
+}
+
+QList<QPair<qint64, qint64>> HistoryRecorder::loadRanges(const QString &table, const QString &username,
+                                                         qint64 startMs, qint64 stopMs) const
+{
+    QSqlQuery query(m_database);
+    query.prepare(QStringLiteral("SELECT begin_ms, end_ms FROM %1 WHERE session_username = ? "
+                                 "AND begin_ms < ? AND end_ms > ?")
+                      .arg(table));
+    query.addBindValue(username);
+    query.addBindValue(stopMs);
+    query.addBindValue(startMs);
+    Ranges ranges;
+    if (query.exec()) {
+        while (query.next()) {
+            ranges.append({qMax(startMs, query.value(0).toLongLong()),
+                           qMin(stopMs, query.value(1).toLongLong())});
+        }
+    }
+    return mergeRanges(ranges);
+}
+
+// Selector K_activity, node.exe FUN_140781c40:
+//   SELECT obs_aligned_point(session.point, S) AS point,
+//          sum(session.volume_activity)/S AS volume, <session marker>
+//   FROM dpc.session_<level> AS session ...
+//   WHERE session.point >= :start AND session.point < :stop
+//   GROUP BY point, <marker> ORDER BY point
+// with (level, S) from the granula (FUN_14077f300). A dpc row exists for
+// every level point the session was online in; its volume_activity is the
+// online time there minus lock/saver/idle.
+QList<ChartPoint> HistoryRecorder::chartActivity(quint32 monitorStreamId, qint64 startMs,
+                                                 qint64 stopMs, qint64 granulaMs) const
+{
+    const QString username = usernameForStream(monitorStreamId);
+    if (!m_database.isOpen() || username.isEmpty() || stopMs <= startMs || granulaMs <= 0) {
+        return {};
+    }
+    const auto [levelSec, stepSec] = nodeLevelAndStep(granulaMs);
+    const qint64 stepMs = stepSec * 1000;
+    // A level point L passes "L >= start AND L < stop" exactly when the time
+    // it stands for lies in [alignUp(start), alignUp(stop)).
+    const qint64 from = alignUp(startMs, levelSec * 1000);
+    const qint64 to = alignUp(stopMs, levelSec * 1000);
+    const Ranges online = loadRanges(QStringLiteral("session_online"), username, from, to);
+    const Ranges active =
+        subtractRanges(online, loadRanges(QStringLiteral("session_inactive"), username, from, to));
+
+    QMap<qint64, qint64> onlineMs;
+    QMap<qint64, qint64> activeMs;
+    for (const auto &range : online) {
+        forEachBucketPiece(range.first, range.second, stepMs,
+                           [&](qint64 bucket, qint64 ms) { onlineMs[bucket] += ms; });
+    }
+    for (const auto &range : active) {
+        forEachBucketPiece(range.first, range.second, stepMs,
+                           [&](qint64 bucket, qint64 ms) { activeMs[bucket] += ms; });
+    }
+    QList<ChartPoint> points;
+    for (auto it = onlineMs.cbegin(); it != onlineMs.cend(); ++it) {
+        ChartPoint point;
+        point.pointMs = it.key();
+        point.value = activeMs.value(it.key()) / 1000.0 / stepSec;
+        points.append(point);
+    }
+    return points;
+}
+
+// Selector K_byProductivity, node.exe FUN_1407838d0:
+//   SELECT obs_aligned_point(session.point, S) AS point,
+//     sum(CASE WHEN COALESCE(rating_s.rating, rating_p.rating, 0)=0
+//         THEN program.volume_total ELSE 0 END) AS volume0, ... volume1..3
+//   FROM dpc.program_<level> AS program JOIN dpc.session_<level> ...
+//   LEFT JOIN rating_p ON executable_mask = program.executable
+//   LEFT JOIN rating_s ON site_mask = program.site
+// program.volume_total is the foreground time of (executable, site) minus
+// nodata -- idle time included, it is not volume_activity.
+QList<ChartPoint> HistoryRecorder::chartProductivity(quint32 monitorStreamId, qint64 startMs,
+                                                     qint64 stopMs, qint64 granulaMs) const
+{
+    const QString username = usernameForStream(monitorStreamId);
+    if (!m_database.isOpen() || username.isEmpty() || stopMs <= startMs || granulaMs <= 0) {
+        return {};
+    }
+    const auto [levelSec, stepSec] = nodeLevelAndStep(granulaMs);
+    const qint64 stepMs = stepSec * 1000;
+    const qint64 from = alignUp(startMs, levelSec * 1000);
+    const qint64 to = alignUp(stopMs, levelSec * 1000);
+    const Ranges online = loadRanges(QStringLiteral("session_online"), username, from, to);
+
+    // The employee's rating rule for an executable or site: their own
+    // override, else the global one; none when neither exists.
+    QHash<QString, QString> rules;
+    for (const auto &entry : listCategories()) {
+        rules.insert(entry.first, entry.second);
+    }
+    for (const auto &entry : listEmployeeCategories(username)) {
+        rules.insert(entry.first, entry.second);
+    }
+    const auto hasRule = [&rules](const QString &key) {
+        return !key.isEmpty() && rules.contains(key) && rules.value(key) != QStringLiteral("none");
+    };
+
+    // Sites the employee was on (every monitor's copy of a visit merges).
+    QHash<QString, Ranges> siteRanges;
+    {
+        QSqlQuery query(m_database);
+        query.prepare(QStringLiteral(
+            "SELECT url, start_ms, end_ms FROM web_visits WHERE monitor_stream_id IN "
+            "(SELECT stream_id FROM stream_ids WHERE username = ?) AND start_ms < ? AND end_ms > ?"));
+        query.addBindValue(username);
+        query.addBindValue(to);
+        query.addBindValue(from);
+        if (query.exec()) {
+            while (query.next()) {
+                siteRanges[query.value(0).toString()].append(
+                    {qMax(from, query.value(1).toLongLong()), qMin(to, query.value(2).toLongLong())});
+            }
+        }
+        for (auto it = siteRanges.begin(); it != siteRanges.end(); ++it) {
+            it.value() = mergeRanges(it.value());
+        }
+    }
+
+    QMap<qint64, ChartPoint> buckets;
+    const auto addVolume = [&](const Ranges &ranges, int rating) {
+        for (const auto &range : ranges) {
+            forEachBucketPiece(range.first, range.second, stepMs, [&](qint64 bucket, qint64 ms) {
+                ChartPoint &point = buckets[bucket];
+                point.pointMs = bucket;
+                point.volumes[rating] += ms / 1000.0;
+            });
+        }
+    };
+
+    QSqlQuery segments(m_database);
+    segments.prepare(QStringLiteral(
+        "SELECT application, start_ms, end_ms FROM app_segments WHERE session_username = ? "
+        "AND application != '' AND start_ms < ? AND end_ms > ?"));
+    segments.addBindValue(username);
+    segments.addBindValue(to);
+    segments.addBindValue(from);
+    if (!segments.exec()) {
+        return {};
+    }
+    while (segments.next()) {
+        const QString executable = segments.value(0).toString();
+        const Ranges segment = {{qMax(from, segments.value(1).toLongLong()),
+                                 qMin(to, segments.value(2).toLongLong())}};
+        Ranges remaining = intersectRanges(mergeRanges(segment), online);
+        const int programRating = hasRule(executable) ? ratingIndex(rules.value(executable)) : 0;
+        // COALESCE(rating_s.rating, rating_p.rating, 0): while on a site, its
+        // rule decides; the executable's rule only when the site has none.
+        for (auto it = siteRanges.cbegin(); it != siteRanges.cend() && !remaining.isEmpty(); ++it) {
+            const Ranges onSite = intersectRanges(remaining, it.value());
+            if (onSite.isEmpty()) {
+                continue;
+            }
+            addVolume(onSite, hasRule(it.key()) ? ratingIndex(rules.value(it.key())) : programRating);
+            remaining = subtractRanges(remaining, it.value());
+        }
+        addVolume(remaining, programRating);
+    }
+    return buckets.values();
 }

@@ -29,7 +29,8 @@ public:
     void stop();
 
 signals:
-    void activityChanged(const QString &application, const QString &idleText);
+    void activityChanged(const QString &application, const QString &idleText, double idleSeconds,
+                         bool screensaver);
 
 private:
     class Worker;

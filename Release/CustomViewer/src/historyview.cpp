@@ -48,34 +48,22 @@
 
 namespace {
 
-// EfficiencyColors.qml "normal" colors, used for the chart's category bands.
+// Line.qml (displayKind "colors") paints the Efficiency bands via
+// mkStyle_colorFromUnit -> ActiveApplicationRanker.statusToColor, which
+// returns the "hovered" EfficiencyColors variants for the three rated
+// categories; only the uncategorized default is noneColorsMap.normal.
 QColor categoryColor(const QString &category)
 {
     if (category == QStringLiteral("productive")) {
-        return QColor(0x1f, 0x80, 0x57);
+        return QColor(0x28, 0xa5, 0x70); // productiveColorsMap.hovered
     }
     if (category == QStringLiteral("unproductive")) {
-        return QColor(0x9d, 0x45, 0x3e);
+        return QColor(0xcc, 0x55, 0x4a); // nonProductiveColorsMap.hovered
     }
     if (category == QStringLiteral("neutral")) {
-        return QColor(0xc2, 0x9c, 0x0b);
+        return QColor(0xec, 0xbd, 0x0b); // neutralColorsMap.hovered
     }
-    return QColor(0xa4, 0xa7, 0xab); // noneColorsMap.normal
-}
-
-// Timeline/Activity/Efficiency/violations all used to span just
-// [first captured timestamp, last captured timestamp], so a device that only
-// recorded 5 minutes today stretched those 5 minutes across the whole bar --
-// the real viewer's bar always spans the full day (00:00-24:00), with actual
-// activity occupying only its real slice of that fixed width.
-QPair<qint64, qint64> dayRangeMs(const QString &day)
-{
-    const QDate date = QDate::fromString(day, QStringLiteral("yyyyMMdd"));
-    if (!date.isValid()) {
-        return {0, 0};
-    }
-    const qint64 start = QDateTime(date, QTime(0, 0)).toMSecsSinceEpoch();
-    return {start, start + 24 * 60 * 60 * 1000};
+    return QColor(0xa4, 0xa7, 0xab); // noneColorsMap.normal (statusToColor default)
 }
 
 // History.qml's page background. Background.qml itself is compiled C++ (not
@@ -104,6 +92,9 @@ constexpr int kLabelsLeft = 20;         // ExtraHeaders mainHeaderText leftMargi
 constexpr int kRowHeight = 30;          // ExtraHeaders.rowHeight / HistoLine outer Item
 constexpr int kHistogramHeight = 20;    // HistoLine.histogramHeight
 constexpr int kProductivityHeight = 22; // Line.qml singleLineHeight (not a filter line)
+// Violations tab: Chart.qml labelsAreaRightMargin -- the grid ends where the
+// TimeLine above it does.
+constexpr int kViolationsRightMargin = 25;
 
 // Fonts.rb_small_b: Roboto Bold 10px -- a real screenshot's
 // "Friday, September 25, 2026" date label is exactly 134px wide, which is
@@ -1014,19 +1005,46 @@ constexpr int kChoiceFieldWidth = 340;
 constexpr int kChoiceStepWidth = 160;
 const QColor kChoiceFieldText(0x7d, 0x7e, 0x83);
 
-const QList<qint64> kTimeSteps = {1000,      5000,      10000,     20000,       30000,      60000,
-                                  5 * 60000, 10 * 60000, 20 * 60000, 30 * 60000, 3600000, 2 * 3600000};
+// TimeStepComboBox.qml valuesDomain (ms).
+const QList<qint64> kTimeSteps = {
+    1000,          5000,           10000,          20000,          30000,
+    60000,         5 * 60000,      10 * 60000,     20 * 60000,     30 * 60000,
+    3600000,       2 * 3600000,    4 * 3600000,    8 * 3600000,
+    86400000LL,    2 * 86400000LL, 5 * 86400000LL, 10 * 86400000LL, 15 * 86400000LL,
+    30 * 86400000LL, 60 * 86400000LL, 120 * 86400000LL, 240 * 86400000LL, 365 * 86400000LL,
+};
 
 QString timeStepText(qint64 ms)
 {
-    // TimeStepComboBox's "N second(s)" / "N minute(s)" / "N hour(s)".
-    if (ms >= 3600000 && ms % 3600000 == 0) {
-        return QStringLiteral("%1 hour(s)").arg(ms / 3600000);
+    // TimeStepComboBox.valueLabel: "%n second(s)" / "%n minute(s)" /
+    // "%n hour(s)" / "%n day(s)".
+    if (ms < 60000) {
+        return QStringLiteral("%1 second(s)").arg(qint64(ms / 1000.0 + 0.1));
     }
-    if (ms >= 60000 && ms % 60000 == 0) {
-        return QStringLiteral("%1 minute(s)").arg(ms / 60000);
+    if (ms < 3600000) {
+        return QStringLiteral("%1 minute(s)").arg(qint64(ms / 60000.0 + 0.1));
     }
-    return QStringLiteral("%1 second(s)").arg(ms / 1000);
+    if (ms < 86400000) {
+        return QStringLiteral("%1 hour(s)").arg(qint64(ms / 3600000.0 + 0.1));
+    }
+    return QStringLiteral("%1 day(s)").arg(qint64(ms / 86400000.0 + 0.1));
+}
+
+// TimeRangeReport's kinds, in combo order, and their recentType.
+const char *const kPeriodKinds[] = {"Day", "Week", "Month", "Quarter", "Arbitrary period"};
+const char *const kRecentTypes[] = {"d", "w", "m", "q", ""};
+
+// JS Date#setFullYear(year, month0, day): month and day overflow into the
+// next/previous month/year.
+QDate jsDate(int year, int month0, int day)
+{
+    return QDate(year, 1, 1).addMonths(month0).addDays(day - 1);
+}
+
+// DateTimeUtils.js getMonday().
+QDate mondayOf(const QDate &date)
+{
+    return date.addDays(1 - date.dayOfWeek());
 }
 
 QFont choiceLabelFont() // Fonts.rb_medium_b -- renders as regular weight in real screenshots
@@ -1062,20 +1080,213 @@ QString styledMenuSheet()
 }
 }
 
+QPair<QDateTime, QDateTime> HistoryPeriod::getPeriod(const QString &kind, int multiplier)
+{
+    const QDateTime current = QDateTime::currentDateTime();
+    const QDate today = current.date();
+    const int factor = multiplier - 1;
+    QDate startDate = today;
+    QDate endDate = today;
+    if (kind == QStringLiteral("d")) {
+        endDate = today.addDays(-factor);
+        startDate = endDate;
+    } else if (kind == QStringLiteral("w")) {
+        endDate = today.addDays(-7 * factor);
+        startDate = mondayOf(endDate);
+        if (factor) {
+            endDate = startDate.addDays(6);
+        }
+    } else if (kind == QStringLiteral("m")) {
+        endDate = jsDate(today.year(), today.month() - 1 - factor, today.day());
+        startDate = QDate(endDate.year(), endDate.month(), 1);
+        if (factor) {
+            endDate = startDate.addMonths(1).addDays(-1);
+        }
+    } else if (kind == QStringLiteral("q")) {
+        endDate = jsDate(today.year(), today.month() - 1 - 3 * factor, today.day());
+        startDate = QDate(endDate.year(), (endDate.month() - 1) / 3 * 3 + 1, 1);
+        if (factor) {
+            endDate = startDate.addMonths(3).addDays(-1);
+        }
+    }
+    const QDateTime start(startDate, QTime(0, 0));
+    // end keeps the current time of day, or 23:59:59 (and the current ms --
+    // setHours(23,59,59) leaves them) for a past period; never past now.
+    QDateTime end(endDate, factor ? QTime(23, 59, 59, current.time().msec()) : current.time());
+    if (end > current) {
+        end = current;
+    }
+    return {start, end};
+}
+
+int HistoryPeriod::getMultiplier(const QString &kind, const QDateTime &start)
+{
+    const QDate today = QDate::currentDate();
+    const QDate startDate = start.date();
+    if (kind == QStringLiteral("d")) {
+        return (startDate < today ? static_cast<int>(startDate.daysTo(today)) : 0) + 1;
+    }
+    if (kind == QStringLiteral("w")) {
+        if (startDate.dayOfWeek() != 1) {
+            return 1;
+        }
+        const QDate monday = mondayOf(today);
+        return (startDate < monday ? static_cast<int>(startDate.daysTo(monday)) : 0) / 7 + 1;
+    }
+    if (kind == QStringLiteral("m") || kind == QStringLiteral("q")) {
+        const int months = kind == QStringLiteral("m") ? 1 : 3;
+        const QDate first = kind == QStringLiteral("m")
+                                ? QDate(today.year(), today.month(), 1)
+                                : QDate(today.year(), (today.month() - 1) / 3 * 3 + 1, 1);
+        int i = 0;
+        QDate d = today;
+        do {
+            ++i;
+            d = first.addMonths(-months * (i - 1));
+        } while (d > startDate);
+        return i;
+    }
+    return 1;
+}
+
+HistoryPeriod HistoryPeriod::recent(const QString &kind, int multiplier)
+{
+    HistoryPeriod period;
+    period.recentType = kind;
+    period.recentMultiplier = multiplier;
+    const auto [start, end] = getPeriod(kind, multiplier);
+    period.recentBegin = start;
+    period.recentEnd = end;
+    period.customBegin = QDateTime::currentDateTime();
+    period.customEnd = period.customBegin;
+    return period;
+}
+
+QString HistoryPeriod::formatPeriod(const QDateTime &start, const QDateTime &end)
+{
+    // localeDateMediumFormat: the short date format with a 4-digit year.
+    const QLocale english(QLocale::English);
+    const QString from = english.toString(start.date(), QStringLiteral("M/d/yyyy"));
+    if (start.msecsTo(end) < 86400000) {
+        return from;
+    }
+    return QStringLiteral("%1 - %2").arg(from, english.toString(end.date(), QStringLiteral("M/d/yyyy")));
+}
+
 HistoryChoiceDialog::HistoryChoiceDialog(Mode mode, const QList<QPair<quint32, QString>> &employees,
-                                         quint32 employee, const QDate &day, qint64 timeStepMs,
-                                         QWidget *parent)
+                                         quint32 employee, const HistoryPeriod &period,
+                                         qint64 timeStepMs, QWidget *parent)
     : QDialog(parent, Qt::FramelessWindowHint | Qt::Dialog)
     , m_title(mode == Mode::Add ? QStringLiteral("Add history watching")
                                 : QStringLiteral("Change range and employee"))
     , m_employees(employees)
     , m_employee(employee)
-    , m_day(day.isValid() ? day : QDate::currentDate())
+    , m_period(period)
     , m_timeStepMs(timeStepMs)
 {
     setModal(true);
     setFixedSize(kChoiceWidth, kChoiceHeight);
     setMouseTracking(true);
+
+    // HistoryChoicePanel's Component.onCompleted: a recent period's
+    // multiplier is recomputed against today, then loadFromStatePanel().
+    if (m_period.type == QStringLiteral("recent") && m_period.recentBegin.isValid()) {
+        m_period.recentMultiplier = HistoryPeriod::getMultiplier(m_period.recentType, m_period.recentBegin);
+    }
+    if (m_period.type == QStringLiteral("custom")) {
+        m_kind = 4;
+    } else {
+        for (int kind = 0; kind < 4; ++kind) {
+            if (m_period.recentType == QLatin1String(kRecentTypes[kind])) {
+                m_kind = kind;
+            }
+        }
+        m_multipliers[m_kind] = qMax(1, m_period.recentMultiplier);
+    }
+
+    // The "Arbitrary period" Begin — End DateTimeInputs (useTime), timeBound
+    // 00:00:00 / 23:59:59 applied when the date is picked.
+    const QRect field = fieldRect(2);
+    const int dashWidth = 7 + QFontMetrics(mediumFont()).horizontalAdvance(QStringLiteral("—")) + 7;
+    const int editWidth = (field.width() - dashWidth) / 2;
+    const QString editStyle = QStringLiteral(
+        "QDateTimeEdit { background: #45464d; color: #7d7e83; border: none; border-top: 2px solid #38393f;"
+        " font-family: Roboto; font-size: 12px; padding-left: 4px; }"
+        "QDateTimeEdit::drop-down { border: none; width: 14px; }");
+    const auto makeEdit = [&](int x, const QDateTime &value, const QTime &bound) {
+        auto *edit = new QDateTimeEdit(this);
+        edit->setCalendarPopup(true);
+        edit->setDisplayFormat(QStringLiteral("M/d/yyyy hh:mm"));
+        edit->setStyleSheet(editStyle);
+        edit->setGeometry(x, field.top(), editWidth, field.height());
+        edit->setDateTime(value.isValid() ? value : QDateTime::currentDateTime());
+        connect(edit, &QDateTimeEdit::dateChanged, this, [this, edit, bound](const QDate &date) {
+            const QSignalBlocker blocker(edit);
+            edit->setDateTime(QDateTime(date, bound));
+            updateTimeSteps();
+        });
+        connect(edit, &QDateTimeEdit::timeChanged, this, [this] { updateTimeSteps(); });
+        return edit;
+    };
+    m_customBeginEdit = makeEdit(field.left(), m_period.customBegin, QTime(0, 0, 0));
+    m_customEndEdit = makeEdit(field.right() + 1 - editWidth, m_period.customEnd, QTime(23, 59, 59));
+    updateCustomFields();
+    updateTimeSteps();
+}
+
+QString HistoryChoiceDialog::recentType() const
+{
+    return QLatin1String(kRecentTypes[m_kind]);
+}
+
+void HistoryChoiceDialog::updateCustomFields()
+{
+    m_customBeginEdit->setVisible(isCustom());
+    m_customEndEdit->setVisible(isCustom());
+    update();
+}
+
+qint64 HistoryChoiceDialog::targetRangeMs() const
+{
+    if (isCustom()) {
+        return qMax<qint64>(m_customBeginEdit->dateTime().msecsTo(m_customEndEdit->dateTime()), 1000);
+    }
+    const auto [start, end] = HistoryPeriod::getPeriod(recentType(), m_multipliers[m_kind]);
+    return qMax<qint64>(start.msecsTo(end), 1000);
+}
+
+QList<qint64> HistoryChoiceDialog::stepsForRange() const
+{
+    // minSteps 10; maxSteps 86400 up to a day, 2304 up to 8 days, else 300.
+    const qint64 target = targetRangeMs();
+    const double maxSteps = target <= 86400000LL ? 86400 : (target <= 8 * 86400000LL ? 2304 : 300);
+    QList<qint64> steps;
+    for (qint64 value : kTimeSteps) {
+        const double count = static_cast<double>(target) / value;
+        if (count >= 10 && count <= maxSteps) {
+            steps.append(value);
+        }
+    }
+    return steps;
+}
+
+void HistoryChoiceDialog::updateTimeSteps()
+{
+    // currentIndex = the step closest to desirableValue (the current one).
+    const QList<qint64> steps = stepsForRange();
+    qint64 best = -1;
+    qint64 bestDistance = std::numeric_limits<qint64>::max();
+    for (qint64 step : steps) {
+        const qint64 distance = qAbs(step - m_timeStepMs);
+        if (distance < bestDistance) {
+            bestDistance = distance;
+            best = step;
+        }
+    }
+    if (best > 0) {
+        m_timeStepMs = best;
+    }
+    update();
 }
 
 QRect HistoryChoiceDialog::fieldRect(int row) const
@@ -1158,15 +1369,11 @@ void HistoryChoiceDialog::showMenu(int row)
             menu.addAction(entry.second)->setData(entry.first);
         }
     } else if (row == 1) {
-        // TimeRangeReport's kinds; only Day is supported by this History.
-        const QString kinds[] = {QStringLiteral("Day"), QStringLiteral("Week"), QStringLiteral("Month"),
-                                 QStringLiteral("Quarter"), QStringLiteral("Arbitrary period")};
-        for (const QString &kind : kinds) {
-            QAction *action = menu.addAction(kind);
-            action->setEnabled(kind == kinds[0]);
+        for (int kind = 0; kind < 5; ++kind) {
+            menu.addAction(QString::fromLatin1(kPeriodKinds[kind]))->setData(kind);
         }
     } else if (row == 3) {
-        for (qint64 step : kTimeSteps) {
+        for (qint64 step : stepsForRange()) {
             menu.addAction(timeStepText(step))->setData(step);
         }
     }
@@ -1176,6 +1383,10 @@ void HistoryChoiceDialog::showMenu(int row)
     }
     if (row == 0) {
         m_employee = chosen->data().toUInt();
+    } else if (row == 1) {
+        m_kind = chosen->data().toInt();
+        updateCustomFields();
+        updateTimeSteps();
     } else if (row == 3) {
         m_timeStepMs = chosen->data().toLongLong();
     }
@@ -1194,19 +1405,41 @@ void HistoryChoiceDialog::mousePressEvent(QMouseEvent *event)
             QMessageBox::warning(this, QStringLiteral("Error"), QStringLiteral("No selected employee"));
             return;
         }
+        const QDateTime customBegin = m_customBeginEdit->dateTime();
+        const QDateTime customEnd = m_customEndEdit->dateTime();
+        if (isCustom() && (!customBegin.isValid() || !customEnd.isValid())) {
+            QMessageBox::warning(this, QStringLiteral("Error"), QStringLiteral("Period has not been chosen"));
+            return;
+        }
+        if (isCustom() && customBegin >= customEnd) {
+            QMessageBox::warning(this, QStringLiteral("Error"), QStringLiteral("Wrong period"));
+            return;
+        }
+        // HistoryChoicePanel onOk: the recent range is computed now and
+        // kept fixed in the state.
+        m_period.type = isCustom() ? QStringLiteral("custom") : QStringLiteral("recent");
+        m_period.recentType = recentType();
+        m_period.recentMultiplier = m_multipliers[m_kind];
+        const auto [recentBegin, recentEnd] = HistoryPeriod::getPeriod(m_period.recentType,
+                                                                       m_period.recentMultiplier);
+        m_period.recentBegin = recentBegin;
+        m_period.recentEnd = recentEnd;
+        m_period.customBegin = customBegin;
+        m_period.customEnd = customEnd;
         accept();
         return;
     }
-    // SpinTextField: ◀ goes one period back, ▶ forward (not past today).
-    if (previousRect().contains(pos)) {
-        m_day = m_day.addDays(-1);
-        update();
+    // SpinTextField: ◀ goes one period back, ▶ forward (while the
+    // multiplier is above 1, i.e. not past the current period).
+    if (!isCustom() && previousRect().contains(pos)) {
+        ++m_multipliers[m_kind];
+        updateTimeSteps();
         return;
     }
-    if (nextRect().contains(pos)) {
-        if (m_day < QDate::currentDate()) {
-            m_day = m_day.addDays(1);
-            update();
+    if (!isCustom() && nextRect().contains(pos)) {
+        if (m_multipliers[m_kind] > 1) {
+            --m_multipliers[m_kind];
+            updateTimeSteps();
         }
         return;
     }
@@ -1216,16 +1449,17 @@ void HistoryChoiceDialog::mousePressEvent(QMouseEvent *event)
             return;
         }
     }
-    if (fieldRect(2).contains(pos)) {
+    // Day only: pick the day from a calendar (sets the multiplier).
+    if (m_kind == 0 && fieldRect(2).contains(pos)) {
         auto *popup = new QCalendarWidget;
         popup->setWindowFlags(Qt::Popup);
         popup->setAttribute(Qt::WA_DeleteOnClose);
         popup->setMaximumDate(QDate::currentDate());
-        popup->setSelectedDate(m_day);
+        popup->setSelectedDate(HistoryPeriod::getPeriod(QStringLiteral("d"), m_multipliers[0]).first.date());
         connect(popup, &QCalendarWidget::clicked, this, [this, popup](const QDate &date) {
-            m_day = date;
+            m_multipliers[0] = HistoryPeriod::getMultiplier(QStringLiteral("d"), QDateTime(date, QTime(0, 0)));
             popup->close();
-            update();
+            updateTimeSteps();
         });
         popup->move(mapToGlobal(fieldRect(2).bottomLeft() + QPoint(0, 1)));
         popup->show();
@@ -1263,8 +1497,12 @@ void HistoryChoiceDialog::paintEvent(QPaintEvent *)
                          Qt::AlignLeft | Qt::AlignVCenter, label.second);
     }
 
-    // Fields: #45464d, a 2-line top edge and 1px sides, no bottom edge.
+    // Fields: #45464d, a 2-line top edge and 1px sides, no bottom edge. The
+    // custom range's two inputs draw their own field.
     for (int row = 0; row < 4; ++row) {
+        if (row == 2 && isCustom()) {
+            continue;
+        }
         const QRect r = fieldRect(row);
         painter.fillRect(r, QColor(0x45, 0x46, 0x4d));
         painter.fillRect(QRect(r.left(), r.top(), r.width(), 1), QColor(0x38, 0x39, 0x3f));
@@ -1280,8 +1518,14 @@ void HistoryChoiceDialog::paintEvent(QPaintEvent *)
         painter.drawText(r, Qt::AlignLeft | Qt::AlignVCenter, metrics.elidedText(text, Qt::ElideRight, r.width()));
     };
     drawFieldText(0, 6, kChoiceFieldText, employeeName(), 24);
-    drawFieldText(1, 12, kChoiceFieldText, QStringLiteral("Day"), 24);
-    drawFieldText(2, 5, kChoiceFieldText, QLocale(QLocale::English).toString(m_day, QStringLiteral("M/d/yyyy")), 30);
+    drawFieldText(1, 12, kChoiceFieldText, QString::fromLatin1(kPeriodKinds[m_kind]), 24);
+    if (isCustom()) {
+        painter.setPen(Qt::white);
+        painter.drawText(fieldRect(2), Qt::AlignCenter, QStringLiteral("—"));
+    } else {
+        const auto [start, end] = HistoryPeriod::getPeriod(recentType(), m_multipliers[m_kind]);
+        drawFieldText(2, 5, kChoiceFieldText, HistoryPeriod::formatPeriod(start, end), 30);
+    }
     drawFieldText(3, 12, Qt::white, timeStepText(m_timeStepMs), 24);
 
     // Search magnifier (SearchTextField), combo triangles, ◀▶ spin arrows.
@@ -1296,19 +1540,21 @@ void HistoryChoiceDialog::paintEvent(QPaintEvent *)
         const QRect r = fieldRect(row);
         painter.drawPixmap(r.right() - 19, r.center().y() - 2, triangle);
     }
-    painter.setRenderHint(QPainter::Antialiasing);
-    painter.setPen(Qt::NoPen);
-    const QRect previous = previousRect();
-    const QRect next = nextRect();
-    painter.setBrush(QColor(0xc8, 0xc8, 0xc8));
-    painter.drawPolygon(QPolygonF({QPointF(previous.left() + 1, previous.center().y() + 0.5),
-                                   QPointF(previous.left() + 6, previous.center().y() - 3.5),
-                                   QPointF(previous.left() + 6, previous.center().y() + 4.5)}));
-    painter.setBrush(m_day < QDate::currentDate() ? QColor(0xc8, 0xc8, 0xc8) : QColor(0x6f, 0x70, 0x76));
-    painter.drawPolygon(QPolygonF({QPointF(next.left() + 7, next.center().y() + 0.5),
-                                   QPointF(next.left() + 2, next.center().y() - 3.5),
-                                   QPointF(next.left() + 2, next.center().y() + 4.5)}));
-    painter.setRenderHint(QPainter::Antialiasing, false);
+    if (!isCustom()) {
+        painter.setRenderHint(QPainter::Antialiasing);
+        painter.setPen(Qt::NoPen);
+        const QRect previous = previousRect();
+        const QRect next = nextRect();
+        painter.setBrush(QColor(0xc8, 0xc8, 0xc8));
+        painter.drawPolygon(QPolygonF({QPointF(previous.left() + 1, previous.center().y() + 0.5),
+                                       QPointF(previous.left() + 6, previous.center().y() - 3.5),
+                                       QPointF(previous.left() + 6, previous.center().y() + 4.5)}));
+        painter.setBrush(m_multipliers[m_kind] > 1 ? QColor(0xc8, 0xc8, 0xc8) : QColor(0x6f, 0x70, 0x76));
+        painter.drawPolygon(QPolygonF({QPointF(next.left() + 7, next.center().y() + 0.5),
+                                       QPointF(next.left() + 2, next.center().y() - 3.5),
+                                       QPointF(next.left() + 2, next.center().y() + 4.5)}));
+        painter.setRenderHint(QPainter::Antialiasing, false);
+    }
 
     if (m_timeStepMs != 1000) {
         painter.drawPixmap(infoRect().topLeft(), info);
@@ -1757,10 +2003,18 @@ void HistoryChartWidget::setRange(qint64 rangeStartMs, qint64 rangeEndMs)
     update();
 }
 
-void HistoryChartWidget::setStepMs(qint64 stepMs)
+void HistoryChartWidget::setChartStepMs(qint64 stepMs)
 {
-    if (stepMs > 0 && stepMs != m_stepMs) {
-        m_stepMs = stepMs;
+    if (stepMs > 0 && stepMs != m_chartStepMs) {
+        m_chartStepMs = stepMs;
+        update();
+    }
+}
+
+void HistoryChartWidget::setMarkerStepMs(qint64 stepMs)
+{
+    if (stepMs > 0 && stepMs != m_markerStepMs) {
+        m_markerStepMs = stepMs;
         update();
     }
 }
@@ -1773,17 +2027,44 @@ void HistoryChartWidget::setGridLeft(int x)
     }
 }
 
-void HistoryChartWidget::setActivity(const QList<HistoryActivitySample> &samples)
+void HistoryChartWidget::setActivity(const HistoryChartResult &result)
 {
-    m_samples = samples;
+    m_activity = result;
     update();
 }
 
-void HistoryChartWidget::setEfficiency(const QList<HistoryAppSegment> &segments,
-                                       const QHash<QString, QString> &categories)
+void HistoryChartWidget::setProductivity(const HistoryChartResult &result)
 {
-    m_segments = segments;
-    m_categories = categories;
+    m_productivity = result;
+    update();
+}
+
+void HistoryChartWidget::setFilterRows(const QList<HistoryChartFilterRow> &rows)
+{
+    // ChartsModel.qml allComplited: sorted by sortValue (the sum of all
+    // values), largest first.
+    const auto sortValue = [](const HistoryChartFilterRow &row) {
+        double sum = 0;
+        for (const HistoryChartSerie &serie : row.values.series) {
+            for (double value : serie.values) {
+                sum += value;
+            }
+        }
+        return sum;
+    };
+    m_filterRows = rows;
+    std::stable_sort(m_filterRows.begin(), m_filterRows.end(),
+                     [&](const HistoryChartFilterRow &a, const HistoryChartFilterRow &b) {
+                         return sortValue(a) > sortValue(b);
+                     });
+    update();
+}
+
+void HistoryChartWidget::clearSeries()
+{
+    m_activity = {};
+    m_productivity = {};
+    m_filterRows.clear();
     update();
 }
 
@@ -1809,46 +2090,118 @@ void HistoryChartWidget::setFillMode(bool on)
     update();
 }
 
+namespace {
+// TimeToChartConverter.qml, built from a Selector's start/stop/granula.
+struct TimeToChart {
+    double t0 = 0;
+    double dist = 1;
+    double relativeInterval = 0;
+    explicit TimeToChart(const HistoryChartResult &result)
+        : t0(result.startMs)
+        , dist(qMax<qint64>(1, result.stopMs - result.startMs))
+        , relativeInterval(result.granulaMs / dist)
+    {
+    }
+    double relativePosition(qint64 t) const { return (t - t0) / dist; }
+};
+
+// ActiveApplicationRanker.getArrayDistributions over [none, productive,
+// neutral, nonProductive]: the ratings with volume, None also when nothing
+// else has any -- drawn last-to-first, i.e. top to bottom nonProductive,
+// productive, neutral, none.
+QStringList arrayDistributions(const std::array<double, 4> &volumes)
+{
+    QStringList elements;
+    if (volumes[3] > 0) {
+        elements.prepend(QStringLiteral("unproductive"));
+    }
+    if (volumes[1] > 0) {
+        elements.prepend(QStringLiteral("productive"));
+    }
+    if (volumes[2] > 0) {
+        elements.prepend(QStringLiteral("neutral"));
+    }
+    if (volumes[0] > 0 || elements.isEmpty()) {
+        elements.prepend(QStringLiteral("none"));
+    }
+    return elements;
+}
+} // namespace
+
 void HistoryChartWidget::paintEvent(QPaintEvent *)
 {
     QPainter painter(this);
     painter.fillRect(rect(), kHistoryBackground);
 
-    // Filters.qml: anchors.fill chartsItem, leftMargin 10, bottomMargin 15;
-    // Chart.qml with needPlayerLine splits it 40% (Activity/Efficiency) /
-    // separator1 (10px) / 60% (filters).
-    // Fill mode (Violations tab): the grid fills the whole widget height and
-    // there's no filters area; History's fixed strip splits 40% extra / 60%
-    // filters instead.
+    // MultiSessionActivity: one HistoLine row (30px) per session serie;
+    // ExtraContent.requestedHeigth is 192 with more than one, else 60.
+    const int sessionCount = m_activity.series.size();
+    // History (Filters.qml, needPlayerLine): anchors.fill chartsItem with
+    // bottomMargin 15; extraLine 40% / separator1 10px / filtersLine 60%.
+    // Violations tab (needPlayerLine false): extraLine requestedHeigth, the
+    // filters area the rest.
     const double chartHeight = m_fillMode ? height() : height() - kChartBottomMargin;
-    const double extraHeight = m_fillMode ? chartHeight : chartHeight * 0.4;
-    const double filtersTop = m_fillMode ? 0.0 : extraHeight + 10;
-    const double filtersHeight = m_fillMode ? 0.0 : chartHeight * 0.6;
+    const double extraHeight = m_fillMode ? (sessionCount > 1 ? 192.0 : 60.0) : chartHeight * 0.4;
+    const double filtersTop = extraHeight + 10;
+    const double filtersHeight = m_fillMode ? qMax(0.0, height() - filtersTop) : chartHeight * 0.6;
     const int gridLeft = m_gridLeft;
-    const double gridWidth = qMax(1, width() - gridLeft);
+    const double gridWidth = qMax(1, width() - gridLeft - (m_fillMode ? kViolationsRightMargin : 0));
     const qint64 span = m_rangeEnd - m_rangeStart;
 
     drawHorizontalSeparator(painter, kChartLeft, 0, width() - kChartLeft);
 
-    // ExtraHeaders: labels 20px in, first text 10px down, rows 30 apart,
-    // VSeparator at its right edge minus 13.
+    // ExtraHeaders: "Activity" over the activity rows, "Efficiency" over the
+    // productivity lanes, each 20px in and -- with a single session --
+    // 10px down; header items are at least 10px tall and 20px apart while
+    // there isn't exactly one session (column.spacing).
+    const bool singleSession = sessionCount == 1;
+    const double activityRowsHeight = sessionCount * kRowHeight + (sessionCount > 1 ? 15 : 0);
+    const double productivityPadding = singleSession ? 0 : 20 + (sessionCount > 1 ? 18 : 0);
+    const double productivityTop = activityRowsHeight + productivityPadding;
     painter.setFont(mediumFont());
     painter.setPen(Qt::white);
-    painter.drawText(QPointF(kChartLeft + kLabelsLeft, 10 + QFontMetrics(mediumFont()).ascent()),
-                     QStringLiteral("Activity"));
-    painter.drawText(QPointF(kChartLeft + kLabelsLeft,
-                             kRowHeight + 10 + QFontMetrics(mediumFont()).ascent()),
+    const int ascent = QFontMetrics(mediumFont()).ascent();
+    const double headerPad = singleSession ? 10 : 0;
+    const double efficiencyHeaderTop =
+        qMax(activityRowsHeight, 10.0) + (singleSession ? 0 : 20);
+    painter.drawText(QPointF(kChartLeft + kLabelsLeft, headerPad + ascent), QStringLiteral("Activity"));
+    painter.drawText(QPointF(kChartLeft + kLabelsLeft, efficiencyHeaderTop + headerPad + ascent),
                      QStringLiteral("Efficiency"));
     drawVerticalSeparator(painter, gridLeft - 13 - 2, 0, extraHeight);
+
+    // FiltersLine: one label per filter row, top-aligned, 20px in; Content
+    // rows (DendroidLine, filterLine) 10px apart. With a single session the
+    // filter lanes are "doubled" (20px, rows 22px per session).
+    const bool doubledFilters = singleSession;
+    const double laneHeight = doubledFilters ? 20 : 10;
+    const double lanePitch = laneHeight + 2;
+    QList<double> filterRowTops;
+    {
+        double y = filtersTop;
+        for (const HistoryChartFilterRow &row : std::as_const(m_filterRows)) {
+            filterRowTops.append(y);
+            const double rowHeight =
+                qMax(row.values.series.size() * (doubledFilters ? 22.0 : 12.0), 22.0);
+            painter.save();
+            painter.setClipRect(QRectF(kChartLeft, filtersTop, gridLeft - kChartLeft, filtersHeight));
+            painter.setPen(Qt::white);
+            painter.drawText(QRectF(kChartLeft + kLabelsLeft, y, gridLeft - kChartLeft - kLabelsLeft - 15,
+                                    rowHeight),
+                             Qt::AlignLeft | Qt::AlignTop,
+                             QFontMetrics(mediumFont()).elidedText(row.name, Qt::ElideRight,
+                                                                   gridLeft - kChartLeft - kLabelsLeft - 15));
+            painter.restore();
+            y += rowHeight + 10;
+        }
+    }
 
     if (span <= 0) {
         return;
     }
-    const qint64 chartStep = chartStepMs(span, m_stepMs);
 
     // Grid.qml, once over the extra rows and once over the filters area:
     // marks+1 one-pixel lines, markWidth = width / marks.
-    const double marks = static_cast<double>(span) / chartStep;
+    const double marks = static_cast<double>(span) / qMax<qint64>(1, m_chartStepMs);
     const double gridMarkWidth = gridWidth / marks;
     const int lineCount = static_cast<int>(marks) + 1;
     for (int i = 0; i < lineCount; ++i) {
@@ -1860,86 +2213,171 @@ void HistoryChartWidget::paintEvent(QPaintEvent *)
     painter.save();
     painter.setClipRect(QRectF(gridLeft, 0, gridWidth, extraHeight));
 
-    // HistoLine.qml: fillRect(relPos * w, (1 - v) * h, relInterval * w + 1, h)
-    // inside a 20px area centered in its 30px row. Activity granula is
-    // max(chartStep / 5, 60s) (ChartsModel.qml).
-    const qint64 activityGranula = qMax<qint64>(chartStep / 5, 60 * 1000);
-    QHash<qint64, qint64> eventsByBucket;
-    qint64 maxEvents = 0;
-    for (const HistoryActivitySample &sample : std::as_const(m_samples)) {
-        if (sample.inputEvents <= 0 || sample.timestampMs < m_rangeStart
-            || sample.timestampMs >= m_rangeEnd) {
-            continue;
+    // HistoLine.qml: fillRect(relativePosition(moment) * w, (1 - v) * h,
+    // relativeInterval * w + 1, h) on a 20px canvas centered in its 30px
+    // row, only for truthy values; v is the node's sum(volume_activity)/S.
+    const TimeToChart activityConverter(m_activity);
+    const double histogramTop0 = (sessionCount > 1 ? 15 : 0) + (kRowHeight - kHistogramHeight) / 2.0;
+    QHash<QString, int> sessionRow;
+    for (int row = 0; row < sessionCount; ++row) {
+        const HistoryChartSerie &serie = m_activity.series.at(row);
+        sessionRow.insert(serie.userName, row);
+        const double top = histogramTop0 + row * kRowHeight;
+        painter.save();
+        painter.setClipRect(QRectF(gridLeft, top, gridWidth, kHistogramHeight), Qt::IntersectClip);
+        const double barWidth = activityConverter.relativeInterval * gridWidth + 1;
+        for (int i = 0; i < serie.moments.size() && i < serie.values.size(); ++i) {
+            const double value = serie.values.at(i);
+            if (value == 0) {
+                continue;
+            }
+            const double x = gridLeft + activityConverter.relativePosition(serie.moments.at(i)) * gridWidth;
+            painter.fillRect(QRectF(x, top + (1 - value) * kHistogramHeight, barWidth, kHistogramHeight),
+                             kActivityColor);
         }
-        const qint64 bucket = (sample.timestampMs - m_rangeStart) / activityGranula;
-        const qint64 total = eventsByBucket.value(bucket) + sample.inputEvents;
-        eventsByBucket[bucket] = total;
-        maxEvents = qMax(maxEvents, total);
-    }
-    const double histogramTop = (kRowHeight - kHistogramHeight) / 2.0;
-    const double activityWidth = gridWidth * activityGranula / span + 1;
-    for (auto it = eventsByBucket.cbegin(); it != eventsByBucket.cend(); ++it) {
-        const double value = static_cast<double>(it.value()) / maxEvents;
-        const double x = gridLeft + gridWidth * (it.key() * activityGranula) / span;
-        const double y = histogramTop + (1 - value) * kHistogramHeight;
-        painter.fillRect(QRectF(x, y, activityWidth, histogramTop + kHistogramHeight - y),
-                         kActivityColor);
+        painter.restore();
     }
 
-    // Line.qml (displayKind "colors"): one column per chart step, split into
-    // equal-height bands, one per category that occurred in it, stacked in
-    // the real viewer's order -- non-productive, productive, neutral,
-    // uncategorized from top to bottom.
-    static const QStringList kBandOrder = {QStringLiteral("unproductive"), QStringLiteral("productive"),
-                                           QStringLiteral("neutral"), QStringLiteral("none")};
-    QHash<qint64, QSet<QString>> categoriesByBucket;
-    for (const HistoryAppSegment &segment : std::as_const(m_segments)) {
-        const qint64 from = qMax(segment.startMs, m_rangeStart);
-        const qint64 to = qMin(segment.endMs, m_rangeEnd);
-        if (to <= from) {
+    // ExtraContent's applicationsChart: one Line.qml lane ("colors") per
+    // activity session, in that order (a session without a productivity
+    // serie leaves its lane empty). Per moment: x = relPos * w - 0.5,
+    // w = relInterval * w + 1, the lane (22px) split into equal bands, one
+    // per rating with volume (getArrayDistributions), each in its
+    // statusToColor.
+    const TimeToChart productivityConverter(m_productivity);
+    // DendroidLine lanes: spacing applicationsChartVerticalPadding - 14.
+    const double productivityLanePitch = kProductivityHeight + (singleSession ? 0 : 20 - 14);
+    for (const HistoryChartSerie &serie : std::as_const(m_productivity.series)) {
+        if (!sessionRow.contains(serie.userName)) {
             continue;
         }
-        QString category = m_categories.value(segment.application, QStringLiteral("none"));
-        if (!kBandOrder.contains(category)) {
-            category = QStringLiteral("none");
-        }
-        for (qint64 bucket = (from - m_rangeStart) / chartStep;
-             bucket <= (to - 1 - m_rangeStart) / chartStep; ++bucket) {
-            categoriesByBucket[bucket].insert(category);
-        }
-    }
-    const double productivityTop = kRowHeight;
-    const double productivityWidth = gridWidth * chartStep / span + 1;
-    for (auto it = categoriesByBucket.cbegin(); it != categoriesByBucket.cend(); ++it) {
-        QStringList bands;
-        for (const QString &category : kBandOrder) {
-            if (it.value().contains(category)) {
-                bands.append(category);
+        const double laneTop = productivityTop + sessionRow.value(serie.userName) * productivityLanePitch;
+        const double bandWidth = productivityConverter.relativeInterval * gridWidth + 1;
+        for (int i = 0; i < serie.moments.size() && i < serie.volumes.size(); ++i) {
+            const QStringList bands = arrayDistributions(serie.volumes.at(i));
+            const double x =
+                gridLeft + productivityConverter.relativePosition(serie.moments.at(i)) * gridWidth - 0.5;
+            const double bandHeight = static_cast<double>(kProductivityHeight) / bands.size();
+            double y = laneTop;
+            for (int band = bands.size() - 1; band >= 0; --band) {
+                painter.fillRect(QRectF(x, y, bandWidth, bandHeight), categoryColor(bands.at(band)));
+                y += bandHeight;
             }
-        }
-        const double x = gridLeft + gridWidth * (it.key() * chartStep) / span - 0.5;
-        const double bandHeight = static_cast<double>(kProductivityHeight) / bands.size();
-        double y = productivityTop;
-        for (const QString &category : std::as_const(bands)) {
-            painter.fillRect(QRectF(x, y, productivityWidth, bandHeight),
-                             categoryColor(category));
-            y += bandHeight;
         }
     }
     painter.restore();
 
-    // separator1 (between the extra rows and the filters area): only in the
-    // fixed History layout -- fill mode has no filters area below.
-    if (!m_fillMode) {
-        drawHorizontalSeparator(painter, kChartLeft, extraHeight + 4, width() - kChartLeft - 25);
-    }
+    // separator1 between the extra rows and the filters area.
+    drawHorizontalSeparator(painter, kChartLeft, extraHeight + 4, width() - kChartLeft - 25);
 
-    // HistoryPlayerMarkerControl: 1px khaki line at the current marker,
-    // chart height + 10 tall.
-    if (m_currentPositionMs >= m_rangeStart && m_currentPositionMs < m_rangeEnd) {
-        const double markerWidth = gridWidth * m_stepMs / span;
-        const double x = gridLeft + markerWidth * ((m_currentPositionMs - m_rangeStart) / m_stepMs);
+    // Content rows, Line.qml "scaledColors" with isFilterLine: per session
+    // lane, per moment with a value v != 0, a bar of the filter's color,
+    // lane height scaled by v (at least 10%) and centered.
+    painter.save();
+    painter.setClipRect(QRectF(gridLeft, filtersTop, gridWidth, filtersHeight));
+    for (int r = 0; r < m_filterRows.size(); ++r) {
+        const HistoryChartFilterRow &row = m_filterRows.at(r);
+        const TimeToChart converter(row.values);
+        const double barWidth = converter.relativeInterval * gridWidth + 1;
+        QColor color = row.color;
+        color.setAlpha(255);
+        for (int lane = 0; lane < row.values.series.size(); ++lane) {
+            const HistoryChartSerie &serie = row.values.series.at(lane);
+            const double laneTop = filterRowTops.at(r) + lane * lanePitch;
+            for (int i = 0; i < serie.moments.size() && i < serie.values.size(); ++i) {
+                const double v = serie.values.at(i);
+                if (v == 0) {
+                    continue;
+                }
+                const double h = laneHeight * (v <= 1 && v > 0 ? (v < 0.1 ? 0.1 : v) : 1);
+                const double x = gridLeft + converter.relativePosition(serie.moments.at(i)) * gridWidth - 0.5;
+                painter.fillRect(QRectF(x, laneTop + (laneHeight - h) / 2, barWidth, h), color);
+            }
+        }
+    }
+    painter.restore();
+
+    // HistoryPlayerMarkerControl (History only): 1px khaki line at the
+    // current marker, chart height + 10 tall.
+    if (!m_fillMode && m_currentPositionMs >= m_rangeStart && m_currentPositionMs < m_rangeEnd) {
+        const double markerWidth = gridWidth * m_markerStepMs / span;
+        const double x =
+            gridLeft + markerWidth * ((m_currentPositionMs - m_rangeStart) / m_markerStepMs);
         painter.fillRect(QRectF(x, 0, 1, chartHeight + 10), kMarkerColor);
+    }
+}
+
+HistoryChartsModel::HistoryChartsModel(ViewerConnection &connection, HistoryChartWidget *chart,
+                                       QObject *parent)
+    : QObject(parent)
+    , m_connection(connection)
+    , m_chart(chart)
+{
+    m_recallTimer = new QTimer(this);
+    m_recallTimer->setSingleShot(true);
+    m_recallTimer->setInterval(2500); // forcedRefreshShoter
+    connect(m_recallTimer, &QTimer::timeout, this, [this] { request(QStringLiteral("productivity")); });
+    connect(&m_connection, &ViewerConnection::historyChartSeriesReceived, this,
+            &HistoryChartsModel::onSeries);
+}
+
+void HistoryChartsModel::setQuery(quint32 streamId, qint64 beginMs, qint64 endMs, qint64 chartStepMs)
+{
+    if (streamId == m_streamId && beginMs == m_beginMs && endMs == m_endMs
+        && chartStepMs == m_chartStepMs) {
+        return;
+    }
+    m_streamId = streamId;
+    m_beginMs = beginMs;
+    m_endMs = endMs;
+    m_chartStepMs = chartStepMs;
+    // HistoryTab rebuilds its ChartsModel on every start/stop/step change:
+    // the old series are gone until the new ones arrive.
+    m_chart->clearSeries();
+    request(QStringLiteral("activity"));
+    request(QStringLiteral("productivity"));
+}
+
+void HistoryChartsModel::clear()
+{
+    m_streamId = 0;
+    m_pendingTags.clear();
+    m_recallTimer->stop();
+    m_chart->clearSeries();
+}
+
+void HistoryChartsModel::applicationsChanged()
+{
+    if (m_streamId != 0) {
+        m_recallTimer->start();
+    }
+}
+
+void HistoryChartsModel::request(const QString &kind)
+{
+    if (m_streamId == 0 || m_endMs <= m_beginMs || m_chartStepMs <= 0) {
+        return;
+    }
+    // ChartsModel.qml granula: K_activity max(chartTimeStep / 5, 60) s,
+    // K_byProductivity chartTimeStep s.
+    const qint64 granulaMs = kind == QStringLiteral("activity")
+                                 ? qMax<qint64>(m_chartStepMs / 5, 60 * 1000)
+                                 : m_chartStepMs;
+    const QString tag = QStringLiteral("chart%1").arg(++m_nextTag);
+    m_pendingTags.insert(kind, tag);
+    m_connection.requestChartSeries(m_streamId, kind, m_beginMs, m_endMs, granulaMs, tag);
+}
+
+void HistoryChartsModel::onSeries(quint32 streamId, const HistoryChartResult &result)
+{
+    if (streamId != m_streamId || m_pendingTags.value(result.kind) != result.tag) {
+        return;
+    }
+    m_pendingTags.remove(result.kind);
+    if (result.kind == QStringLiteral("activity")) {
+        m_chart->setActivity(result);
+    } else {
+        m_chart->setProductivity(result);
     }
 }
 
@@ -2143,10 +2581,6 @@ HistoryView::HistoryView(ViewerConnection &connection, QWidget *parent)
     m_changeSettingsButton->setObjectName(QStringLiteral("historyChangeButton"));
     m_changeSettingsButton->setFixedSize(140, 25);
     connect(m_changeSettingsButton, &QPushButton::clicked, this, &HistoryView::onChangeSettingsClicked);
-    // Not shown -- day/period selection lives in the "Change settings"
-    // dialog; m_dayCombo stays alive for selectDay/onDayChanged.
-    m_dayCombo = new QComboBox(this);
-    m_dayCombo->hide();
 
     const QIcon exportIcon = [] {
         QIcon icon;
@@ -2299,6 +2733,7 @@ HistoryView::HistoryView(ViewerConnection &connection, QWidget *parent)
     // chartsItem, opened to 186px by panelViolation (starts closed).
     m_chart = new HistoryChartWidget(this);
     m_chart->hide();
+    m_chartsModel = new HistoryChartsModel(m_connection, m_chart, this);
     root->addWidget(m_chart);
     updateViolationToggleText();
     applyTimeStep();
@@ -2332,15 +2767,10 @@ HistoryView::HistoryView(ViewerConnection &connection, QWidget *parent)
     addShortcut(QKeySequence(Qt::CTRL | Qt::Key_Left), [this] { stepMarkers(-10); });
     addShortcut(QKeySequence(Qt::Key_Space), [this] { onPlayClicked(); });
 
-    connect(m_dayCombo, &QComboBox::currentIndexChanged, this, &HistoryView::onDayChanged);
-
-    connect(&m_connection, &ViewerConnection::historyDaysReceived, this, &HistoryView::onDaysReceived);
     connect(&m_connection, &ViewerConnection::historyFramesReceived, this,
             &HistoryView::onFramesReceived);
     connect(&m_connection, &ViewerConnection::historyFrameReceived, this,
             &HistoryView::onFrameReceived);
-    connect(&m_connection, &ViewerConnection::historyActivityReceived, this,
-            &HistoryView::onActivityReceived);
     connect(&m_connection, &ViewerConnection::historyAppSegmentsReceived, this,
             &HistoryView::onAppSegmentsReceived);
     connect(&m_connection, &ViewerConnection::historyWebVisitsReceived, this,
@@ -2368,7 +2798,7 @@ void HistoryView::setDevices(const QHash<quint32, QString> &deviceNames,
     if (m_historyTabs.isEmpty()) {
         // First device list: start with one tab for the first employee, today.
         if (!deviceNames.isEmpty()) {
-            addHistoryTab({deviceNames.cbegin().key(), QDate::currentDate().toString(QStringLiteral("yyyyMMdd")),
+            addHistoryTab({deviceNames.cbegin().key(), HistoryPeriod::recent(QStringLiteral("d"), 1),
                            m_timeStepMs});
         }
         return;
@@ -2412,59 +2842,36 @@ void HistoryView::hideLoadingDialog()
 
 void HistoryView::openForDevice(quint32 deviceKey, const QString &day)
 {
-    const QString targetDay =
-        day.isEmpty() ? QDate::currentDate().toString(QStringLiteral("yyyyMMdd")) : day;
+    const QDate date =
+        day.isEmpty() ? QDate::currentDate() : QDate::fromString(day, QStringLiteral("yyyyMMdd"));
+    const HistoryPeriod period = HistoryPeriod::recent(
+        QStringLiteral("d"), HistoryPeriod::getMultiplier(QStringLiteral("d"), QDateTime(date, QTime(0, 0))));
     m_activated = true;
     // Like GoToHistoryDialog: the current tab if it's already this
     // employee, otherwise a new tab for them.
     if (m_currentTab >= 0 && m_historyTabs.at(m_currentTab).deviceKey == deviceKey) {
-        m_historyTabs[m_currentTab].day = targetDay;
-        jumpTo(deviceKey, targetDay);
+        m_historyTabs[m_currentTab].period = period;
+        jumpTo(deviceKey, period);
         return;
     }
-    addHistoryTab({deviceKey, targetDay, m_timeStepMs});
+    addHistoryTab({deviceKey, period, m_timeStepMs});
 }
 
-void HistoryView::jumpTo(quint32 deviceKey, const QString &day)
+void HistoryView::jumpTo(quint32 deviceKey, const HistoryPeriod &period)
 {
-    m_currentDay = day;
-    if (deviceKey != m_currentDeviceKey || m_allDays.isEmpty()) {
+    m_period = period;
+    if (deviceKey != m_currentDeviceKey) {
         switchDevice(deviceKey);
-        return;
     }
-    selectDay(day);
-}
-
-void HistoryView::selectDay(const QString &day)
-{
-    m_currentDay = day;
-    const int index = m_dayCombo->findText(day);
-    if (index < 0) {
-        showNoData();
-        return;
-    }
-    if (index == m_dayCombo->currentIndex()) {
-        onDayChanged(index);
-    } else {
-        m_dayCombo->setCurrentIndex(index);
-    }
+    loadPeriod();
 }
 
 void HistoryView::showNoData()
 {
     m_playbackTimer->stop();
     setPlaying(false);
-    m_dayCombo->blockSignals(true);
-    m_dayCombo->setCurrentIndex(-1);
-    m_dayCombo->blockSignals(false);
     m_timestamps.clear();
     m_timeline->setTimestamps({});
-    const auto [dayStart, dayEnd] = dayRangeMs(m_currentDay);
-    m_timeline->setRange(dayStart, dayEnd);
-    m_timeAxis->setRange(dayStart, dayEnd);
-    m_chart->setRange(dayStart, dayEnd);
-    m_chart->setActivity({});
-    m_chart->setEfficiency({}, m_categories);
     m_videoStrip->setStreams({});
     m_videoHeader->setMoment(QString());
     m_keystream->setText(QString(), QString());
@@ -2500,7 +2907,7 @@ void HistoryView::storeCurrentTab()
     if (m_currentTab < 0 || m_currentTab >= m_historyTabs.size()) {
         return;
     }
-    m_historyTabs[m_currentTab] = {m_currentDeviceKey, m_currentDay, m_timeStepMs};
+    m_historyTabs[m_currentTab] = {m_currentDeviceKey, m_period, m_timeStepMs};
 }
 
 void HistoryView::addHistoryTab(const HistoryTab &tab)
@@ -2532,22 +2939,19 @@ void HistoryView::showHistoryTab(int index)
     const HistoryTab tab = m_historyTabs.at(index);
     m_timeStepMs = tab.timeStepMs;
     applyTimeStep();
-    // A different tab can be the same employee: force the reload so the
-    // day/step of this tab are the ones shown.
-    m_allDays.clear();
-    jumpTo(tab.deviceKey, tab.day);
+    jumpTo(tab.deviceKey, tab.period);
 }
 
 void HistoryView::openAddTabDialog()
 {
-    HistoryChoiceDialog dialog(HistoryChoiceDialog::Mode::Add, employeeList(), 0, QDate::currentDate(),
-                               m_timeStepMs, this);
+    HistoryChoiceDialog dialog(HistoryChoiceDialog::Mode::Add, employeeList(), 0,
+                               HistoryPeriod::recent(QStringLiteral("d"), 1), m_timeStepMs, this);
     dialog.move(mapToGlobal(rect().center()) - QPoint(dialog.width() / 2, dialog.height() / 2));
     if (dialog.exec() != QDialog::Accepted) {
         return;
     }
     m_activated = true;
-    addHistoryTab({dialog.employee(), dialog.day().toString(QStringLiteral("yyyyMMdd")), dialog.timeStepMs()});
+    addHistoryTab({dialog.employee(), dialog.period(), dialog.timeStepMs()});
 }
 
 void HistoryView::closeHistoryTab(int index)
@@ -2571,7 +2975,9 @@ void HistoryView::closeHistoryTab(int index)
     if (m_historyTabs.isEmpty()) {
         m_currentTab = -1;
         m_currentDeviceKey = 0;
-        m_currentDay.clear();
+        m_period = HistoryPeriod();
+        m_rangeKey.clear();
+        m_chartsModel->clear();
         showNoData();
         // HistoryPanel.openPanelName(): with no tabs left, ask for one.
         openAddTabDialog();
@@ -2648,38 +3054,16 @@ void HistoryView::switchDevice(quint32 deviceKey)
     m_currentDeviceKey = deviceKey;
     m_videoHeader->setName(m_deviceNames.value(deviceKey, QStringLiteral("Employee %1").arg(deviceKey)));
     rebuildMonitorStrip();
-
-    m_dayCombo->clear();
-    m_allDays.clear();
-    m_timestamps.clear();
-    m_timeline->setTimestamps({});
-    m_timeline->setRange(0, 0);
-    m_timeAxis->setRange(0, 0);
-    m_chart->setRange(0, 0);
-    m_chart->setActivity({});
     m_employeeCategories.clear();
-    m_chart->setEfficiency({}, m_categories);
-    m_videoHeader->setMoment(QString());
-    m_keystream->setText(QString(), QString());
-    m_webVisits.clear();
-    m_appSegments.clear();
-    m_activitySamples.clear();
-    m_keystrokeEntries.clear();
-    m_infoPanel->setItems({}, {});
-    m_textLog->setRowCount(0);
+    m_chartsModel->clear();
 
     const quint32 streamId = currentStreamId();
-    if (streamId == 0) {
-        return;
+    if (streamId != 0) {
+        m_connection.requestCategories(streamId);
     }
-    m_statusLabel->clear();
-    updateStatusVisibility();
-    showLoadingDialog(QStringLiteral("Downloading..."));
-    m_connection.requestHistoryDays(streamId);
-    m_connection.requestCategories(streamId);
 }
 
-void HistoryView::onDayChanged(int index)
+void HistoryView::loadPeriod()
 {
     m_playbackTimer->stop();
     setPlaying(false);
@@ -2687,27 +3071,36 @@ void HistoryView::onDayChanged(int index)
     m_timeline->setTimestamps({});
     m_videoStrip->setAllLoading();
     m_videoHeader->setMoment(QString());
-    if (index < 0) {
-        return;
-    }
-    refreshDayDependentData();
-}
+    m_keystream->setText(QString(), QString());
+    m_webVisits.clear();
+    m_appSegments.clear();
+    m_keystrokeEntries.clear();
+    m_infoPanel->setItems({}, {});
+    m_textLog->setRowCount(0);
 
-void HistoryView::refreshDayDependentData()
-{
+    const qint64 start = periodStartMs();
+    const qint64 stop = periodStopMs();
+    m_rangeKey = ViewerConnection::rangeKey(start, stop);
+    m_timeline->setRange(start, stop);
+    m_timeAxis->setRange(start, stop);
+    m_chart->setRange(start, stop);
+    const qint64 chartStep = HistoryChartWidget::chartStepMs(stop - start, m_timeStepMs);
+    m_chart->setChartStepMs(chartStep);
+
     const quint32 streamId = currentStreamId();
-    const QString day = m_dayCombo->currentText();
-    if (day.isEmpty()) {
+    if (streamId == 0 || stop <= start) {
+        m_chartsModel->clear();
+        showNoData();
         return;
     }
+    m_chartsModel->setQuery(streamId, start, stop, chartStep);
     m_statusLabel->clear();
     updateStatusVisibility();
     showLoadingDialog(QStringLiteral("Downloading..."));
-    m_connection.requestHistoryFrames(streamId, day);
-    m_connection.requestHistoryActivity(streamId, day);
-    m_connection.requestHistoryAppSegments(streamId, day);
-    m_connection.requestWebVisits(streamId, day);
-    m_connection.requestKeystrokes(streamId, day);
+    m_connection.requestHistoryFrames(streamId, start, stop);
+    m_connection.requestHistoryAppSegments(streamId, start, stop);
+    m_connection.requestWebVisits(streamId, start, stop);
+    m_connection.requestKeystrokes(streamId, start, stop);
 }
 
 void HistoryView::onTimelineMoved(int index)
@@ -2851,7 +3244,7 @@ void HistoryView::applyTimeStep()
     m_chart->setGridLeft(10 + 140 + 60 + 20 + 12 + audioWidth);
     m_timeline->setStepMs(m_timeStepMs);
     m_timeAxis->setStepMs(m_timeStepMs);
-    m_chart->setStepMs(m_timeStepMs);
+    m_chart->setMarkerStepMs(m_timeStepMs);
 }
 
 void HistoryView::onSpeedChanged(int index)
@@ -2903,7 +3296,7 @@ void HistoryView::onKeylogTableClicked()
     connect(exportCsvButton, &QPushButton::clicked, this, [this, dialog, collectRows]() {
         const QString path = QFileDialog::getSaveFileName(
             dialog, QStringLiteral("Exporta keylogger"),
-            QStringLiteral("keylogger_%1.csv").arg(m_dayCombo->currentText()),
+            QStringLiteral("keylogger_%1.csv").arg(m_period.begin().toString(QStringLiteral("yyyyMMdd"))),
             QStringLiteral("CSV (*.csv)"));
         if (path.isEmpty()) {
             return;
@@ -2928,7 +3321,7 @@ void HistoryView::onKeylogTableClicked()
     connect(exportXlsxButton, &QPushButton::clicked, this, [this, dialog, collectRows]() {
         const QString path = QFileDialog::getSaveFileName(
             dialog, QStringLiteral("Exporta keylogger"),
-            QStringLiteral("keylogger_%1.xlsx").arg(m_dayCombo->currentText()),
+            QStringLiteral("keylogger_%1.xlsx").arg(m_period.begin().toString(QStringLiteral("yyyyMMdd"))),
             QStringLiteral("Excel (*.xlsx)"));
         if (path.isEmpty()) {
             return;
@@ -3024,53 +3417,28 @@ void HistoryView::onToggleRunningApps()
 void HistoryView::onChangeSettingsClicked()
 {
     HistoryChoiceDialog dialog(HistoryChoiceDialog::Mode::Change, employeeList(), m_currentDeviceKey,
-                               QDate::fromString(m_currentDay, QStringLiteral("yyyyMMdd")), m_timeStepMs,
-                               this);
+                               m_period, m_timeStepMs, this);
     dialog.move(mapToGlobal(rect().center()) - QPoint(dialog.width() / 2, dialog.height() / 2));
     if (dialog.exec() != QDialog::Accepted) {
         return;
     }
     m_timeStepMs = dialog.timeStepMs();
     applyTimeStep();
-    const QString day = dialog.day().toString(QStringLiteral("yyyyMMdd"));
     if (m_currentTab >= 0) {
-        m_historyTabs[m_currentTab] = {dialog.employee(), day, m_timeStepMs};
+        m_historyTabs[m_currentTab] = {dialog.employee(), dialog.period(), m_timeStepMs};
         updateHistoryTabText(m_currentTab);
     }
-    jumpTo(dialog.employee(), day);
-}
-
-void HistoryView::onDaysReceived(quint32 streamId, const QStringList &days)
-{
-    if (streamId != currentStreamId()) {
-        return;
-    }
-    m_allDays = days;
-    hideLoadingDialog();
-    {
-        const QSignalBlocker blocker(m_dayCombo);
-        m_dayCombo->clear();
-        m_dayCombo->addItems(days);
-        m_dayCombo->setCurrentIndex(-1);
-    }
-    m_statusLabel->clear();
-    updateStatusVisibility();
-    selectDay(m_currentDay.isEmpty() ? QDate::currentDate().toString(QStringLiteral("yyyyMMdd"))
-                                     : m_currentDay);
+    jumpTo(dialog.employee(), dialog.period());
 }
 
 void HistoryView::onFramesReceived(quint32 streamId, const QString &day,
                                    const QList<qint64> &timestamps)
 {
-    if (streamId != currentStreamId()) {
+    if (streamId != currentStreamId() || day != m_rangeKey) {
         return;
     }
     m_timestamps = timestamps;
     m_timeline->setTimestamps(timestamps);
-    const auto [dayStart, dayEnd] = dayRangeMs(day);
-    m_timeline->setRange(dayStart, dayEnd);
-    m_timeAxis->setRange(dayStart, dayEnd);
-    m_chart->setRange(dayStart, dayEnd);
     if (timestamps.isEmpty()) {
         m_statusLabel->setText(QStringLiteral("No information for selected period"));
         updateStatusVisibility();
@@ -3117,39 +3485,20 @@ void HistoryView::onHistoryFrameMissing(quint32 streamId)
     }
 }
 
-void HistoryView::onActivityReceived(quint32 streamId, const QString &day,
-                                     const QList<HistoryActivitySample> &samples)
-{
-    Q_UNUSED(day)
-    if (streamId != currentStreamId() || m_timestamps.isEmpty()) {
-        return;
-    }
-    m_activitySamples = samples;
-    m_chart->setActivity(samples);
-}
-
 void HistoryView::onAppSegmentsReceived(quint32 streamId, const QString &day,
                                         const QList<HistoryAppSegment> &segments)
 {
-    Q_UNUSED(day)
-    if (streamId != currentStreamId()) {
+    if (streamId != currentStreamId() || day != m_rangeKey) {
         return;
     }
     m_appSegments = segments;
-    refreshEfficiencyBar();
     updateInfoPanel();
-}
-
-void HistoryView::refreshEfficiencyBar()
-{
-    m_chart->setEfficiency(m_appSegments, effectiveCategories());
 }
 
 void HistoryView::onWebVisitsReceived(quint32 streamId, const QString &day,
                                       const QList<HistoryAppSegment> &visits)
 {
-    Q_UNUSED(day)
-    if (streamId != currentStreamId()) {
+    if (streamId != currentStreamId() || day != m_rangeKey) {
         return;
     }
     m_webVisits = visits;
@@ -3166,10 +3515,9 @@ void HistoryView::updateInfoPanel()
         return;
     }
     const qint64 moment = m_timestamps.at(index);
-    const auto [dayStart, dayEnd] = dayRangeMs(m_dayCombo->currentText());
-    Q_UNUSED(dayEnd)
+    const qint64 rangeStart = periodStartMs();
     const qint64 step = qMax<qint64>(1000, m_timeStepMs);
-    const qint64 windowStart = dayStart + (moment - dayStart) / step * step;
+    const qint64 windowStart = rangeStart + (moment - rangeStart) / step * step;
     const qint64 windowEnd = windowStart + step;
     const QHash<QString, QString> categories = effectiveCategories();
     const auto build = [&](const QList<HistoryAppSegment> &segments) {
@@ -3225,7 +3573,7 @@ void HistoryView::onCategorizationRequested(const QString &resource)
         }
         m_connection.setAppCategory(currentStreamId(), resource, dialog.employeeCategory(), true);
     }
-    refreshEfficiencyBar();
+    m_chartsModel->applicationsChanged();
     updateInfoPanel();
 }
 
@@ -3244,7 +3592,6 @@ void HistoryView::onEmployeeCategoriesReceived(quint32 streamId, const QHash<QSt
         return;
     }
     m_employeeCategories = categories;
-    refreshEfficiencyBar();
     updateInfoPanel();
 }
 
@@ -3254,15 +3601,13 @@ void HistoryView::onCategoriesReceived(quint32 streamId, const QHash<QString, QS
         return;
     }
     m_categories = categories;
-    refreshEfficiencyBar();
     updateInfoPanel();
 }
 
 void HistoryView::onKeystrokesReceived(quint32 streamId, const QString &day,
                                        const QList<HistoryKeystrokeEntry> &entries)
 {
-    Q_UNUSED(day)
-    if (streamId != currentStreamId()) {
+    if (streamId != currentStreamId() || day != m_rangeKey) {
         return;
     }
     m_keystrokeEntries = entries;

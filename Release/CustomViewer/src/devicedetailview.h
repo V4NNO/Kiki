@@ -12,6 +12,8 @@ struct HistoryAppUsage;
 struct HistoryKeystrokeEntry;
 class HistoryInfoPanel;
 class HistoryChartWidget;
+class HistoryChartsModel;
+class QToolButton;
 class TimeAxisWidget;
 class QSlider;
 // Defined in devicedetailview.cpp -- the TabView MultiSwitch strip, the
@@ -152,26 +154,34 @@ private:
     QStackedWidget *m_programsInnerStack = nullptr;
     BigStatusIcon *m_programsStatusIcon = nullptr;
 
-    // Violations tab: the Activity/Efficiency Chart (trackerQuadratorActiveCell/
-    // Filters.qml -- in this org-less build it's just the Chart, no violation-
-    // filter groups). Data comes from the same per-day History queries; the
-    // Range/Step sliders pick the window and bucket size.
+    // Violations tab: trackerQuadratorActiveCell/Filters.qml's Chart, driven
+    // the way TrackerQuadratorActiveCell.qml drives its ChartsModel: Range /
+    // Step from ChartTimeModels.qml (the step re-picked as the allowed one
+    // nearest lastChartTimeMarks on every range change), the window
+    // [begin, begin + range) re-anchored to "now" (floored to the step in
+    // local time) every second until shifted left/right, and the Activity /
+    // Efficiency series (and violation filter rows) for it.
     QWidget *m_violationsPage = nullptr;
     TimeAxisWidget *m_violAxis = nullptr;
     HistoryChartWidget *m_violChart = nullptr;
+    HistoryChartsModel *m_violChartsModel = nullptr;
     QSlider *m_violRangeSlider = nullptr;
     QSlider *m_violStepSlider = nullptr;
     QWidget *m_violStepLabels = nullptr; // rebuilt per range (allowed steps differ)
-    int m_violRangeIndex = 5; // 10 days
-    int m_violStepIndex = 9;  // 8 hours
-    qint64 m_violWindowEndMs = 0; // right edge; 0 = now
-    QHash<QString, QList<HistoryActivitySample>> m_violActivityByDay;
-    QHash<QString, QList<HistoryAppSegment>> m_violSegmentsByDay;
-    QSet<QString> m_violRequestedDays;
+    QToolButton *m_violShiftRight = nullptr;
+    QTimer *m_violAutoMoveTimer = nullptr;
+    int m_violRangeIndex = 0;     // chartTimeRangeIndex
+    // Into ChartTimeModels.steps (not the per-range list); -1 until the
+    // first pick, like chartTimeStep starting at 0.
+    int m_violStepIndex = -1;
+    double m_violLastMarks = 40;  // lastChartTimeMarks
+    bool m_violLive = true;       // wasNotAction
+    qint64 m_violBeginMs = 0;     // modelCreateDiagram.dateStart
     void buildViolationsPage(QWidget *page);
     void reloadViolationsData();
-    void updateViolationsChart();
     void applyViolationsStepForRange();
+    void setViolationsStepIndex(int stepIndex);
+    void saveViolationsState() const;
     QVBoxLayout *m_windowsLayout = nullptr;
     QList<MonitorWidget *> m_currentWindowPreviews;
 

@@ -468,6 +468,51 @@ void ViewerConnection::requestKeystrokes(quint32 streamId, const QString &day)
                                            {QStringLiteral("day"), day}});
 }
 
+QString ViewerConnection::rangeKey(qint64 startMs, qint64 stopMs)
+{
+    return QStringLiteral("%1-%2").arg(startMs).arg(stopMs);
+}
+
+namespace {
+QJsonObject rangeQuery(const QString &action, qint64 startMs, qint64 stopMs)
+{
+    return QJsonObject{{QStringLiteral("action"), action},
+                       {QStringLiteral("day"), ViewerConnection::rangeKey(startMs, stopMs)},
+                       {QStringLiteral("startMs"), startMs},
+                       {QStringLiteral("stopMs"), stopMs}};
+}
+} // namespace
+
+void ViewerConnection::requestHistoryFrames(quint32 streamId, qint64 startMs, qint64 stopMs)
+{
+    sendHistoryQuery(streamId, rangeQuery(QStringLiteral("listFrames"), startMs, stopMs));
+}
+
+void ViewerConnection::requestHistoryAppSegments(quint32 streamId, qint64 startMs, qint64 stopMs)
+{
+    sendHistoryQuery(streamId, rangeQuery(QStringLiteral("listAppSegments"), startMs, stopMs));
+}
+
+void ViewerConnection::requestWebVisits(quint32 streamId, qint64 startMs, qint64 stopMs)
+{
+    sendHistoryQuery(streamId, rangeQuery(QStringLiteral("listWebVisits"), startMs, stopMs));
+}
+
+void ViewerConnection::requestKeystrokes(quint32 streamId, qint64 startMs, qint64 stopMs)
+{
+    sendHistoryQuery(streamId, rangeQuery(QStringLiteral("listKeystrokes"), startMs, stopMs));
+}
+
+void ViewerConnection::requestChartSeries(quint32 streamId, const QString &kind, qint64 startMs,
+                                          qint64 stopMs, qint64 granulaMs, const QString &tag)
+{
+    QJsonObject request = rangeQuery(QStringLiteral("chartSeries"), startMs, stopMs);
+    request.insert(QStringLiteral("kind"), kind);
+    request.insert(QStringLiteral("granulaMs"), granulaMs);
+    request.insert(QStringLiteral("tag"), tag);
+    sendHistoryQuery(streamId, request);
+}
+
 void ViewerConnection::sendHistoryQuery(quint32 streamId, const QJsonObject &object)
 {
     const QByteArray payload = QJsonDocument(object).toJson(QJsonDocument::Compact);
@@ -590,6 +635,32 @@ void ViewerConnection::processHistoryQuery(const ViewerProtocol::Header &header,
         }
         emit historyKeystrokesReceived(header.streamId, object.value(QStringLiteral("day")).toString(),
                                        entries);
+    } else if (action == QStringLiteral("chartSeries")) {
+        HistoryChartResult result;
+        result.kind = object.value(QStringLiteral("kind")).toString();
+        result.tag = object.value(QStringLiteral("tag")).toString();
+        result.startMs = static_cast<qint64>(object.value(QStringLiteral("startMs")).toDouble());
+        result.stopMs = static_cast<qint64>(object.value(QStringLiteral("stopMs")).toDouble());
+        result.granulaMs = static_cast<qint64>(object.value(QStringLiteral("granulaMs")).toDouble());
+        for (const QJsonValue &serieValue : object.value(QStringLiteral("series")).toArray()) {
+            const QJsonObject entry = serieValue.toObject();
+            HistoryChartSerie serie;
+            serie.userName = entry.value(QStringLiteral("userName")).toString();
+            for (const QJsonValue &moment : entry.value(QStringLiteral("moment")).toArray()) {
+                serie.moments.append(static_cast<qint64>(moment.toDouble()));
+            }
+            for (const QJsonValue &value : entry.value(QStringLiteral("value")).toArray()) {
+                if (value.isArray()) {
+                    const QJsonArray volumes = value.toArray();
+                    serie.volumes.append({volumes.at(0).toDouble(), volumes.at(1).toDouble(),
+                                          volumes.at(2).toDouble(), volumes.at(3).toDouble()});
+                } else {
+                    serie.values.append(value.toDouble());
+                }
+            }
+            result.series.append(serie);
+        }
+        emit historyChartSeriesReceived(header.streamId, result);
     }
 }
 

@@ -68,7 +68,8 @@ public:
     // ScreenCaptureManager::foregroundMonitorStreamId).
     void pushMetadata(quint32 streamId, const QString &application, const QString &idleText,
                       int inputEvents, const QString &url, quint32 activeMonitorStreamId,
-                      const QString &windowTitle);
+                      const QString &windowTitle, double idleSeconds = 0.0,
+                      bool screensaver = false);
     // streamId 0: keystrokes aren't tied to a specific monitor, only to the
     // session (matches how Keylogger observes the foreground window
     // regardless of which physical screen it's on).

@@ -10,6 +10,8 @@
 #include <QSslSocket>
 #include <QTimer>
 
+#include <array>
+
 struct HistoryActivitySample {
     qint64 timestampMs = 0;
     int inputEvents = 0;
@@ -33,6 +35,28 @@ struct HistoryKeystrokeEntry {
     qint64 timestampMs = 0;
     QString windowTitle;
     QString text;
+};
+
+// One session's serie of a chartSeries reply (node.exe's
+// ResultSerieInSessions / ResultMultiSerieInSessions entry): bucket starts
+// and, per bucket, the Activity share (values) or the Efficiency volumes
+// per rating none/productive/neutral/nonProductive (volumes, seconds).
+struct HistoryChartSerie {
+    QString userName;
+    QList<qint64> moments;
+    QList<double> values;
+    QList<std::array<double, 4>> volumes;
+};
+
+// A chartSeries reply: what ChartsModel.qml's Selector gets back, with the
+// start/stop/granula its TimeToChartConverter is built from.
+struct HistoryChartResult {
+    QString kind; // "activity" | "productivity"
+    QString tag;
+    qint64 startMs = 0;
+    qint64 stopMs = 0;
+    qint64 granulaMs = 0;
+    QList<HistoryChartSerie> series;
 };
 
 class ViewerConnection final : public QObject
@@ -69,6 +93,20 @@ public:
     void setAppCategory(quint32 streamId, const QString &application, const QString &category,
                         bool employeeScope = false);
     void requestKeystrokes(quint32 streamId, const QString &day);
+
+    // The same queries over an explicit [startMs, stopMs) (History's
+    // multi-day / custom periods). Replies carry rangeKey(startMs, stopMs)
+    // where the day-based ones carry the day.
+    static QString rangeKey(qint64 startMs, qint64 stopMs);
+    void requestHistoryFrames(quint32 streamId, qint64 startMs, qint64 stopMs);
+    void requestHistoryAppSegments(quint32 streamId, qint64 startMs, qint64 stopMs);
+    void requestWebVisits(quint32 streamId, qint64 startMs, qint64 stopMs);
+    void requestKeystrokes(quint32 streamId, qint64 startMs, qint64 stopMs);
+
+    // ChartsModel.qml's Selector (K_activity / K_byProductivity) for the
+    // employee streamId belongs to; tag comes back in the reply.
+    void requestChartSeries(quint32 streamId, const QString &kind, qint64 startMs, qint64 stopMs,
+                            qint64 granulaMs, const QString &tag);
 
 signals:
     void statusChanged(const QString &status, bool connected);
@@ -123,6 +161,7 @@ signals:
     void historyEmployeeCategoriesReceived(quint32 streamId, const QHash<QString, QString> &categories);
     void historyKeystrokesReceived(quint32 streamId, const QString &day,
                                    const QList<HistoryKeystrokeEntry> &entries);
+    void historyChartSeriesReceived(quint32 streamId, const HistoryChartResult &result);
 
 private slots:
     void onSocketConnected();

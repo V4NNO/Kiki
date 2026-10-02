@@ -239,7 +239,8 @@ void SubServiceHost::writeEncodedFrame(quint32 streamId, const QByteArray &encod
 
 void SubServiceHost::pushMetadata(quint32 streamId, const QString &application,
                                   const QString &idleText, int inputEvents, const QString &url,
-                                  quint32 activeMonitorStreamId, const QString &windowTitle)
+                                  quint32 activeMonitorStreamId, const QString &windowTitle,
+                                  double idleSeconds, bool screensaver)
 {
     if (!m_socket) {
         return;
@@ -251,7 +252,9 @@ void SubServiceHost::pushMetadata(quint32 streamId, const QString &application,
                         {QStringLiteral("url"), url},
                         {QStringLiteral("activeMonitor"),
                          static_cast<qint64>(activeMonitorStreamId)},
-                        {QStringLiteral("windowTitle"), windowTitle}});
+                        {QStringLiteral("windowTitle"), windowTitle},
+                        {QStringLiteral("idleSeconds"), idleSeconds},
+                        {QStringLiteral("screensaver"), screensaver}});
 }
 
 void SubServiceHost::pushKeystroke(const QString &windowTitle, const QString &text)

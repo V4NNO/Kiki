@@ -360,7 +360,8 @@ void SessionManager::onFrameReady(quint32 sessionId, quint32 localStreamId, cons
 void SessionManager::onMetadataChanged(quint32 sessionId, quint32 localStreamId,
                                        const QString &application, const QString &idleText,
                                        int inputEvents, const QString &url,
-                                       quint32 activeMonitorLocalStreamId, const QString &windowTitle)
+                                       quint32 activeMonitorLocalStreamId, const QString &windowTitle,
+                                       double idleSeconds, bool screensaver)
 {
     auto it = m_sessions.constFind(sessionId);
     if (it == m_sessions.constEnd()) {
@@ -380,14 +381,20 @@ void SessionManager::onMetadataChanged(quint32 sessionId, quint32 localStreamId,
         m_server->broadcastMetadata(globalId, application, idleText, activeMonitorGlobalId);
     }
     if (m_historyRecorder) {
-        m_historyRecorder->noteApplication(sessionId, globalId, application, windowTitle);
+        // Online / idle / lock / saver ranges behind the Activity chart's
+        // volume_activity (and the nodata subtraction of both charts).
+        m_historyRecorder->noteSessionState(it.value().username, idleText, idleSeconds, screensaver);
+        m_historyRecorder->noteApplication(sessionId, it.value().username, application, windowTitle);
         m_historyRecorder->noteUrl(sessionId, globalId, url);
         // inputEvents is only meaningful on the periodic 10s sample tick
         // (see KikiSubService main.cpp); app-change-triggered metadata
         // pushes always carry 0, so this naturally only records real
-        // samples instead of a row per app switch too.
+        // samples instead of a row per app switch too. The subservice sends
+        // the (session-wide) count on exactly one monitor per tick, so this
+        // records one session-scoped row per sample regardless of how many
+        // monitors the employee has.
         if (inputEvents > 0) {
-            m_historyRecorder->recordActivity(sessionId, globalId, inputEvents);
+            m_historyRecorder->recordActivity(it.value().username, inputEvents);
         }
     }
 }

@@ -3,12 +3,14 @@
 #include "viewerconnection.h"
 
 #include <QDate>
+#include <QDateTime>
 #include <QDialog>
 #include <QHash>
 #include <QColor>
 #include <QWidget>
 
 class QComboBox;
+class QDateTimeEdit;
 class QDialog;
 class QEvent;
 class QHBoxLayout;
@@ -177,11 +179,38 @@ private:
     QPoint m_hover;
 };
 
+// HistoryTab.qml's historyPanelState period: "recent" (recentType d/w/m/q +
+// recentMultiplier, with recentBegin/recentEnd fixed when it was chosen) or
+// "custom" (customBegin/customEnd). History shows [begin(), end()).
+struct HistoryPeriod {
+    QString type = QStringLiteral("recent");
+    QString recentType = QStringLiteral("d");
+    int recentMultiplier = 1;
+    QDateTime recentBegin;
+    QDateTime recentEnd;
+    QDateTime customBegin;
+    QDateTime customEnd;
+
+    // HistoryTab.getInterval().
+    QDateTime begin() const { return type == QStringLiteral("custom") ? customBegin : recentBegin; }
+    QDateTime end() const { return type == QStringLiteral("custom") ? customEnd : recentEnd; }
+    // DateTimeUtils.js getPeriod(kind, multiplier): the multiplier-th most
+    // recent calendar day/week/month/quarter, the current one up to now.
+    static QPair<QDateTime, QDateTime> getPeriod(const QString &kind, int multiplier);
+    // DateTimeUtils.js getMultiplier(kind, start, end).
+    static int getMultiplier(const QString &kind, const QDateTime &start);
+    // A recent period, its range computed now.
+    static HistoryPeriod recent(const QString &kind, int multiplier);
+    // DateTimeUtils.js formatPeriod(period, useDate, false).
+    static QString formatPeriod(const QDateTime &start, const QDateTime &end);
+};
+
 // utils/HistoryChoicePanel.qml (a GenericBox) in its "add" ("Add history
 // watching") and "change" ("Change range and employee") modes: Employee,
-// Period (TimeRangeReport: kind + a ◀▶ period field) and Time step (with
-// the "no audio" info icon), Cancel / OK. History here works one day at a
-// time, so Day is the only period kind that can be chosen.
+// Period (TimeRangeReport: Day/Week/Month/Quarter with a ◀▶ period field,
+// or "Arbitrary period" with Begin — End date-time inputs) and Time step
+// (TimeStepComboBox for that range, with the "no audio" info icon),
+// Cancel / OK.
 class HistoryChoiceDialog final : public QDialog
 {
     Q_OBJECT
@@ -189,9 +218,9 @@ class HistoryChoiceDialog final : public QDialog
 public:
     enum class Mode { Add, Change };
     HistoryChoiceDialog(Mode mode, const QList<QPair<quint32, QString>> &employees, quint32 employee,
-                        const QDate &day, qint64 timeStepMs, QWidget *parent = nullptr);
+                        const HistoryPeriod &period, qint64 timeStepMs, QWidget *parent = nullptr);
     quint32 employee() const { return m_employee; }
-    QDate day() const { return m_day; }
+    HistoryPeriod period() const { return m_period; }
     qint64 timeStepMs() const { return m_timeStepMs; }
 
 protected:
@@ -210,11 +239,25 @@ private:
     QRect nextRect() const;
     QString employeeName() const;
     void showMenu(int row);
+    bool isCustom() const { return m_kind == 4; }
+    QString recentType() const;
+    // TimeStepComboBox.targetRange / updateModel(): the steps that fit the
+    // chosen range, the current one moved to the closest of them.
+    qint64 targetRangeMs() const;
+    QList<qint64> stepsForRange() const;
+    void updateTimeSteps();
+    void updateCustomFields();
 
     QString m_title;
     QList<QPair<quint32, QString>> m_employees;
     quint32 m_employee = 0;
-    QDate m_day;
+    HistoryPeriod m_period;
+    // TimeRangeReport: combo index (Day, Week, Month, Quarter, Arbitrary
+    // period) and periodMultiplierPerRange.
+    int m_kind = 0;
+    int m_multipliers[5] = {1, 1, 1, 1, 1};
+    QDateTimeEdit *m_customBeginEdit = nullptr;
+    QDateTimeEdit *m_customEndEdit = nullptr;
     qint64 m_timeStepMs = 0;
     QPoint m_hover;
 };
@@ -316,50 +359,100 @@ private:
     qint64 m_stepMs = 5 * 60 * 1000;
 };
 
-// history/Filters.qml -> utils/Chart.qml with needPlayerLine=true, laid out
-// the way it is inside History's 186px chartsItem: ExtraHeaders labels
-// ("Activity"/"Efficiency") on the left, then over a Grid.qml backdrop the
-// HistoLine activity histogram (#7aa1e2) and the Line.qml productivity row
-// (equal-height stacked category bands per chart step), a double-line
-// separator, the (empty here) filters grid below, and the khaki
-// HistoryPlayerMarkerControl line across the whole chart.
+// One filter's violations row (ChartsModel.qml currentFilterValues entry:
+// Selector K_byFilter, source = filterId, RF_serieInSessionsCombinedSimple,
+// granula = chartTimeStep): FiltersLine label + Content DendroidLine.
+struct HistoryChartFilterRow {
+    QString filterId;
+    QString name;
+    QColor color;
+    HistoryChartResult values;
+};
+
+// utils/Chart.qml as both of its users lay it out: History's Filters.qml
+// (needPlayerLine: extra area 40% / separator1 10px / filters 60% of the
+// 186px chartsItem) and the Violations tab's Filters.qml (extra area
+// ExtraContent.requestedHeigth, filters below it). ExtraHeaders labels on
+// the left; over Grid.qml (one line per chart time step) the
+// MultiSessionActivity/HistoLine Activity histogram (#7aa1e2) and the
+// DendroidLine/Line.qml "colors" Efficiency row; the FiltersLine + Content
+// rows per filter below; the khaki HistoryPlayerMarkerControl line in
+// History. Every serie is placed with its own TimeToChartConverter
+// (start/stop/granula of the reply it came in).
 class HistoryChartWidget final : public QWidget
 {
     Q_OBJECT
 
 public:
     explicit HistoryChartWidget(QWidget *parent = nullptr);
+    // Chart.qml timeBegin / timeEnd / timeStep (the Grid's marks).
     void setRange(qint64 rangeStartMs, qint64 rangeEndMs);
-    // History's raw "Time step"; the chart's own step is derived from it the
-    // way HistoryTab.qml does (alingStep, at most 60 grid columns).
-    void setStepMs(qint64 stepMs);
-    // x (in this widget) where the grid starts -- History.qml's
-    // labelsAreaLeftMargin, i.e. the width of the button columns.
+    void setChartStepMs(qint64 stepMs);
+    // History's raw "Time step": the slider's marker width
+    // (HistoryPlayerMarkerControl's sliderMarkWidt).
+    void setMarkerStepMs(qint64 stepMs);
+    // x (in this widget) where the grid starts -- Chart.qml's
+    // labelsAreaLeftMargin.
     void setGridLeft(int x);
-    void setActivity(const QList<HistoryActivitySample> &samples);
-    void setEfficiency(const QList<HistoryAppSegment> &segments,
-                       const QHash<QString, QString> &categories);
+    void setActivity(const HistoryChartResult &result);
+    void setProductivity(const HistoryChartResult &result);
+    void setFilterRows(const QList<HistoryChartFilterRow> &rows);
+    void clearSeries();
     void setCurrentPositionMs(qint64 positionMs);
-    // Violations tab (trackerQuadratorActiveCell): the Chart isn't the fixed
-    // 186px History strip with a filters area below -- it fills the whole tab,
-    // with the grid full-height and only the Activity/Efficiency rows at top.
+    // Violations tab (trackerQuadratorActiveCell/Filters.qml): needPlayerLine
+    // false -- the extra area is ExtraContent.requestedHeigth tall and the
+    // filters area takes the rest of the tab; no player marker.
     void setFillMode(bool on);
 
+    // HistoryTab.qml: chartTimeStep = alingStep(rangeSeconds, stepSeconds, 60).
     static qint64 chartStepMs(qint64 rangeMs, qint64 userStepMs);
 
 protected:
     void paintEvent(QPaintEvent *event) override;
 
 private:
-    QList<HistoryActivitySample> m_samples;
-    QList<HistoryAppSegment> m_segments;
-    QHash<QString, QString> m_categories;
+    HistoryChartResult m_activity;
+    HistoryChartResult m_productivity;
+    QList<HistoryChartFilterRow> m_filterRows;
     qint64 m_rangeStart = 0;
     qint64 m_rangeEnd = 0;
-    qint64 m_stepMs = 5 * 60 * 1000;
+    qint64 m_chartStepMs = 5 * 60 * 1000;
+    qint64 m_markerStepMs = 5 * 60 * 1000;
     qint64 m_currentPositionMs = 0;
     int m_gridLeft = 0;
     bool m_fillMode = false;
+};
+
+// ChartsModel.qml's data side: the chartExtraValues Selectors --
+// K_activity at granula max(chartTimeStep / 5, 60s) and K_byProductivity at
+// chartTimeStep, both over [chartTimeBegin, chartTimeEnd) -- fed into a
+// HistoryChartWidget. Re-queries whenever the employee or the time
+// parameters change, and recalls the productivity serie 2.5s after a
+// categorization change (the Solver dirtyNotifier -> forcedRefreshShoter).
+class HistoryChartsModel final : public QObject
+{
+    Q_OBJECT
+
+public:
+    HistoryChartsModel(ViewerConnection &connection, HistoryChartWidget *chart,
+                       QObject *parent = nullptr);
+    void setQuery(quint32 streamId, qint64 beginMs, qint64 endMs, qint64 chartStepMs);
+    void clear();
+    void applicationsChanged();
+
+private:
+    void request(const QString &kind);
+    void onSeries(quint32 streamId, const HistoryChartResult &result);
+
+    ViewerConnection &m_connection;
+    HistoryChartWidget *m_chart = nullptr;
+    QTimer *m_recallTimer = nullptr;
+    quint32 m_streamId = 0;
+    qint64 m_beginMs = 0;
+    qint64 m_endMs = 0;
+    qint64 m_chartStepMs = 0;
+    QHash<QString, QString> m_pendingTags; // kind -> tag of the latest request
+    quint64 m_nextTag = 0;
 };
 
 // The full embedded History page (replaces what used to be a separate
@@ -390,16 +483,13 @@ public:
     void activate();
     // filters/GoToHistoryDialog.qml equivalent, called from
     // DeviceDetailView's "Go to History" button (via MainWindow): switches
-    // to this device and jumps straight to the given day ("yyyyMMdd",
-    // defaults to today) once its day list arrives.
+    // to this device and shows the given day ("yyyyMMdd", defaults to
+    // today) as a recent Day period.
     void openForDevice(quint32 deviceKey, const QString &day = QString());
 
 private slots:
-    void onDaysReceived(quint32 streamId, const QStringList &days);
     void onFramesReceived(quint32 streamId, const QString &day, const QList<qint64> &timestamps);
     void onFrameReceived(quint32 streamId, qint64 timestampMs, const QImage &image);
-    void onActivityReceived(quint32 streamId, const QString &day,
-                            const QList<HistoryActivitySample> &samples);
     void onAppSegmentsReceived(quint32 streamId, const QString &day,
                                const QList<HistoryAppSegment> &segments);
     void onWebVisitsReceived(quint32 streamId, const QString &day,
@@ -411,7 +501,6 @@ private slots:
                               const QList<HistoryKeystrokeEntry> &entries);
     void onHistoryError(quint32 streamId, const QString &message);
 
-    void onDayChanged(int index);
     void onTimelineMoved(int index);
     void onPlayClicked();
     void onPlaybackTick();
@@ -438,24 +527,26 @@ private:
     void switchDevice(quint32 deviceKey);
     void rebuildMonitorStrip();
     void requestFrameAt(int index);
-    void refreshDayDependentData();
+    // HistoryTab.updateHistoryPlayer(): everything for [start, stop) of
+    // the current period -- frames, programs/sites, keystrokes and the
+    // ChartsModel (chartTimeStep = alingStep(range, stepSeconds, 60)).
+    void loadPeriod();
+    qint64 periodStartMs() const { return m_period.begin().toMSecsSinceEpoch(); }
+    qint64 periodStopMs() const { return m_period.end().toMSecsSinceEpoch(); }
     void updateTextLogHighlight(qint64 timestampMs);
     void updateKeystream(qint64 timestampMs);
     void updateInfoPanel();
     // Global categories with this employee's own overrides applied.
     QHash<QString, QString> effectiveCategories() const;
-    // The day the current tab shows ("yyyyMMdd"), shown even when nothing
-    // was recorded that day ("No information for selected period").
-    void selectDay(const QString &day);
     void showNoData();
-    void jumpTo(quint32 deviceKey, const QString &day);
+    void jumpTo(quint32 deviceKey, const HistoryPeriod &period);
 
     // HistoryPanel.qml / ViewerControls/Tabs.qml: one tab per history
-    // watching (employee + day + Time step), "+" opens "Add history
+    // watching (employee + period + Time step), "+" opens "Add history
     // watching", closing asks for confirmation.
     struct HistoryTab {
         quint32 deviceKey = 0;
-        QString day;
+        HistoryPeriod period;
         qint64 timeStepMs = 5 * 60 * 1000;
     };
     void addHistoryTab(const HistoryTab &tab);
@@ -468,7 +559,9 @@ private:
     QList<HistoryTab> m_historyTabs;
     QTabBar *m_historyTabBar = nullptr;
     int m_currentTab = -1;
-    QString m_currentDay;
+    // The current tab's period; replies are matched by its range key.
+    HistoryPeriod m_period;
+    QString m_rangeKey;
     void onHistoryFrameMissing(quint32 streamId);
     // History.qml's panelFull: clicking the video hides sliderAndMeta and
     // chartsItem so the video (and keylogger bar) take the whole page.
@@ -478,8 +571,6 @@ private:
     void positionOverlays();
 
     ViewerConnection &m_connection;
-
-    QComboBox *m_dayCombo = nullptr;
 
     QPushButton *m_toggleAppsButton = nullptr;
     QScrollArea *m_infoArea = nullptr;
@@ -530,6 +621,7 @@ private:
     QPushButton *m_violationToggleButton = nullptr;
     TimeAxisWidget *m_timeAxis = nullptr;
     HistoryChartWidget *m_chart = nullptr;
+    HistoryChartsModel *m_chartsModel = nullptr;
     // sliderAndMeta's button columns; its width is History.qml's
     // widthActionButtons, which also decides where the chart grid starts.
     QWidget *m_leftColumn = nullptr;
@@ -537,7 +629,6 @@ private:
 
     QTimer *m_playbackTimer = nullptr;
 
-    void refreshEfficiencyBar();
     void setPlaying(bool playing);
     void updateViolationToggleText();
 
@@ -545,8 +636,6 @@ private:
     QHash<quint32, QList<quint32>> m_deviceMonitorStreams; // deviceKey -> its monitor streamIds
     QHash<quint32, QString> m_monitorNames; // streamId -> its own display name
     quint32 m_currentDeviceKey = 0;
-    // Days with history for the current employee (m_dayCombo's items).
-    QStringList m_allDays;
     // "Time step" (Change settings dialog) -- see applyTimeStep.
     qint64 m_timeStepMs = 5 * 60 * 1000;
 
@@ -555,7 +644,6 @@ private:
     QHash<QString, QString> m_employeeCategories;
     QList<HistoryAppSegment> m_webVisits;
     QList<HistoryAppSegment> m_appSegments;
-    QList<HistoryActivitySample> m_activitySamples;
     QList<HistoryKeystrokeEntry> m_keystrokeEntries;
     bool m_activated = false;
 
