@@ -19,6 +19,8 @@ qt_add_executable(KikiHost
     src/sessioningest.h
     src/historyrecorder.cpp
     src/historyrecorder.h
+    src/vp8codec.cpp
+    src/vp8codec.h
     src/agentconnection.cpp
     src/agentconnection.h
     src/agentserver.cpp
@@ -33,6 +35,14 @@ target_link_libraries(KikiHost PRIVATE
     Qt6::Network
     Qt6::Sql
 )
+
+# Vendored libvpx (VP8) for the History video storage -- see
+# third_party/libvpx/README.md. Static lib built with this same MinGW GCC.
+set(LIBVPX_DIR "${CMAKE_CURRENT_SOURCE_DIR}/../third_party/libvpx")
+target_include_directories(KikiHost PRIVATE "${LIBVPX_DIR}/include")
+target_link_libraries(KikiHost PRIVATE "${LIBVPX_DIR}/lib/libvpx.a")
+find_package(Threads REQUIRED)
+target_link_libraries(KikiHost PRIVATE Threads::Threads)
 
 if(WIN32)
     target_link_libraries(KikiHost PRIVATE wtsapi32 userenv advapi32)

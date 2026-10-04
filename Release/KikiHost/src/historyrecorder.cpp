@@ -1,5 +1,8 @@
 #include "historyrecorder.h"
 
+#include "vp8codec.h"
+
+#include <QBuffer>
 #include <QDateTime>
 #include <QDir>
 #include <QFile>
@@ -11,6 +14,10 @@
 
 namespace {
 constexpr auto kConnectionName = "kiki_history";
+
+// Force a VP8 keyframe this often within a sequence, so seeking to a frame
+// only has to decode at most this many frames forward from a keyframe.
+constexpr int kVideoKeyInterval = 10;
 
 // More than this without any metadata push from a session (the subservice
 // pushes at least every 10s) and the session counts as not reporting: the
@@ -196,6 +203,27 @@ int ratingIndex(const QString &category)
 }
 }
 
+// The VP8 sequence currently being written for one monitor stream. The
+// encoder keeps libvpx's inter-frame state, so frames after the keyframe are
+// coded as deltas against their predecessor.
+struct HistoryRecorder::OpenVideoSequence {
+    qint64 sequenceId = -1;
+    std::unique_ptr<Vp8Encoder> encoder;
+    int width = 0;
+    int height = 0;
+    qint64 lastMs = 0;
+    int frameCount = 0;
+};
+
+// A warm decoder for reads: remembers which sequence it's in and the
+// timestamp it has decoded up to, so consecutive forward reads only feed the
+// new delta frames.
+struct HistoryRecorder::VideoDecodeCache {
+    qint64 sequenceId = -1;
+    qint64 lastMs = -1;
+    std::unique_ptr<Vp8Decoder> decoder;
+};
+
 HistoryRecorder::HistoryRecorder(QString historyDir, QObject *parent)
     : QObject(parent)
     , m_historyDir(std::move(historyDir))
@@ -204,11 +232,21 @@ HistoryRecorder::HistoryRecorder(QString historyDir, QObject *parent)
 
 HistoryRecorder::~HistoryRecorder()
 {
+    // Close open sequences and decoders (free the libvpx contexts) before DB.
+    m_openVideo.clear();
+    m_decodeCache.clear();
     if (m_database.isOpen()) {
         m_database.close();
     }
     m_database = QSqlDatabase();
     QSqlDatabase::removeDatabase(QString::fromLatin1(kConnectionName));
+}
+
+void HistoryRecorder::setHistoryFps(double framesPerSecond)
+{
+    if (framesPerSecond > 0.0) {
+        m_minIntervalMs = qMax(1, static_cast<int>(1000.0 / framesPerSecond + 0.5));
+    }
 }
 
 bool HistoryRecorder::start(QString *error)
@@ -251,6 +289,42 @@ bool HistoryRecorder::start(QString *error)
     }
     query.exec(QStringLiteral(
         "CREATE INDEX IF NOT EXISTS idx_frames_monitor_time ON frames(monitor_stream_id, timestamp_ms)"));
+
+    // History video, stored the way the original Kickidler node does
+    // (video_sequence / video_frame): a sequence is a continuous recording
+    // run for one monitor that opens with a VP8 keyframe, each later frame
+    // coded as a delta against the previous one; frames are BLOBs, not files
+    // (thousands of tiny delta frames as separate files would waste the FS).
+    // The legacy `frames` table (JPEG files on disk) is kept read-only so
+    // history recorded before this change still views.
+    query.exec(QStringLiteral(
+        "CREATE TABLE IF NOT EXISTS video_sequence ("
+        "  id INTEGER PRIMARY KEY AUTOINCREMENT,"
+        "  session_username TEXT NOT NULL,"
+        "  monitor_stream_id INTEGER NOT NULL,"
+        "  monitor_name TEXT NOT NULL,"
+        "  width INTEGER NOT NULL,"
+        "  height INTEGER NOT NULL,"
+        "  begin_ms INTEGER NOT NULL,"
+        "  end_ms INTEGER NOT NULL"
+        ")"));
+    query.exec(QStringLiteral(
+        "CREATE INDEX IF NOT EXISTS idx_video_sequence_monitor_time "
+        "ON video_sequence(monitor_stream_id, begin_ms)"));
+    query.exec(QStringLiteral(
+        "CREATE TABLE IF NOT EXISTS video_frame ("
+        "  id INTEGER PRIMARY KEY AUTOINCREMENT,"
+        "  sequence_id INTEGER NOT NULL,"
+        "  monitor_stream_id INTEGER NOT NULL,"  // denormalized for range queries
+        "  timestamp_ms INTEGER NOT NULL,"
+        "  is_key INTEGER NOT NULL,"
+        "  data BLOB NOT NULL"
+        ")"));
+    query.exec(QStringLiteral(
+        "CREATE INDEX IF NOT EXISTS idx_video_frame_monitor_time "
+        "ON video_frame(monitor_stream_id, timestamp_ms)"));
+    query.exec(QStringLiteral(
+        "CREATE INDEX IF NOT EXISTS idx_video_frame_seq ON video_frame(sequence_id, timestamp_ms)"));
 
     // Input activity is a property of the whole session (the employee), not
     // of a single monitor -- the real Kickidler node stores it in
@@ -372,8 +446,8 @@ bool HistoryRecorder::start(QString *error)
         "  PRIMARY KEY (username, monitor_name)"
         ")"));
 
-    emit logMessage(QStringLiteral("Istoric activat, rata 1 cadru/%1s per monitor, in %2")
-                        .arg(m_minIntervalMs / 1000)
+    emit logMessage(QStringLiteral("Istoric activat (VP8), ~%1 cadre/s per monitor, in %2")
+                        .arg(1000.0 / m_minIntervalMs, 0, 'g', 3)
                         .arg(m_historyDir));
     return true;
 }
@@ -435,48 +509,90 @@ void HistoryRecorder::recordFrame(quint32 sessionId, const QString &sessionUsern
     if (image.isNull()) {
         return;
     }
+    Q_UNUSED(sessionId);
     const qint64 now = QDateTime::currentMSecsSinceEpoch();
     qint64 &lastRecorded = m_lastRecordedMs[monitorStreamId];
     if (lastRecorded != 0 && now - lastRecorded < m_minIntervalMs) {
         return;
     }
+
+    const int w = image.width() & ~1; // VP8 needs even dimensions
+    const int h = image.height() & ~1;
+    if (w <= 0 || h <= 0) {
+        return;
+    }
+    // Start a new sequence when nothing is open, the resolution changed, or
+    // there's been a long gap (which, since DXGI only emits on change, is
+    // normal) -- a new sequence just means the next frame is a keyframe.
+    const qint64 seqGapMs = qMax<qint64>(static_cast<qint64>(m_minIntervalMs) * 5, 60 * 1000);
+    std::unique_ptr<OpenVideoSequence> &slot = m_openVideo[monitorStreamId];
+    OpenVideoSequence *seq = slot.get();
+    const bool needNew = !seq || !seq->encoder || !seq->encoder->isOpen() || seq->width != w
+                         || seq->height != h || (now - seq->lastMs) > seqGapMs;
+    if (needNew) {
+        QSqlQuery insertSeq(m_database);
+        insertSeq.prepare(QStringLiteral(
+            "INSERT INTO video_sequence (session_username, monitor_stream_id, monitor_name, "
+            "width, height, begin_ms, end_ms) VALUES (?, ?, ?, ?, ?, ?, ?)"));
+        insertSeq.addBindValue(sessionUsername);
+        insertSeq.addBindValue(monitorStreamId);
+        insertSeq.addBindValue(monitorName);
+        insertSeq.addBindValue(w);
+        insertSeq.addBindValue(h);
+        insertSeq.addBindValue(now);
+        insertSeq.addBindValue(now);
+        if (!insertSeq.exec()) {
+            emit logMessage(QStringLiteral("Nu am putut deschide secventa video: %1")
+                                .arg(insertSeq.lastError().text()));
+            return;
+        }
+        auto fresh = std::make_unique<OpenVideoSequence>();
+        fresh->sequenceId = insertSeq.lastInsertId().toLongLong();
+        fresh->encoder = std::make_unique<Vp8Encoder>();
+        if (!fresh->encoder->begin(w, h)) {
+            emit logMessage(QStringLiteral("Nu am putut porni encoderul VP8 (%1x%2).").arg(w).arg(h));
+            return;
+        }
+        fresh->width = w;
+        fresh->height = h;
+        fresh->frameCount = 0;
+        slot = std::move(fresh);
+        seq = slot.get();
+    }
+
+    // The sequence's first frame, and then one every kVideoKeyInterval, is a
+    // keyframe -- bounds how far a seek must decode forward.
+    const bool forceKey = (seq->frameCount % kVideoKeyInterval) == 0;
+    bool isKey = false;
+    const QByteArray data = seq->encoder->encode(image, forceKey, &isKey);
+    if (data.isEmpty()) {
+        emit logMessage(QStringLiteral("Encodarea VP8 a esuat pentru monitorul %1.").arg(monitorStreamId));
+        return;
+    }
+
+    QSqlQuery insertFrame(m_database);
+    insertFrame.prepare(QStringLiteral(
+        "INSERT INTO video_frame (sequence_id, monitor_stream_id, timestamp_ms, is_key, data) "
+        "VALUES (?, ?, ?, ?, ?)"));
+    insertFrame.addBindValue(seq->sequenceId);
+    insertFrame.addBindValue(monitorStreamId);
+    insertFrame.addBindValue(now);
+    insertFrame.addBindValue(isKey ? 1 : 0);
+    insertFrame.addBindValue(data);
+    if (!insertFrame.exec()) {
+        emit logMessage(QStringLiteral("Nu am putut scrie cadrul video: %1")
+                            .arg(insertFrame.lastError().text()));
+        return;
+    }
+    QSqlQuery updateSeq(m_database);
+    updateSeq.prepare(QStringLiteral("UPDATE video_sequence SET end_ms = ? WHERE id = ?"));
+    updateSeq.addBindValue(now);
+    updateSeq.addBindValue(seq->sequenceId);
+    updateSeq.exec();
+
     lastRecorded = now;
-
-    const QDateTime timestamp = QDateTime::fromMSecsSinceEpoch(now);
-    const QString relativeDir = QStringLiteral("frames/%1/%2/%3")
-                                     .arg(sessionId)
-                                     .arg(monitorStreamId)
-                                     .arg(timestamp.toString(QStringLiteral("yyyyMMdd")));
-    const QString absoluteDir = QDir(m_historyDir).filePath(relativeDir);
-    if (!QDir().mkpath(absoluteDir)) {
-        emit logMessage(QStringLiteral("Nu pot crea directorul de istoric %1").arg(absoluteDir));
-        return;
-    }
-    const QString fileName = timestamp.toString(QStringLiteral("HHmmss_zzz")) + QStringLiteral(".jpg");
-    const QString relativePath = relativeDir + QLatin1Char('/') + fileName;
-    const QString absolutePath = QDir(absoluteDir).filePath(fileName);
-
-    if (!image.save(absolutePath, "JPEG", 75)) {
-        emit logMessage(QStringLiteral("Nu am putut salva captura de istoric la %1").arg(absolutePath));
-        return;
-    }
-
-    QSqlQuery query(m_database);
-    query.prepare(QStringLiteral(
-        "INSERT INTO frames (session_id, session_username, monitor_stream_id, monitor_name, "
-        "timestamp_ms, file_path, width, height) VALUES (?, ?, ?, ?, ?, ?, ?, ?)"));
-    query.addBindValue(sessionId);
-    query.addBindValue(sessionUsername);
-    query.addBindValue(monitorStreamId);
-    query.addBindValue(monitorName);
-    query.addBindValue(now);
-    query.addBindValue(relativePath);
-    query.addBindValue(image.width());
-    query.addBindValue(image.height());
-    if (!query.exec()) {
-        emit logMessage(QStringLiteral("Nu am putut scrie randul de istoric: %1")
-                            .arg(query.lastError().text()));
-    }
+    seq->lastMs = now;
+    ++seq->frameCount;
 }
 
 QStringList HistoryRecorder::listDays(quint32 monitorStreamId) const
@@ -487,10 +603,19 @@ QStringList HistoryRecorder::listDays(quint32 monitorStreamId) const
     // 'localtime' matches how the day folders themselves were named:
     // recordFrame() derives them from QDateTime::fromMSecsSinceEpoch(),
     // which is local time by default.
+    // Union of the VP8 video frames and the legacy JPEG frames table, so a
+    // database that has both (recorded before and after the VP8 switch) lists
+    // every day.
     QSqlQuery query(m_database);
     query.prepare(QStringLiteral(
-        "SELECT DISTINCT strftime('%Y%m%d', timestamp_ms / 1000, 'unixepoch', 'localtime') AS day "
-        "FROM frames WHERE monitor_stream_id = ? ORDER BY day DESC"));
+        "SELECT DISTINCT day FROM ("
+        "  SELECT strftime('%Y%m%d', timestamp_ms / 1000, 'unixepoch', 'localtime') AS day "
+        "  FROM video_frame WHERE monitor_stream_id = ?"
+        "  UNION "
+        "  SELECT strftime('%Y%m%d', timestamp_ms / 1000, 'unixepoch', 'localtime') AS day "
+        "  FROM frames WHERE monitor_stream_id = ?"
+        ") ORDER BY day DESC"));
+    query.addBindValue(monitorStreamId);
     query.addBindValue(monitorStreamId);
     QStringList days;
     if (query.exec()) {
@@ -520,8 +645,16 @@ QList<qint64> HistoryRecorder::listFrameTimestamps(quint32 monitorStreamId, qint
     }
     QSqlQuery query(m_database);
     query.prepare(QStringLiteral(
-        "SELECT timestamp_ms FROM frames WHERE monitor_stream_id = ? "
-        "AND timestamp_ms >= ? AND timestamp_ms < ? ORDER BY timestamp_ms ASC"));
+        "SELECT timestamp_ms FROM ("
+        "  SELECT timestamp_ms FROM video_frame WHERE monitor_stream_id = ? "
+        "    AND timestamp_ms >= ? AND timestamp_ms < ?"
+        "  UNION "
+        "  SELECT timestamp_ms FROM frames WHERE monitor_stream_id = ? "
+        "    AND timestamp_ms >= ? AND timestamp_ms < ?"
+        ") ORDER BY timestamp_ms ASC"));
+    query.addBindValue(monitorStreamId);
+    query.addBindValue(startMs);
+    query.addBindValue(stopMs);
     query.addBindValue(monitorStreamId);
     query.addBindValue(startMs);
     query.addBindValue(stopMs);
@@ -534,7 +667,7 @@ QList<qint64> HistoryRecorder::listFrameTimestamps(quint32 monitorStreamId, qint
     return timestamps;
 }
 
-QByteArray HistoryRecorder::readFrame(quint32 monitorStreamId, qint64 timestampMs) const
+QByteArray HistoryRecorder::readFrame(quint32 monitorStreamId, qint64 timestampMs)
 {
     if (!m_database.isOpen()) {
         return {};
@@ -547,6 +680,101 @@ QByteArray HistoryRecorder::readFrame(quint32 monitorStreamId, qint64 timestampM
     // screen that wasn't being recorded then stays empty rather than
     // showing something from hours away.
     constexpr qint64 kMaxDistanceMs = 10 * 60 * 1000;
+
+    // VP8 first: find the nearest stored frame, then decode its sequence from
+    // the last keyframe at/before it, and hand the viewer a plain JPEG -- so
+    // the wire protocol and the viewer stay unchanged.
+    qint64 targetMs = -1;
+    qint64 sequenceId = -1;
+    QSqlQuery frame(m_database);
+    frame.prepare(QStringLiteral(
+        "SELECT timestamp_ms, sequence_id FROM video_frame WHERE monitor_stream_id = ? "
+        "AND timestamp_ms <= ? AND timestamp_ms >= ? ORDER BY timestamp_ms DESC LIMIT 1"));
+    frame.addBindValue(monitorStreamId);
+    frame.addBindValue(timestampMs);
+    frame.addBindValue(timestampMs - kMaxDistanceMs);
+    if (frame.exec() && frame.next()) {
+        targetMs = frame.value(0).toLongLong();
+        sequenceId = frame.value(1).toLongLong();
+    } else {
+        QSqlQuery after(m_database);
+        after.prepare(QStringLiteral(
+            "SELECT timestamp_ms, sequence_id FROM video_frame WHERE monitor_stream_id = ? "
+            "AND timestamp_ms > ? AND timestamp_ms <= ? ORDER BY timestamp_ms ASC LIMIT 1"));
+        after.addBindValue(monitorStreamId);
+        after.addBindValue(timestampMs);
+        after.addBindValue(timestampMs + kMaxDistanceMs);
+        if (after.exec() && after.next()) {
+            targetMs = after.value(0).toLongLong();
+            sequenceId = after.value(1).toLongLong();
+        }
+    }
+
+    if (sequenceId >= 0) {
+        std::unique_ptr<VideoDecodeCache> &cachePtr = m_decodeCache[monitorStreamId];
+        if (!cachePtr) {
+            cachePtr = std::make_unique<VideoDecodeCache>();
+        }
+        VideoDecodeCache &cache = *cachePtr;
+
+        // Fast path: same sequence, stepping forward -- feed only the frames
+        // after what the warm decoder has already seen.
+        qint64 fromMs = 0;
+        const bool warm = cache.decoder && cache.decoder->isOpen()
+                          && cache.sequenceId == sequenceId && targetMs > cache.lastMs;
+        if (warm) {
+            fromMs = cache.lastMs; // exclusive lower bound below
+        } else {
+            // Cold path: (re)start from the keyframe at/before the target.
+            qint64 keyMs = targetMs;
+            QSqlQuery key(m_database);
+            key.prepare(QStringLiteral(
+                "SELECT MAX(timestamp_ms) FROM video_frame WHERE sequence_id = ? AND is_key = 1 "
+                "AND timestamp_ms <= ?"));
+            key.addBindValue(sequenceId);
+            key.addBindValue(targetMs);
+            if (key.exec() && key.next() && !key.value(0).isNull()) {
+                keyMs = key.value(0).toLongLong();
+            }
+            if (!cache.decoder) {
+                cache.decoder = std::make_unique<Vp8Decoder>();
+            }
+            if (!cache.decoder->begin()) {
+                return {};
+            }
+            cache.sequenceId = sequenceId;
+            fromMs = keyMs - 1; // include the keyframe (>= keyMs)
+        }
+
+        QSqlQuery run(m_database);
+        run.prepare(QStringLiteral(
+            "SELECT timestamp_ms, data FROM video_frame WHERE sequence_id = ? AND timestamp_ms > ? "
+            "AND timestamp_ms <= ? ORDER BY timestamp_ms ASC"));
+        run.addBindValue(sequenceId);
+        run.addBindValue(fromMs);
+        run.addBindValue(targetMs);
+        QImage decoded;
+        if (run.exec()) {
+            while (run.next()) {
+                decoded = cache.decoder->decode(run.value(1).toByteArray());
+                cache.lastMs = run.value(0).toLongLong();
+            }
+        }
+        if (!decoded.isNull()) {
+            QByteArray jpeg;
+            QBuffer buffer(&jpeg);
+            buffer.open(QIODevice::WriteOnly);
+            if (decoded.save(&buffer, "JPEG", 80)) {
+                return jpeg;
+            }
+        }
+        // Decode hiccup: drop the warm state so the next read restarts clean.
+        cache.sequenceId = -1;
+        cache.lastMs = -1;
+        return {};
+    }
+
+    // Fallback: legacy JPEG frames recorded before the VP8 switch.
     QString relativePath;
     QSqlQuery before(m_database);
     before.prepare(QStringLiteral(

@@ -290,16 +290,20 @@ private:
 };
 
 // history/SliderBar.qml: the 4px scrub bar drawn from the original
-// sliderBar/*.png assets (bg_none where nothing was recorded,
-// bg_loaded_cropped where frames exist) plus the 19x19 pick handle.
-// Selection is by index into the captured-frame timestamps; on-screen
-// position is time-of-day across [rangeStart, rangeEnd].
+// sliderBar/*.png assets, three layers like the original -- bg_none where
+// nothing was recorded, bg_online_cropped where a recording exists but its
+// frame hasn't been fetched yet ("gray, not loaded"), bg_loaded_cropped on
+// top where the frame has actually been downloaded this view -- plus the
+// 19x19 pick handle. Selection is by index into the captured-frame
+// timestamps; on-screen position is time-of-day across [rangeStart, rangeEnd].
 class TimelineWidget final : public QWidget
 {
     Q_OBJECT
 
 public:
     explicit TimelineWidget(QWidget *parent = nullptr);
+    // Resets the "loaded" overlay: a freshly opened day shows every recorded
+    // range as gray-online until its frames are fetched.
     void setTimestamps(const QList<qint64> &timestamps);
     void setRange(qint64 rangeStartMs, qint64 rangeEndMs);
     // Marker granularity (History's "Time step") -- SliderBar.qml widens
@@ -307,6 +311,12 @@ public:
     // frames may be while still counting as one continuous recorded range.
     void setStepMs(qint64 stepMs);
     void setCurrentIndex(int index); // does not emit indexSelected
+    // Flips the whole recorded range from gray-online to loaded (blue). In
+    // this on-demand viewer the day becomes fully seekable at once (any
+    // position serves a frame instantly), so -- unlike the original's
+    // progressive per-frame download -- it's all-or-nothing: gray while the
+    // day loads, blue once the first frame is ready.
+    void setLoaded(bool loaded);
     int currentIndex() const { return m_currentIndex; }
     int count() const { return m_timestamps.size(); }
 
@@ -325,8 +335,11 @@ private:
     void seekToX(int x);
     int xForTime(qint64 timestampMs) const;
     QRect pickRect() const;
+    // Draws runs of markers from `stamps` with the given border image.
+    void drawRuns(QPainter &painter, const QList<qint64> &stamps, const QPixmap &image);
 
     QList<qint64> m_timestamps;
+    bool m_loaded = false; // whole recorded range downloaded (blue) vs online (gray)
     int m_currentIndex = -1;
     qint64 m_rangeStart = 0;
     qint64 m_rangeEnd = 0;
@@ -527,6 +540,15 @@ private:
     void switchDevice(quint32 deviceKey);
     void rebuildMonitorStrip();
     void requestFrameAt(int index);
+    // Holding "next"/playing faster than the host can decode would otherwise
+    // pile up getFrame requests and then flush in a burst. Keep at most one
+    // request in flight: the marker/timeline move immediately, and the video
+    // catches up to the latest requested index instead of replaying every
+    // intermediate frame.
+    void dispatchFrameRequest();
+    int m_desiredFrameIndex = -1;
+    int m_inFlightFrameIndex = -1;
+    bool m_frameRequestInFlight = false;
     // HistoryTab.updateHistoryPlayer(): everything for [start, stop) of
     // the current period -- frames, programs/sites, keystrokes and the
     // ChartsModel (chartTimeStep = alingStep(range, stepSeconds, 60)).

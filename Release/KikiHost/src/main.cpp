@@ -39,6 +39,10 @@ struct HostSettings {
     QString keyPath;
     QString subServicePath;
     QString historyPath; // empty = history recording disabled
+    // Original's video_history_fps: how often a history frame is kept. Default
+    // 1 fps so the viewer's 1s Time step shows distinct frames (VP8 keeps it
+    // cheap). 0 keeps the built-in default.
+    double historyFps = 1.0;
 };
 
 QString quoteArg(const QString &value)
@@ -85,6 +89,7 @@ int runHostBody(const HostSettings &settings, int argc, char **argv)
                                    : QStringLiteral("necriptat, doar localhost")));
 
     HistoryRecorder historyRecorder(settings.historyPath);
+    historyRecorder.setHistoryFps(settings.historyFps);
     if (!settings.historyPath.isEmpty()) {
         QObject::connect(&historyRecorder, &HistoryRecorder::logMessage, &application,
                          [](const QString &message) { printLine(message); });
@@ -143,9 +148,13 @@ int main(int argc, char *argv[])
                           QStringLiteral("Cale catre KikiSubService.exe (implicit: langa acest exe)."),
                           QStringLiteral("path")});
         parser.addOption({QStringLiteral("history-path"),
-                          QStringLiteral("Director pentru istoric local (SQLite + capturi rare, "
-                                         "1 cadru/10s per monitor); omis = istoric dezactivat."),
+                          QStringLiteral("Director pentru istoric local (SQLite + video VP8); "
+                                         "omis = istoric dezactivat."),
                           QStringLiteral("path")});
+        parser.addOption({QStringLiteral("history-fps"),
+                          QStringLiteral("Cadre/secunda pastrate in istoric (ca video_history_fps "
+                                         "din original; implicit 1)."),
+                          QStringLiteral("fps"), QStringLiteral("1")});
         parser.addOption({QStringLiteral("install"),
                           QStringLiteral("Instaleaza serviciul Windows (necesita Administrator; "
                                          "combina cu --token/--port/--tls etc., salvate permanent).")});
@@ -163,6 +172,13 @@ int main(int argc, char *argv[])
         settings.keyPath = parser.value(QStringLiteral("key"));
         settings.subServicePath = parser.value(QStringLiteral("subservice-path"));
         settings.historyPath = parser.value(QStringLiteral("history-path"));
+        {
+            bool fpsOk = false;
+            const double fps = parser.value(QStringLiteral("history-fps")).toDouble(&fpsOk);
+            if (fpsOk && fps > 0.0) {
+                settings.historyFps = fps;
+            }
+        }
         if (settings.subServicePath.isEmpty()) {
             settings.subServicePath = QDir(QCoreApplication::applicationDirPath())
                                           .filePath(QStringLiteral("KikiSubService.exe"));
@@ -196,6 +212,7 @@ int main(int argc, char *argv[])
             }
             if (!settings.historyPath.isEmpty()) {
                 binPath += QStringLiteral(" --history-path=%1").arg(quoteArg(settings.historyPath));
+                binPath += QStringLiteral(" --history-fps=%1").arg(settings.historyFps);
             }
             QString error;
             if (!ServiceHost::installService(binPath, &error)) {

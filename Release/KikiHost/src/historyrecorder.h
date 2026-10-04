@@ -10,6 +10,9 @@
 #include <QString>
 #include <QStringList>
 
+#include <memory>
+#include <unordered_map>
+
 struct AppSegment {
     QString application;
     qint64 startMs = 0;
@@ -79,6 +82,14 @@ public:
     bool start(QString *error);
     bool isValid() const { return m_database.isOpen(); }
 
+    // How often a history frame is kept, as the original's video_history_fps
+    // (frames/second). Call before start(). The schema default there was
+    // 1/60 (1 frame/min), later 1 fps; we default to 1 fps so the viewer's
+    // finest Time step (1s) actually shows distinct frames. VP8 inter-frame
+    // coding keeps the cost of the higher rate small on a mostly-static
+    // screen (see vp8codec.h).
+    void setHistoryFps(double framesPerSecond);
+
     // The persistent stream id for one user's monitor, so the same screen
     // keeps the same id across grabber reconnects and service restarts (and
     // its history stays under one id). 0 if the database isn't open.
@@ -140,7 +151,9 @@ public:
     static QPair<qint64, qint64> dayBounds(const QString &day);
     QStringList listDays(quint32 monitorStreamId) const;
     QList<qint64> listFrameTimestamps(quint32 monitorStreamId, qint64 startMs, qint64 stopMs) const;
-    QByteArray readFrame(quint32 monitorStreamId, qint64 timestampMs) const;
+    // Non-const: keeps a warm VP8 decoder per monitor so stepping forward
+    // decodes one delta instead of replaying from the keyframe each call.
+    QByteArray readFrame(quint32 monitorStreamId, qint64 timestampMs);
     QList<ActivitySample> listActivity(quint32 monitorStreamId, qint64 startMs, qint64 stopMs) const;
     QList<AppSegment> listAppSegments(quint32 monitorStreamId, qint64 startMs, qint64 stopMs) const;
     // Totals are clipped to the range.
@@ -173,6 +186,12 @@ private:
         qint64 rowId = -1;
     };
 
+    // The VP8 sequence currently open for one monitor (see recordFrame /
+    // vp8codec.h). Defined in the .cpp so this header needn't pull in libvpx.
+    struct OpenVideoSequence;
+    // A warm VP8 decoder for reads, with the position it's decoded up to.
+    struct VideoDecodeCache;
+
     struct OpenRange {
         qint64 rowId = -1;
         qint64 beginMs = 0;
@@ -193,7 +212,12 @@ private:
     QString m_historyDir;
     QSqlDatabase m_database;
     QHash<quint32, qint64> m_lastRecordedMs;
-    int m_minIntervalMs = 10000;
+    // Min gap between kept frames; set from setHistoryFps (default 1 fps).
+    int m_minIntervalMs = 1000;
+    // One open VP8 sequence per monitor stream.
+    std::unordered_map<quint32, std::unique_ptr<OpenVideoSequence>> m_openVideo;
+    // One warm decode cache per monitor stream (read side).
+    std::unordered_map<quint32, std::unique_ptr<VideoDecodeCache>> m_decodeCache;
     QHash<quint64, OpenSegment> m_openSegments; // key: sessionId (one per session)
     QHash<quint64, OpenWebSegment> m_openWebSegments; // key: (sessionId << 32) | monitorStreamId
     QHash<QString, OpenRange> m_openOnline;   // key: session username
