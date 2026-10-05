@@ -19,6 +19,8 @@ qt_add_executable(KikiHost
     src/sessioningest.h
     src/historyrecorder.cpp
     src/historyrecorder.h
+    src/historyframereader.cpp
+    src/historyframereader.h
     src/vp8codec.cpp
     src/vp8codec.h
     src/agentconnection.cpp

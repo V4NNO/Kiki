@@ -31,6 +31,16 @@ struct HistoryAppUsage {
     QString title; // foreground window title (empty for web pages)
 };
 
+// One recorded run of video (video_sequence on the host), as listSegments
+// reports it -- the viewer plans which stretches to download from these.
+struct HistoryVideoSegmentInfo {
+    qint64 sequenceId = 0;
+    qint64 beginMs = 0;
+    qint64 endMs = 0;
+    int width = 0;
+    int height = 0;
+};
+
 struct HistoryKeystrokeEntry {
     qint64 timestampMs = 0;
     QString windowTitle;
@@ -80,7 +90,10 @@ public:
     // historyError.
     void requestHistoryDays(quint32 streamId);
     void requestHistoryFrames(quint32 streamId, const QString &day);
-    void requestHistoryFrame(quint32 streamId, qint64 timestampMs);
+    // requestId is echoed back on the reply (HistoryFrame's sequence field,
+    // or "requestId" in the error JSON), so the viewer can drop an answer to
+    // a position it has already left -- see HistoryView's generation/id.
+    void requestHistoryFrame(quint32 streamId, qint64 timestampMs, quint64 requestId = 0);
     void requestHistoryActivity(quint32 streamId, const QString &day);
     void requestHistoryAppSegments(quint32 streamId, const QString &day);
     void requestRunningApplications(quint32 streamId, const QString &day);
@@ -102,6 +115,15 @@ public:
     void requestHistoryAppSegments(quint32 streamId, qint64 startMs, qint64 stopMs);
     void requestWebVisits(quint32 streamId, qint64 startMs, qint64 stopMs);
     void requestKeystrokes(quint32 streamId, qint64 startMs, qint64 stopMs);
+    // The recorded video runs in the period, then one keyframe-aligned chunk
+    // of one of them -- the VP8 packets themselves, decoded in the viewer
+    // (see historysegmentstore.h).
+    void requestHistorySegments(quint32 streamId, qint64 startMs, qint64 stopMs);
+    // The employee's screens that recorded anything in the period -- what
+    // History shows, whether or not they are connected now.
+    void requestHistoryScreens(quint32 streamId, qint64 startMs, qint64 stopMs);
+    void requestHistorySegment(quint32 streamId, qint64 sequenceId, qint64 fromMs, qint64 toMs,
+                               quint64 requestId);
 
     // ChartsModel.qml's Selector (K_activity / K_byProductivity) for the
     // employee streamId belongs to; tag comes back in the reply.
@@ -140,10 +162,11 @@ signals:
 
     void historyDaysReceived(quint32 streamId, const QStringList &days);
     void historyFramesReceived(quint32 streamId, const QString &day, const QList<qint64> &timestamps);
-    void historyFrameReceived(quint32 streamId, qint64 timestampMs, const QImage &image);
+    void historyFrameReceived(quint32 streamId, qint64 timestampMs, const QImage &image,
+                              quint64 requestId);
     void historyError(quint32 streamId, const QString &message);
     // A getFrame request had no frame for that screen near that moment.
-    void historyFrameMissing(quint32 streamId);
+    void historyFrameMissing(quint32 streamId, quint64 requestId);
     void historyActivityReceived(quint32 streamId, const QString &day,
                                  const QList<HistoryActivitySample> &samples);
     void historyAppSegmentsReceived(quint32 streamId, const QString &day,
@@ -162,6 +185,15 @@ signals:
     void historyKeystrokesReceived(quint32 streamId, const QString &day,
                                    const QList<HistoryKeystrokeEntry> &entries);
     void historyChartSeriesReceived(quint32 streamId, const HistoryChartResult &result);
+    void historySegmentsReceived(quint32 streamId, const QString &day,
+                                 const QList<HistoryVideoSegmentInfo> &segments);
+    // (streamId, recorded monitor name) per screen, in stream id order.
+    void historyScreensReceived(quint32 streamId, const QString &day,
+                                const QList<QPair<quint32, QString>> &screens);
+    void historySegmentReceived(quint32 streamId, quint64 requestId,
+                                const ViewerProtocol::HistorySegmentPayload &segment);
+    // Nothing recorded for the stretch that was asked for.
+    void historySegmentMissing(quint32 streamId, quint64 requestId);
 
 private slots:
     void onSocketConnected();
@@ -193,6 +225,7 @@ private:
     void processDeltaFrame(const ViewerProtocol::Header &header, const QByteArray &payload);
     void processHistoryQuery(const ViewerProtocol::Header &header, const QByteArray &payload);
     void processHistoryFrame(const ViewerProtocol::Header &header, const QByteArray &payload);
+    void processHistorySegment(const ViewerProtocol::Header &header, const QByteArray &payload);
     void sendHistoryQuery(quint32 streamId, const QJsonObject &object);
     void failProtocol(const QString &message);
     bool isSafePlainTextTarget() const;

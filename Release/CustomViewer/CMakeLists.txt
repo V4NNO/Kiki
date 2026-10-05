@@ -21,6 +21,10 @@ qt_add_executable(KikiViewer WIN32
     src/devicedetailview.h
     src/historyview.cpp
     src/historyview.h
+    src/historysegmentstore.cpp
+    src/historysegmentstore.h
+    src/vp8decoder.cpp
+    src/vp8decoder.h
     src/viewerconnection.cpp
     src/viewerconnection.h
     src/frameprotocol.cpp
@@ -45,6 +49,15 @@ target_link_libraries(KikiViewer PRIVATE
     Qt6::Widgets
     Qt6::Network
 )
+
+# Vendored libvpx (VP8), the same static lib KikiHost encodes with. History
+# video arrives as VP8 runs and is decoded here, which is how the original
+# Kickidler viewer works too (viewer.exe carries libvpx's VP8 decoder).
+set(LIBVPX_DIR "${CMAKE_CURRENT_SOURCE_DIR}/../third_party/libvpx")
+target_include_directories(KikiViewer PRIVATE "${LIBVPX_DIR}/include")
+target_link_libraries(KikiViewer PRIVATE "${LIBVPX_DIR}/lib/libvpx.a")
+find_package(Threads REQUIRED)
+target_link_libraries(KikiViewer PRIVATE Threads::Threads)
 
 target_compile_definitions(KikiViewer PRIVATE
     QT_NO_CAST_FROM_ASCII

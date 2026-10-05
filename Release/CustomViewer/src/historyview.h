@@ -1,12 +1,17 @@
 #pragma once
 
+#include "historysegmentstore.h"
 #include "viewerconnection.h"
 
 #include <QDate>
 #include <QDateTime>
 #include <QDialog>
+#include <QElapsedTimer>
 #include <QHash>
 #include <QColor>
+#include <QList>
+#include <QPair>
+#include <QSet>
 #include <QWidget>
 
 class QComboBox;
@@ -290,38 +295,69 @@ private:
 };
 
 // history/SliderBar.qml: the 4px scrub bar drawn from the original
-// sliderBar/*.png assets, three layers like the original -- bg_none where
-// nothing was recorded, bg_online_cropped where a recording exists but its
-// frame hasn't been fetched yet ("gray, not loaded"), bg_loaded_cropped on
-// top where the frame has actually been downloaded this view -- plus the
-// 19x19 pick handle. Selection is by index into the captured-frame
-// timestamps; on-screen position is time-of-day across [rangeStart, rangeEnd].
+// sliderBar/*.png assets, with the same three layers and the same two
+// independent states the original keeps -- bg_none where nothing was
+// recorded, bg_online_cropped over `effectiveRanges` (a recording exists
+// here, but its frames have not been fetched), bg_loaded_cropped over
+// `loadedRanges` (frames actually downloaded and ready), plus the 19x19
+// pick handle.
+//
+// Everything is addressed in markers, exactly like the original: marker i is
+// the Time step long slice [rangeStart + i*step, rangeStart + (i+1)*step) of
+// the period, ranges are inclusive marker spans, and the handle sits on
+// marker boundaries -- not on raw captured-frame indices, which are
+// irregular and made the handle jump.
 class TimelineWidget final : public QWidget
 {
     Q_OBJECT
 
 public:
+    // One drawn stretch of the bar, in whole markers (inclusive) -- what
+    // SliderBar.qml's two Repeaters iterate over.
+    struct MarkerRange {
+        int start = 0;
+        int stop = 0;
+    };
+
     explicit TimelineWidget(QWidget *parent = nullptr);
-    // Resets the "loaded" overlay: a freshly opened day shows every recorded
-    // range as gray-online until its frames are fetched.
-    void setTimestamps(const QList<qint64> &timestamps);
+
     void setRange(qint64 rangeStartMs, qint64 rangeEndMs);
-    // Marker granularity (History's "Time step") -- SliderBar.qml widens
-    // every recorded range by one marker, and it decides how far apart two
-    // frames may be while still counting as one continuous recorded range.
+    // Marker granularity (History's "Time step").
     void setStepMs(qint64 stepMs);
-    void setCurrentIndex(int index); // does not emit indexSelected
-    // Flips the whole recorded range from gray-online to loaded (blue). In
-    // this on-demand viewer the day becomes fully seekable at once (any
-    // position serves a frame instantly), so -- unlike the original's
-    // progressive per-frame download -- it's all-or-nothing: gray while the
-    // day loads, blue once the first frame is ready.
-    void setLoaded(bool loaded);
-    int currentIndex() const { return m_currentIndex; }
-    int count() const { return m_timestamps.size(); }
+    // The period's recorded frame timestamps. Sorts once and precomputes the
+    // effective (gray) ranges; the loaded overlay is reset, so a freshly
+    // opened period shows every recorded stretch gray until frames arrive.
+    void setTimestamps(const QList<qint64> &timestamps);
+
+    // The loaded (blue) overlay, grown one marker at a time as frames are
+    // received and shown -- never the whole period at once.
+    void markLoaded(int marker);
+    // A whole downloaded stretch at once -- this is what actually fills the
+    // bar, a single seek's one marker being far too narrow to see.
+    void markLoadedRange(qint64 fromMs, qint64 toMs);
+    void clearLoaded();
+
+    void setCurrentMarker(int marker); // does not emit markerSelected
+    int currentMarker() const { return m_currentMarker; }
+    int markersAmount() const { return m_markersAmount; }
+    bool hasData() const { return !m_timestamps.isEmpty(); }
+
+    // HistoryTab.qml's isAllowedMarker(): is anything recorded at marker?
+    bool isAllowedMarker(int marker) const;
+    // setOnlineMarkerForRewind(): the recorded marker to land on when the
+    // target itself has nothing -- the next recorded range to the right
+    // (preferRight) or the previous one to the left, clamped at the ends.
+    int nearestAllowedMarker(int marker, bool preferRight) const;
+    // The captured frame that belongs to a marker (-1 if none at all):
+    // inside the marker's own slice when there is one, else the nearest.
+    qint64 timestampForMarker(int marker) const;
+    int markerForTimestamp(qint64 timestampMs) const;
+    // The last marker that has anything recorded (-1 when the period is
+    // empty) -- where a freshly opened period starts.
+    int lastAllowedMarker() const;
 
 signals:
-    void indexSelected(int index);
+    void markerSelected(int marker);
 
 protected:
     void paintEvent(QPaintEvent *event) override;
@@ -331,16 +367,22 @@ protected:
     void leaveEvent(QEvent *event) override;
 
 private:
-    int indexForX(int x) const;
+    double markWidth() const;
+    int markerForX(int x) const;
     void seekToX(int x);
-    int xForTime(qint64 timestampMs) const;
     QRect pickRect() const;
-    // Draws runs of markers from `stamps` with the given border image.
-    void drawRuns(QPainter &painter, const QList<qint64> &stamps, const QPixmap &image);
+    void rebuildRanges();
+    // Adds one marker to a sorted, non-overlapping range list, merging it
+    // with the neighbours it touches.
+    static void addMarker(QList<MarkerRange> &ranges, int marker);
+    static bool contains(const QList<MarkerRange> &ranges, int marker);
+    void drawRanges(QPainter &painter, const QList<MarkerRange> &ranges, const QPixmap &image);
 
-    QList<qint64> m_timestamps;
-    bool m_loaded = false; // whole recorded range downloaded (blue) vs online (gray)
-    int m_currentIndex = -1;
+    QList<qint64> m_timestamps;           // sorted once, in setTimestamps
+    QList<MarkerRange> m_effectiveRanges; // a recording exists (gray)
+    QList<MarkerRange> m_loadedRanges;    // downloaded and shown (blue)
+    int m_currentMarker = -1;
+    int m_markersAmount = 0;
     qint64 m_rangeStart = 0;
     qint64 m_rangeEnd = 0;
     qint64 m_stepMs = 5 * 60 * 1000;
@@ -502,7 +544,15 @@ public:
 
 private slots:
     void onFramesReceived(quint32 streamId, const QString &day, const QList<qint64> &timestamps);
-    void onFrameReceived(quint32 streamId, qint64 timestampMs, const QImage &image);
+    void onFrameReceived(quint32 streamId, qint64 timestampMs, const QImage &image,
+                         quint64 requestId);
+    void onSegmentsReceived(quint32 streamId, const QString &day,
+                            const QList<HistoryVideoSegmentInfo> &segments);
+    void onScreensReceived(quint32 streamId, const QString &day,
+                           const QList<QPair<quint32, QString>> &screens);
+    void onSegmentReceived(quint32 streamId, quint64 requestId,
+                           const ViewerProtocol::HistorySegmentPayload &segment);
+    void onSegmentMissing(quint32 streamId, quint64 requestId);
     void onAppSegmentsReceived(quint32 streamId, const QString &day,
                                const QList<HistoryAppSegment> &segments);
     void onWebVisitsReceived(quint32 streamId, const QString &day,
@@ -514,7 +564,7 @@ private slots:
                               const QList<HistoryKeystrokeEntry> &entries);
     void onHistoryError(quint32 streamId, const QString &message);
 
-    void onTimelineMoved(int index);
+    void onTimelineMoved(int marker);
     void onPlayClicked();
     void onPlaybackTick();
     void onKeylogTableClicked();
@@ -537,18 +587,117 @@ private:
     // record them once per monitor, so any one of the device's streams has
     // the full picture -- no merging across monitors needed.
     quint32 currentStreamId() const;
+    // The screens History shows for the current period: every screen of the
+    // employee that recorded something in it (listScreens), whether or not it
+    // is plugged in now -- the original's player block is per session and
+    // finds its screens in the data (viewer::history::player::Block has no
+    // screen property at all). Until listScreens answers, the connected ones.
+    QList<quint32> historyStreams() const;
+    QList<quint32> m_historyStreams;
+    // The anchor the current period's queries went out on. The rangeKey alone
+    // does not identify a period: two employees on the same day share it.
+    quint32 m_periodAnchor = 0;
+    // Each screen's recorded frame times; the slider is built from their
+    // union, so a stretch recorded on any one screen is reachable.
+    QHash<quint32, QList<qint64>> m_framesByStream;
+    void mergeFrameLists();
     void switchDevice(quint32 deviceKey);
     void rebuildMonitorStrip();
-    void requestFrameAt(int index);
-    // Holding "next"/playing faster than the host can decode would otherwise
+    // Moves the player to one marker of the Time step grid: the handle, the
+    // moment, the keystream, the running-apps panel and the chart marker all
+    // follow immediately; only the picture is fetched (or served from the
+    // cache below).
+    void requestFrameAtMarker(int marker);
+    // The heavy part of a move: the moment, the side panels and decoding
+    // every screen. A drag fires a markerSelected per mouse move, far faster
+    // than three 1920x1200 screens decode, so the moves used to queue up
+    // behind each other -- the lag. Now the handle moves at once and this runs
+    // once per event-loop pass, for the latest position only.
+    void applyMarker(int marker);
+    QTimer *m_applyTimer = nullptr;
+    int m_pendingApplyMarker = -1;
+    // Holding "next"/dragging faster than the host can decode would otherwise
     // pile up getFrame requests and then flush in a burst. Keep at most one
-    // request in flight: the marker/timeline move immediately, and the video
-    // catches up to the latest requested index instead of replaying every
-    // intermediate frame.
+    // round in flight: the timeline moves immediately, and the video catches
+    // up to the latest requested marker instead of replaying every
+    // intermediate one.
     void dispatchFrameRequest();
-    int m_desiredFrameIndex = -1;
-    int m_inFlightFrameIndex = -1;
+    // (generation << 32) | counter. The generation changes whenever the
+    // period or the employee does, so an answer prepared for the previous
+    // interval is recognisable and dropped instead of overwriting what is on
+    // screen now.
+    quint64 allocateRequestId();
+    bool isCurrentGeneration(quint64 requestId) const
+    {
+        return quint32(requestId >> 32) == m_frameGeneration;
+    }
+
+    // Frames already downloaded this view, keyed by (screen, the timestamp
+    // the host served). Seeking back to a position that is in here shows it
+    // immediately and never asks the host again; it is also what the blue
+    // "loaded" overlay is drawn from.
+    QImage cachedFrame(quint32 streamId, qint64 timestampMs) const;
+    void cacheFrame(quint32 streamId, qint64 timestampMs, const QImage &image);
+    void clearFrameCache();
+    // Re-paints the loaded overlay from the cache -- used after the marker
+    // grid changes (a new Time step re-numbers every marker).
+    void refreshLoadedOverlay();
+    void noteFrameShown(qint64 timestampMs);
+
+    int m_desiredMarker = -1;
+    int m_inFlightMarker = -1;
+    // Monotonic seek counter. Every answer carries the ordinal of the seek
+    // that asked for it, and is shown when it is at least as new as what is
+    // on screen -- so frames the user scrubs *through* are displayed as they
+    // arrive (not only the one they stop on), while a late answer for a
+    // position already overtaken can never overwrite a newer picture.
+    quint64 m_seekOrdinal = 0;
+    quint64 m_inFlightOrdinal = 0;
+    quint64 m_displayedOrdinal = 0;
+    quint64 m_inFlightRequestId = 0;
+    QSet<quint32> m_inFlightStreams;
     bool m_frameRequestInFlight = false;
+    quint32 m_frameGeneration = 1;
+    quint32 m_frameSequence = 0;
+    // Instrumentation: cursor move -> request sent -> first answer -> shown.
+    QElapsedTimer m_seekTimer;
+    // A screen whose answer never arrives (a dropped connection, a host that
+    // does not echo request ids) must not wedge seeking for good.
+    QTimer *m_frameWatchdog = nullptr;
+    void releaseFrameSlot();
+
+    // The downloaded VP8 runs, decoded locally -- the primary source for
+    // every position (see historysegmentstore.h). The JPEG cache below is
+    // only the fallback for stretches not downloaded yet.
+    HistorySegmentStore m_segmentStore;
+    QHash<quint32, QList<HistoryVideoSegmentInfo>> m_videoSegments; // per screen
+    // Stretches the host answered "nothing recorded there" for, so the
+    // prefetch does not ask again in a loop.
+    QHash<quint32, QList<QPair<qint64, qint64>>> m_emptyRanges;
+    bool m_segmentRequestInFlight = false;
+    quint64 m_segmentRequestId = 0;
+    quint32 m_segmentStreamId = 0;
+    qint64 m_segmentFromMs = 0;
+    qint64 m_segmentToMs = 0;
+    // Pulls the period down run by run, nearest to the cursor first, so what
+    // the user is about to scrub through is in memory before they get there.
+    void dispatchPrefetch();
+    bool isEmptyRange(quint32 streamId, qint64 timestampMs) const;
+    // Shows every screen at this moment from what is already held; returns
+    // false when at least one screen still has to be fetched.
+    bool showFromStore(qint64 timestampMs);
+
+    QHash<QPair<quint32, qint64>, QImage> m_frameCache;
+    QList<QPair<quint32, qint64>> m_frameCacheOrder; // oldest first
+    qint64 m_frameCacheBytes = 0;
+    // The primary stream's downloaded moments, so the overlay survives a
+    // Time step change (which renumbers the markers).
+    QSet<qint64> m_loadedTimestamps;
+    // What the cache currently holds, so only a real change of interval or
+    // employee throws the downloaded frames away -- changing the Time step
+    // alone keeps them.
+    QString m_cacheRangeKey;
+    quint32 m_cacheDeviceKey = 0;
     // HistoryTab.updateHistoryPlayer(): everything for [start, stop) of
     // the current period -- frames, programs/sites, keystrokes and the
     // ChartsModel (chartTimeStep = alingStep(range, stepSeconds, 60)).
@@ -584,7 +733,7 @@ private:
     // The current tab's period; replies are matched by its range key.
     HistoryPeriod m_period;
     QString m_rangeKey;
-    void onHistoryFrameMissing(quint32 streamId);
+    void onHistoryFrameMissing(quint32 streamId, quint64 requestId);
     // History.qml's panelFull: clicking the video hides sliderAndMeta and
     // chartsItem so the video (and keylogger bar) take the whole page.
     void togglePanelFull();
@@ -679,6 +828,9 @@ private:
         quint32 streamId = 0;
         QList<qint64> pending;
         int total = 0;
+        // The id the current export frame was asked under -- export answers
+        // must survive the generation filter that drops stale seeks.
+        quint64 requestId = 0;
         // VideoSaverSelector.qml's quality picker -- we still write PNGs
         // (no video encoder here, see m_exportVideoButton), but quality
         // isn't purely cosmetic: it scales the exported image resolution

@@ -268,6 +268,9 @@ void ViewerConnection::processMessage(const ViewerProtocol::Header &header,
     case MessageType::HistoryQuery:
         processHistoryQuery(header, payload);
         break;
+    case MessageType::HistorySegment:
+        processHistorySegment(header, payload);
+        break;
     case MessageType::HistoryFrame:
         processHistoryFrame(header, payload);
         break;
@@ -405,10 +408,12 @@ void ViewerConnection::requestHistoryFrames(quint32 streamId, const QString &day
                                            {QStringLiteral("day"), day}});
 }
 
-void ViewerConnection::requestHistoryFrame(quint32 streamId, qint64 timestampMs)
+void ViewerConnection::requestHistoryFrame(quint32 streamId, qint64 timestampMs, quint64 requestId)
 {
-    sendHistoryQuery(streamId, QJsonObject{{QStringLiteral("action"), QStringLiteral("getFrame")},
-                                           {QStringLiteral("timestampMs"), timestampMs}});
+    sendHistoryQuery(streamId,
+                     QJsonObject{{QStringLiteral("action"), QStringLiteral("getFrame")},
+                                 {QStringLiteral("timestampMs"), timestampMs},
+                                 {QStringLiteral("requestId"), static_cast<double>(requestId)}});
 }
 
 void ViewerConnection::requestHistoryActivity(quint32 streamId, const QString &day)
@@ -503,6 +508,27 @@ void ViewerConnection::requestKeystrokes(quint32 streamId, qint64 startMs, qint6
     sendHistoryQuery(streamId, rangeQuery(QStringLiteral("listKeystrokes"), startMs, stopMs));
 }
 
+void ViewerConnection::requestHistorySegments(quint32 streamId, qint64 startMs, qint64 stopMs)
+{
+    sendHistoryQuery(streamId, rangeQuery(QStringLiteral("listSegments"), startMs, stopMs));
+}
+
+void ViewerConnection::requestHistoryScreens(quint32 streamId, qint64 startMs, qint64 stopMs)
+{
+    sendHistoryQuery(streamId, rangeQuery(QStringLiteral("listScreens"), startMs, stopMs));
+}
+
+void ViewerConnection::requestHistorySegment(quint32 streamId, qint64 sequenceId, qint64 fromMs,
+                                             qint64 toMs, quint64 requestId)
+{
+    sendHistoryQuery(streamId,
+                     QJsonObject{{QStringLiteral("action"), QStringLiteral("getSegment")},
+                                 {QStringLiteral("sequenceId"), static_cast<double>(sequenceId)},
+                                 {QStringLiteral("fromMs"), static_cast<double>(fromMs)},
+                                 {QStringLiteral("toMs"), static_cast<double>(toMs)},
+                                 {QStringLiteral("requestId"), static_cast<double>(requestId)}});
+}
+
 void ViewerConnection::requestChartSeries(quint32 streamId, const QString &kind, qint64 startMs,
                                           qint64 stopMs, qint64 granulaMs, const QString &tag)
 {
@@ -531,8 +557,14 @@ void ViewerConnection::processHistoryQuery(const ViewerProtocol::Header &header,
     const QJsonObject object = document.object();
     const QString action = object.value(QStringLiteral("action")).toString();
     if (object.contains(QStringLiteral("error"))) {
-        if (action == QStringLiteral("getFrame")) {
-            emit historyFrameMissing(header.streamId);
+        if (action == QStringLiteral("getSegment")) {
+            emit historySegmentMissing(
+                header.streamId,
+                static_cast<quint64>(object.value(QStringLiteral("requestId")).toDouble()));
+        } else if (action == QStringLiteral("getFrame")) {
+            emit historyFrameMissing(
+                header.streamId,
+                static_cast<quint64>(object.value(QStringLiteral("requestId")).toDouble()));
         } else {
             emit historyError(header.streamId, object.value(QStringLiteral("error")).toString());
         }
@@ -551,6 +583,29 @@ void ViewerConnection::processHistoryQuery(const ViewerProtocol::Header &header,
         }
         emit historyFramesReceived(header.streamId, object.value(QStringLiteral("day")).toString(),
                                    timestamps);
+    } else if (action == QStringLiteral("listScreens")) {
+        QList<QPair<quint32, QString>> screens;
+        for (const QJsonValue &value : object.value(QStringLiteral("screens")).toArray()) {
+            const QJsonObject entry = value.toObject();
+            screens.append({static_cast<quint32>(entry.value(QStringLiteral("streamId")).toDouble()),
+                            entry.value(QStringLiteral("name")).toString()});
+        }
+        emit historyScreensReceived(header.streamId,
+                                    object.value(QStringLiteral("day")).toString(), screens);
+    } else if (action == QStringLiteral("listSegments")) {
+        QList<HistoryVideoSegmentInfo> segments;
+        for (const QJsonValue &value : object.value(QStringLiteral("segments")).toArray()) {
+            const QJsonObject entry = value.toObject();
+            HistoryVideoSegmentInfo info;
+            info.sequenceId = static_cast<qint64>(entry.value(QStringLiteral("id")).toDouble());
+            info.beginMs = static_cast<qint64>(entry.value(QStringLiteral("beginMs")).toDouble());
+            info.endMs = static_cast<qint64>(entry.value(QStringLiteral("endMs")).toDouble());
+            info.width = entry.value(QStringLiteral("width")).toInt();
+            info.height = entry.value(QStringLiteral("height")).toInt();
+            segments.append(info);
+        }
+        emit historySegmentsReceived(header.streamId,
+                                     object.value(QStringLiteral("day")).toString(), segments);
     } else if (action == QStringLiteral("listActivity")) {
         QList<HistoryActivitySample> samples;
         for (const QJsonValue &value : object.value(QStringLiteral("samples")).toArray()) {
@@ -672,7 +727,9 @@ void ViewerConnection::processHistoryFrame(const ViewerProtocol::Header &header,
         emit historyError(header.streamId, QStringLiteral("Cadru de istoric invalid."));
         return;
     }
-    emit historyFrameReceived(header.streamId, header.timestampMs, image);
+    // The host puts the request id in the sequence field (HistoryFrame has
+    // no JSON body to carry it).
+    emit historyFrameReceived(header.streamId, header.timestampMs, image, header.sequence);
 }
 
 void ViewerConnection::failProtocol(const QString &message)
@@ -748,4 +805,16 @@ void ViewerConnection::renderDemoFrame()
                          QStringLiteral("Locked 00:36:52"), 0);
     emit metadataChanged(15, QStringLiteral("microsoft.lockapp"),
                          QStringLiteral("Locked 00:01:31"), 0);
+}
+
+void ViewerConnection::processHistorySegment(const ViewerProtocol::Header &header,
+                                             const QByteArray &payload)
+{
+    ViewerProtocol::HistorySegmentPayload segment;
+    if (!ViewerProtocol::decodeHistorySegment(payload, &segment)) {
+        emit historyError(header.streamId, QStringLiteral("Segment de istoric invalid."));
+        return;
+    }
+    // The host echoes the viewer's request id in the sequence field.
+    emit historySegmentReceived(header.streamId, header.sequence, segment);
 }

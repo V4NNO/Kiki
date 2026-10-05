@@ -2,6 +2,7 @@
 
 #include <QByteArray>
 #include <QDateTime>
+#include <QList>
 #include <QString>
 
 namespace ViewerProtocol {
@@ -45,8 +46,37 @@ enum class MessageType : quint16 {
     // "stale" can't mean "closed" for those. This is the explicit signal
     // that lets every hop actually remove the stream instead of guessing.
     // No payload; header.streamId is the one being retired.
-    StreamClosed = 13
+    StreamClosed = 13,
+    // Host -> viewer: a run of VP8 frames (a "segment"), always starting at
+    // a keyframe so it decodes standalone. This is what makes scrubbing feel
+    // like a video player instead of a slideshow: the viewer downloads whole
+    // stretches at ~9 KB/frame and decodes them locally, so every position
+    // inside a downloaded stretch is instant and the slider's "loaded" layer
+    // grows in visible chunks. header.streamId is the monitor,
+    // header.sequence the viewer's requestId. Payload: see HistorySegment
+    // below.
+    HistorySegment = 14
 };
+
+// The payload of a MessageType::HistorySegment message.
+struct SegmentFrame {
+    qint64 timestampMs = 0;
+    bool isKey = false;
+    QByteArray data; // one VP8 packet
+};
+
+struct HistorySegmentPayload {
+    qint64 sequenceId = 0;
+    quint16 width = 0;
+    quint16 height = 0;
+    // True when more frames follow this segment in the same sequence, so the
+    // viewer knows to ask for the next chunk.
+    bool hasMore = false;
+    QList<SegmentFrame> frames;
+};
+
+QByteArray encodeHistorySegment(const HistorySegmentPayload &segment);
+bool decodeHistorySegment(const QByteArray &payload, HistorySegmentPayload *segment);
 
 struct Header {
     quint16 version = Version;

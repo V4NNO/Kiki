@@ -215,15 +215,6 @@ struct HistoryRecorder::OpenVideoSequence {
     int frameCount = 0;
 };
 
-// A warm decoder for reads: remembers which sequence it's in and the
-// timestamp it has decoded up to, so consecutive forward reads only feed the
-// new delta frames.
-struct HistoryRecorder::VideoDecodeCache {
-    qint64 sequenceId = -1;
-    qint64 lastMs = -1;
-    std::unique_ptr<Vp8Decoder> decoder;
-};
-
 HistoryRecorder::HistoryRecorder(QString historyDir, QObject *parent)
     : QObject(parent)
     , m_historyDir(std::move(historyDir))
@@ -234,7 +225,6 @@ HistoryRecorder::~HistoryRecorder()
 {
     // Close open sequences and decoders (free the libvpx contexts) before DB.
     m_openVideo.clear();
-    m_decodeCache.clear();
     if (m_database.isOpen()) {
         m_database.close();
     }
@@ -267,6 +257,15 @@ bool HistoryRecorder::start(QString *error)
         }
         return false;
     }
+
+    QSqlQuery pragma(m_database);
+    // WAL so HistoryFrameReader can read (and VP8-decode) frames from its
+    // own thread/connection while this one keeps writing new ones -- in the
+    // default rollback-journal mode a reader and the writer lock each other
+    // out, which is exactly the stall a seek must not cause.
+    pragma.exec(QStringLiteral("PRAGMA journal_mode=WAL"));
+    pragma.exec(QStringLiteral("PRAGMA synchronous=NORMAL"));
+    pragma.exec(QStringLiteral("PRAGMA busy_timeout=5000"));
 
     QSqlQuery query(m_database);
     const bool created = query.exec(QStringLiteral(
@@ -667,142 +666,74 @@ QList<qint64> HistoryRecorder::listFrameTimestamps(quint32 monitorStreamId, qint
     return timestamps;
 }
 
-QByteArray HistoryRecorder::readFrame(quint32 monitorStreamId, qint64 timestampMs)
+QList<RecordedScreen> HistoryRecorder::listRecordedScreens(quint32 monitorStreamId,
+                                                          qint64 startMs, qint64 stopMs) const
 {
     if (!m_database.isOpen()) {
         return {};
     }
-    // Each monitor is recorded on its own clock (see recordFrame), so the
-    // viewer asking every screen of a device for monitor 1's timestamps
-    // almost never hits an exact match on the others. Serve what that
-    // screen showed at that moment instead: its latest frame at or before
-    // timestampMs, else the first one after -- within kMaxDistanceMs, so a
-    // screen that wasn't being recorded then stays empty rather than
-    // showing something from hours away.
-    constexpr qint64 kMaxDistanceMs = 10 * 60 * 1000;
-
-    // VP8 first: find the nearest stored frame, then decode its sequence from
-    // the last keyframe at/before it, and hand the viewer a plain JPEG -- so
-    // the wire protocol and the viewer stay unchanged.
-    qint64 targetMs = -1;
-    qint64 sequenceId = -1;
-    QSqlQuery frame(m_database);
-    frame.prepare(QStringLiteral(
-        "SELECT timestamp_ms, sequence_id FROM video_frame WHERE monitor_stream_id = ? "
-        "AND timestamp_ms <= ? AND timestamp_ms >= ? ORDER BY timestamp_ms DESC LIMIT 1"));
-    frame.addBindValue(monitorStreamId);
-    frame.addBindValue(timestampMs);
-    frame.addBindValue(timestampMs - kMaxDistanceMs);
-    if (frame.exec() && frame.next()) {
-        targetMs = frame.value(0).toLongLong();
-        sequenceId = frame.value(1).toLongLong();
-    } else {
-        QSqlQuery after(m_database);
-        after.prepare(QStringLiteral(
-            "SELECT timestamp_ms, sequence_id FROM video_frame WHERE monitor_stream_id = ? "
-            "AND timestamp_ms > ? AND timestamp_ms <= ? ORDER BY timestamp_ms ASC LIMIT 1"));
-        after.addBindValue(monitorStreamId);
-        after.addBindValue(timestampMs);
-        after.addBindValue(timestampMs + kMaxDistanceMs);
-        if (after.exec() && after.next()) {
-            targetMs = after.value(0).toLongLong();
-            sequenceId = after.value(1).toLongLong();
+    const QString username = usernameForStream(monitorStreamId);
+    if (username.isEmpty()) {
+        // Not a persisted screen (a window stream, or an id from before
+        // stream_ids existed): it is the only screen we know of.
+        return {RecordedScreen{monitorStreamId, QString()}};
+    }
+    // VP8 runs and, for history recorded before the VP8 switch, the legacy
+    // JPEG frames -- whichever the period has.
+    QSqlQuery query(m_database);
+    query.prepare(QStringLiteral(
+        "SELECT monitor_stream_id, MAX(monitor_name) FROM ("
+        "  SELECT monitor_stream_id, monitor_name FROM video_sequence"
+        "    WHERE session_username = ? AND begin_ms < ? AND end_ms >= ?"
+        "  UNION ALL"
+        "  SELECT monitor_stream_id, monitor_name FROM frames"
+        "    WHERE session_username = ? AND timestamp_ms >= ? AND timestamp_ms < ?"
+        ") GROUP BY monitor_stream_id ORDER BY monitor_stream_id"));
+    query.addBindValue(username);
+    query.addBindValue(stopMs);
+    query.addBindValue(startMs);
+    query.addBindValue(username);
+    query.addBindValue(startMs);
+    query.addBindValue(stopMs);
+    QList<RecordedScreen> screens;
+    if (query.exec()) {
+        while (query.next()) {
+            screens.append(RecordedScreen{query.value(0).toUInt(), query.value(1).toString()});
         }
     }
+    return screens;
+}
 
-    if (sequenceId >= 0) {
-        std::unique_ptr<VideoDecodeCache> &cachePtr = m_decodeCache[monitorStreamId];
-        if (!cachePtr) {
-            cachePtr = std::make_unique<VideoDecodeCache>();
-        }
-        VideoDecodeCache &cache = *cachePtr;
-
-        // Fast path: same sequence, stepping forward -- feed only the frames
-        // after what the warm decoder has already seen.
-        qint64 fromMs = 0;
-        const bool warm = cache.decoder && cache.decoder->isOpen()
-                          && cache.sequenceId == sequenceId && targetMs > cache.lastMs;
-        if (warm) {
-            fromMs = cache.lastMs; // exclusive lower bound below
-        } else {
-            // Cold path: (re)start from the keyframe at/before the target.
-            qint64 keyMs = targetMs;
-            QSqlQuery key(m_database);
-            key.prepare(QStringLiteral(
-                "SELECT MAX(timestamp_ms) FROM video_frame WHERE sequence_id = ? AND is_key = 1 "
-                "AND timestamp_ms <= ?"));
-            key.addBindValue(sequenceId);
-            key.addBindValue(targetMs);
-            if (key.exec() && key.next() && !key.value(0).isNull()) {
-                keyMs = key.value(0).toLongLong();
-            }
-            if (!cache.decoder) {
-                cache.decoder = std::make_unique<Vp8Decoder>();
-            }
-            if (!cache.decoder->begin()) {
-                return {};
-            }
-            cache.sequenceId = sequenceId;
-            fromMs = keyMs - 1; // include the keyframe (>= keyMs)
-        }
-
-        QSqlQuery run(m_database);
-        run.prepare(QStringLiteral(
-            "SELECT timestamp_ms, data FROM video_frame WHERE sequence_id = ? AND timestamp_ms > ? "
-            "AND timestamp_ms <= ? ORDER BY timestamp_ms ASC"));
-        run.addBindValue(sequenceId);
-        run.addBindValue(fromMs);
-        run.addBindValue(targetMs);
-        QImage decoded;
-        if (run.exec()) {
-            while (run.next()) {
-                decoded = cache.decoder->decode(run.value(1).toByteArray());
-                cache.lastMs = run.value(0).toLongLong();
-            }
-        }
-        if (!decoded.isNull()) {
-            QByteArray jpeg;
-            QBuffer buffer(&jpeg);
-            buffer.open(QIODevice::WriteOnly);
-            if (decoded.save(&buffer, "JPEG", 80)) {
-                return jpeg;
-            }
-        }
-        // Decode hiccup: drop the warm state so the next read restarts clean.
-        cache.sequenceId = -1;
-        cache.lastMs = -1;
+QList<VideoSegmentInfo> HistoryRecorder::listVideoSegments(quint32 monitorStreamId,
+                                                           qint64 startMs, qint64 stopMs) const
+{
+    if (!m_database.isOpen()) {
         return {};
     }
-
-    // Fallback: legacy JPEG frames recorded before the VP8 switch.
-    QString relativePath;
-    QSqlQuery before(m_database);
-    before.prepare(QStringLiteral(
-        "SELECT file_path FROM frames WHERE monitor_stream_id = ? AND timestamp_ms <= ? "
-        "AND timestamp_ms >= ? ORDER BY timestamp_ms DESC LIMIT 1"));
-    before.addBindValue(monitorStreamId);
-    before.addBindValue(timestampMs);
-    before.addBindValue(timestampMs - kMaxDistanceMs);
-    if (before.exec() && before.next()) {
-        relativePath = before.value(0).toString();
-    } else {
-        QSqlQuery after(m_database);
-        after.prepare(QStringLiteral(
-            "SELECT file_path FROM frames WHERE monitor_stream_id = ? AND timestamp_ms > ? "
-            "AND timestamp_ms <= ? ORDER BY timestamp_ms ASC LIMIT 1"));
-        after.addBindValue(monitorStreamId);
-        after.addBindValue(timestampMs);
-        after.addBindValue(timestampMs + kMaxDistanceMs);
-        if (!after.exec() || !after.next()) {
-            return {};
+    // A run overlapping the window, not only one starting inside it -- a
+    // session that spans midnight still has to show up for both days. end_ms
+    // is only updated as frames come in, so an open sequence is covered by
+    // the begin_ms test alone.
+    QSqlQuery query(m_database);
+    query.prepare(QStringLiteral(
+        "SELECT id, begin_ms, end_ms, width, height FROM video_sequence "
+        "WHERE monitor_stream_id = ? AND begin_ms < ? AND end_ms >= ? ORDER BY begin_ms ASC"));
+    query.addBindValue(monitorStreamId);
+    query.addBindValue(stopMs);
+    query.addBindValue(startMs);
+    QList<VideoSegmentInfo> segments;
+    if (query.exec()) {
+        while (query.next()) {
+            VideoSegmentInfo info;
+            info.sequenceId = query.value(0).toLongLong();
+            info.beginMs = query.value(1).toLongLong();
+            info.endMs = query.value(2).toLongLong();
+            info.width = query.value(3).toInt();
+            info.height = query.value(4).toInt();
+            segments.append(info);
         }
-        relativePath = after.value(0).toString();
     }
-    QFile file(QDir(m_historyDir).filePath(relativePath));
-    if (!file.open(QIODevice::ReadOnly)) {
-        return {};
-    }
-    return file.readAll();
+    return segments;
 }
 
 void HistoryRecorder::recordActivity(const QString &sessionUsername, int inputEvents)

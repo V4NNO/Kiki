@@ -17,6 +17,7 @@
 #include <QHBoxLayout>
 #include <QLabel>
 #include <QListWidget>
+#include <QLoggingCategory>
 #include <QMessageBox>
 #include <QMouseEvent>
 #include <QFontDatabase>
@@ -45,6 +46,11 @@
 #include <array>
 #include <cmath>
 #include <limits>
+
+// Instrumentation for the seek path: enable with
+// QT_LOGGING_RULES="kiki.history.timing.debug=true" to see, per seek, how
+// long the host took to answer and how long until the picture was on screen.
+Q_LOGGING_CATEGORY(lcHistoryTiming, "kiki.history.timing")
 
 namespace {
 
@@ -1665,98 +1671,261 @@ TimelineWidget::TimelineWidget(QWidget *parent)
     setMouseTracking(true);
 }
 
-void TimelineWidget::setTimestamps(const QList<qint64> &timestamps)
+double TimelineWidget::markWidth() const
 {
-    m_timestamps = timestamps;
-    m_loaded = false; // a fresh day starts "online/not loaded" (gray)
-    m_currentIndex = timestamps.isEmpty() ? -1 : qBound(0, m_currentIndex, timestamps.size() - 1);
+    // SliderBar.qml: __sliderBar.width / markersAmount.
+    return m_markersAmount > 0 ? static_cast<double>(width()) / m_markersAmount : 0.0;
+}
+
+void TimelineWidget::addMarker(QList<MarkerRange> &ranges, int marker)
+{
+    // Keeps `ranges` sorted and non-overlapping; a marker that touches the
+    // range before or after it merges them, so the bar never grows a seam.
+    const auto after = std::upper_bound(
+        ranges.cbegin(), ranges.cend(), marker,
+        [](int value, const MarkerRange &range) { return value < range.start; });
+    const int index = int(after - ranges.cbegin());
+    if (index > 0) {
+        MarkerRange &previous = ranges[index - 1];
+        if (marker <= previous.stop) {
+            return; // already covered
+        }
+        if (marker == previous.stop + 1) {
+            previous.stop = marker;
+            // It may now touch the next range too.
+            if (index < ranges.size() && ranges.at(index).start <= previous.stop + 1) {
+                previous.stop = qMax(previous.stop, ranges.at(index).stop);
+                ranges.removeAt(index);
+            }
+            return;
+        }
+    }
+    if (index < ranges.size() && ranges.at(index).start == marker + 1) {
+        ranges[index].start = marker;
+        return;
+    }
+    ranges.insert(index, MarkerRange{marker, marker});
+}
+
+bool TimelineWidget::contains(const QList<MarkerRange> &ranges, int marker)
+{
+    const auto after = std::upper_bound(
+        ranges.cbegin(), ranges.cend(), marker,
+        [](int value, const MarkerRange &range) { return value < range.start; });
+    return after != ranges.cbegin() && marker <= (after - 1)->stop;
+}
+
+void TimelineWidget::rebuildRanges()
+{
+    // The marker grid itself changed (period or Time step), so every marker
+    // index is renumbered: rebuild the gray layer and drop the blue one --
+    // HistoryView re-applies it from its frame cache.
+    m_markersAmount = (m_rangeEnd > m_rangeStart && m_stepMs > 0)
+        ? int(qMax<qint64>(1, (m_rangeEnd - m_rangeStart + m_stepMs - 1) / m_stepMs))
+        : 0;
+    m_effectiveRanges.clear();
+    m_loadedRanges.clear();
+    if (m_markersAmount <= 0) {
+        m_currentMarker = -1;
+        update();
+        return;
+    }
+    // m_timestamps is already sorted (setTimestamps), so this is one pass:
+    // no sorting happens on repaint any more.
+    int lastStop = -2;
+    for (qint64 timestamp : std::as_const(m_timestamps)) {
+        if (timestamp < m_rangeStart || timestamp >= m_rangeEnd) {
+            continue;
+        }
+        const int marker = int((timestamp - m_rangeStart) / m_stepMs);
+        if (marker <= lastStop) {
+            continue;
+        }
+        // SliderBar.qml widens every recorded range by one marker, so a
+        // recording whose frames land on alternate markers stays one range.
+        if (!m_effectiveRanges.isEmpty() && marker <= lastStop + 1) {
+            m_effectiveRanges.last().stop = marker;
+        } else {
+            m_effectiveRanges.append(MarkerRange{marker, marker});
+        }
+        lastStop = marker;
+    }
+    m_currentMarker = qBound(-1, m_currentMarker, m_markersAmount - 1);
     update();
 }
 
-void TimelineWidget::setLoaded(bool loaded)
+void TimelineWidget::setTimestamps(const QList<qint64> &timestamps)
 {
-    if (m_loaded != loaded) {
-        m_loaded = loaded;
-        update();
-    }
+    m_timestamps = timestamps;
+    std::sort(m_timestamps.begin(), m_timestamps.end());
+    rebuildRanges();
 }
 
 void TimelineWidget::setRange(qint64 rangeStartMs, qint64 rangeEndMs)
 {
+    if (m_rangeStart == rangeStartMs && m_rangeEnd == rangeEndMs) {
+        return;
+    }
     m_rangeStart = rangeStartMs;
     m_rangeEnd = rangeEndMs;
-    update();
+    rebuildRanges();
 }
 
 void TimelineWidget::setStepMs(qint64 stepMs)
 {
-    if (stepMs > 0 && stepMs != m_stepMs) {
-        m_stepMs = stepMs;
+    if (stepMs <= 0 || stepMs == m_stepMs) {
+        return;
+    }
+    m_stepMs = stepMs;
+    rebuildRanges();
+}
+
+void TimelineWidget::markLoaded(int marker)
+{
+    if (marker < 0 || marker >= m_markersAmount || contains(m_loadedRanges, marker)) {
+        return;
+    }
+    addMarker(m_loadedRanges, marker);
+    update();
+}
+
+void TimelineWidget::markLoadedRange(qint64 fromMs, qint64 toMs)
+{
+    if (m_markersAmount <= 0 || toMs < fromMs) {
+        return;
+    }
+    const int first = markerForTimestamp(fromMs);
+    const int last = markerForTimestamp(toMs);
+    if (first < 0 || last < first) {
+        return;
+    }
+    bool changed = false;
+    for (int marker = first; marker <= last; ++marker) {
+        if (!contains(m_loadedRanges, marker)) {
+            addMarker(m_loadedRanges, marker);
+            changed = true;
+        }
+    }
+    if (changed) {
         update();
     }
 }
 
-void TimelineWidget::setCurrentIndex(int index)
+void TimelineWidget::clearLoaded()
 {
-    if (index < 0 || index >= m_timestamps.size()) {
+    if (m_loadedRanges.isEmpty()) {
         return;
     }
-    m_currentIndex = index;
+    m_loadedRanges.clear();
     update();
 }
 
-int TimelineWidget::xForTime(qint64 timestampMs) const
+void TimelineWidget::setCurrentMarker(int marker)
 {
-    // SliderBar.qml positions everything in whole markers (markWidth *
-    // marker), a marker being one Time step.
-    if (m_rangeEnd <= m_rangeStart || m_stepMs <= 0) {
-        return 0;
+    if (marker < 0 || marker >= m_markersAmount || marker == m_currentMarker) {
+        return;
     }
-    const double markWidth = static_cast<double>(width()) * m_stepMs / (m_rangeEnd - m_rangeStart);
-    const qint64 marker = qMax<qint64>(0, (timestampMs - m_rangeStart) / m_stepMs);
-    return static_cast<int>(markWidth * marker);
+    m_currentMarker = marker;
+    update();
+}
+
+bool TimelineWidget::isAllowedMarker(int marker) const
+{
+    return contains(m_effectiveRanges, marker);
+}
+
+int TimelineWidget::nearestAllowedMarker(int marker, bool preferRight) const
+{
+    if (m_effectiveRanges.isEmpty()) {
+        return -1;
+    }
+    if (contains(m_effectiveRanges, marker)) {
+        return marker;
+    }
+    const auto after = std::upper_bound(
+        m_effectiveRanges.cbegin(), m_effectiveRanges.cend(), marker,
+        [](int value, const MarkerRange &range) { return value < range.start; });
+    const bool hasRight = after != m_effectiveRanges.cend();
+    if (preferRight) {
+        return hasRight ? after->start : (after - 1)->stop;
+    }
+    return after != m_effectiveRanges.cbegin() ? (after - 1)->stop : after->start;
+}
+
+int TimelineWidget::lastAllowedMarker() const
+{
+    return m_effectiveRanges.isEmpty() ? -1 : m_effectiveRanges.last().stop;
+}
+
+int TimelineWidget::markerForTimestamp(qint64 timestampMs) const
+{
+    if (m_markersAmount <= 0 || m_stepMs <= 0) {
+        return -1;
+    }
+    return int(qBound<qint64>(0, (timestampMs - m_rangeStart) / m_stepMs,
+                              qint64(m_markersAmount) - 1));
+}
+
+qint64 TimelineWidget::timestampForMarker(int marker) const
+{
+    if (m_timestamps.isEmpty() || marker < 0) {
+        return -1;
+    }
+    const qint64 slotStart = m_rangeStart + qint64(marker) * m_stepMs;
+    const qint64 slotEnd = slotStart + m_stepMs;
+    // Binary search, not the linear "closest frame" scan the old slider did
+    // on every mouse move.
+    const auto at = std::lower_bound(m_timestamps.cbegin(), m_timestamps.cend(), slotStart);
+    if (at != m_timestamps.cend() && *at < slotEnd) {
+        return *at; // a frame inside this marker's own slice
+    }
+    if (at == m_timestamps.cbegin()) {
+        return m_timestamps.first();
+    }
+    const qint64 previousMs = *(at - 1);
+    if (at == m_timestamps.cend()) {
+        return previousMs;
+    }
+    return (slotStart - previousMs) <= (*at - slotStart) ? previousMs : *at;
 }
 
 QRect TimelineWidget::pickRect() const
 {
-    if (m_currentIndex < 0 || m_currentIndex >= m_timestamps.size()) {
+    if (m_currentMarker < 0 || m_markersAmount <= 0) {
         return {};
     }
-    // 19x19 pick image, vertically centered on the 4px bar, horizontally
-    // centered on its marker (Math.max(markWidth, 19) wide).
-    const int x = xForTime(m_timestamps.at(m_currentIndex));
-    return QRect(x - 9, kSliderBarY + kSliderBarHeight / 2 - 9, 19, 19);
+    // SliderBar.qml's __slider: Math.max(markWidth, 19) wide, pulled half an
+    // image left only while it is at its natural 19px width.
+    const double step = markWidth();
+    const int pickWidth = qMax(19, int(step));
+    const double x = step * m_currentMarker - (pickWidth == 19 ? 9.5 : 0.0);
+    return QRect(qRound(x), kSliderBarY + kSliderBarHeight / 2 - 9, pickWidth, 19);
 }
 
-int TimelineWidget::indexForX(int x) const
+int TimelineWidget::markerForX(int x) const
 {
-    if (m_timestamps.isEmpty() || width() <= 0 || m_rangeEnd <= m_rangeStart) {
+    const double step = markWidth();
+    if (step <= 0.0) {
         return -1;
     }
-    const double fraction = qBound(0.0, static_cast<double>(x) / width(), 1.0);
-    const qint64 targetMs = m_rangeStart + static_cast<qint64>(fraction * (m_rangeEnd - m_rangeStart));
-    // Nearest captured frame -- frames aren't evenly spaced.
-    int closest = 0;
-    qint64 closestDelta = qAbs(m_timestamps.first() - targetMs);
-    for (int i = 1; i < m_timestamps.size(); ++i) {
-        const qint64 delta = qAbs(m_timestamps.at(i) - targetMs);
-        if (delta < closestDelta) {
-            closestDelta = delta;
-            closest = i;
-        }
-    }
-    return closest;
+    // SliderBar.qml: Math.floor(draggedX / markWidth).
+    return int(qBound(0.0, std::floor(x / step), double(m_markersAmount - 1)));
 }
 
 void TimelineWidget::seekToX(int x)
 {
-    const int index = indexForX(x);
-    if (index < 0) {
+    const int marker = markerForX(x);
+    // SliderBar.qml only signals when the marker actually changes, which is
+    // what keeps a drag from firing a request per pixel. And, like
+    // HistoryTab.setOnlineMarker (what the original wires both the click and
+    // the drag to), a marker with nothing recorded is simply refused: the
+    // handle does not move into a gap.
+    if (marker < 0 || marker == m_currentMarker || !isAllowedMarker(marker)) {
         return;
     }
-    m_currentIndex = index;
+    m_currentMarker = marker;
     update();
-    emit indexSelected(index);
+    emit markerSelected(marker);
 }
 
 void TimelineWidget::mousePressEvent(QMouseEvent *event)
@@ -1798,39 +1967,22 @@ void TimelineWidget::leaveEvent(QEvent *)
     }
 }
 
-void TimelineWidget::drawRuns(QPainter &painter, const QList<qint64> &stamps, const QPixmap &image)
+void TimelineWidget::drawRanges(QPainter &painter, const QList<MarkerRange> &ranges,
+                                const QPixmap &image)
 {
-    if (stamps.isEmpty() || m_rangeEnd <= m_rangeStart) {
+    // The ranges are precomputed and already in marker space, so a repaint is
+    // one BorderImage per range -- SliderBar.qml's Repeater, exactly. Nothing
+    // is sorted or re-derived here.
+    const double step = markWidth();
+    if (step <= 0.0) {
         return;
     }
-    // runs of markers, each drawn (stop - start + 1) markers wide. Frames are
-    // a few seconds apart, so at fine Time steps (1s) neighbours still count
-    // as one run when within a minute of each other.
-    QList<qint64> sorted = stamps;
-    std::sort(sorted.begin(), sorted.end());
-    const double markWidth = static_cast<double>(width()) * m_stepMs / (m_rangeEnd - m_rangeStart);
-    const qint64 mergeMarkers = qMax<qint64>(1, 60 * 1000 / m_stepMs);
-    qint64 runStart = -1;
-    qint64 runStop = -1;
-    const auto flushRun = [&] {
-        if (runStart >= 0) {
-            drawBorderImage(painter,
-                            QRectF(runStart * markWidth, kSliderBarY,
-                                   qMax(1.0, (runStop - runStart + 1) * markWidth), kSliderBarHeight),
-                            image, 0, 0);
-        }
-    };
-    for (qint64 timestamp : std::as_const(sorted)) {
-        const qint64 marker = (timestamp - m_rangeStart) / m_stepMs;
-        if (runStart >= 0 && marker <= runStop + mergeMarkers) {
-            runStop = qMax(runStop, marker);
-            continue;
-        }
-        flushRun();
-        runStart = marker;
-        runStop = marker;
+    for (const MarkerRange &range : ranges) {
+        drawBorderImage(painter,
+                        QRectF(range.start * step, kSliderBarY,
+                               qMax(1.0, (range.stop - range.start + 1) * step), kSliderBarHeight),
+                        image, 0, 0);
     }
-    flushRun();
 }
 
 void TimelineWidget::paintEvent(QPaintEvent *)
@@ -1846,20 +1998,18 @@ void TimelineWidget::paintEvent(QPaintEvent *)
     painter.fillRect(rect(), kHistoryBackground);
     // SliderBar.qml's three layers: bg_none everywhere, bg_online over every
     // recorded range (gray "exists but not downloaded"), bg_loaded on top
-    // over the frames actually fetched this view (grows as you watch).
+    // over what has actually been fetched (it grows as you watch).
     drawBorderImage(painter, QRectF(0, kSliderBarY, width(), kSliderBarHeight), bgNone, 4, 4);
-    if (m_rangeEnd <= m_rangeStart || m_timestamps.isEmpty()) {
+    if (m_markersAmount <= 0) {
         return;
     }
-    drawRuns(painter, m_timestamps, bgOnline);
-    if (m_loaded) {
-        drawRuns(painter, m_timestamps, bgLoaded);
-    }
+    drawRanges(painter, m_effectiveRanges, bgOnline);
+    drawRanges(painter, m_loadedRanges, bgLoaded);
 
     const QRect pick = pickRect();
     if (!pick.isNull()) {
-        painter.drawPixmap(pick.topLeft(),
-                           m_pressed ? pickPressed : (m_pickHovered ? pickHovered : pickNormal));
+        drawBorderImage(painter, pick,
+                        m_pressed ? pickPressed : (m_pickHovered ? pickHovered : pickNormal), 9, 9);
     }
 }
 
@@ -2660,7 +2810,19 @@ HistoryView::HistoryView(ViewerConnection &connection, QWidget *parent)
     m_muteButton->setToolTip(QStringLiteral("Fara audio in acest sistem."));
 
     m_timeline = new TimelineWidget(this);
-    connect(m_timeline, &TimelineWidget::indexSelected, this, &HistoryView::onTimelineMoved);
+    connect(m_timeline, &TimelineWidget::markerSelected, this, &HistoryView::onTimelineMoved);
+    m_applyTimer = new QTimer(this);
+    m_applyTimer->setSingleShot(true);
+    m_applyTimer->setInterval(0);
+    connect(m_applyTimer, &QTimer::timeout, this, [this] { applyMarker(m_pendingApplyMarker); });
+    m_frameWatchdog = new QTimer(this);
+    m_frameWatchdog->setSingleShot(true);
+    m_frameWatchdog->setInterval(10000);
+    connect(m_frameWatchdog, &QTimer::timeout, this, [this] {
+        qCDebug(lcHistoryTiming, "marker %d: no answer in 10s, releasing the slot",
+                m_inFlightMarker);
+        releaseFrameSlot();
+    });
     m_timeAxis = new TimeAxisWidget(this);
 
     auto *controlBlock = new QWidget(this);
@@ -2808,6 +2970,14 @@ HistoryView::HistoryView(ViewerConnection &connection, QWidget *parent)
     connect(&m_connection, &ViewerConnection::historyError, this, &HistoryView::onHistoryError);
     connect(&m_connection, &ViewerConnection::historyFrameMissing, this,
             &HistoryView::onHistoryFrameMissing);
+    connect(&m_connection, &ViewerConnection::historySegmentsReceived, this,
+            &HistoryView::onSegmentsReceived);
+    connect(&m_connection, &ViewerConnection::historyScreensReceived, this,
+            &HistoryView::onScreensReceived);
+    connect(&m_connection, &ViewerConnection::historySegmentReceived, this,
+            &HistoryView::onSegmentReceived);
+    connect(&m_connection, &ViewerConnection::historySegmentMissing, this,
+            &HistoryView::onSegmentMissing);
 }
 
 void HistoryView::setDevices(const QHash<quint32, QString> &deviceNames,
@@ -2834,9 +3004,13 @@ void HistoryView::setDevices(const QHash<quint32, QString> &deviceNames,
         // The list is re-sent on every live update, so only act when this
         // employee's screens actually changed -- and then fetch the current
         // moment for them, instead of leaving new ones loading.
-        if (deviceMonitorStreams.value(m_currentDeviceKey) != previousStreams) {
+        if (deviceMonitorStreams.value(m_currentDeviceKey) != previousStreams
+            && m_historyStreams.isEmpty()) {
+            // Plugging a screen in or out does not change what was recorded:
+            // once listScreens has answered, the period's screens come from
+            // the data. Only before that do the connected ones stand in.
             rebuildMonitorStrip();
-            requestFrameAt(m_timeline->currentIndex());
+            requestFrameAtMarker(m_timeline->currentMarker());
         }
     }
 }
@@ -2894,11 +3068,20 @@ void HistoryView::showNoData()
 {
     m_playbackTimer->stop();
     setPlaying(false);
+    ++m_frameGeneration;
     m_frameRequestInFlight = false;
-    m_desiredFrameIndex = -1;
-    m_inFlightFrameIndex = -1;
+    m_desiredMarker = -1;
+    m_inFlightMarker = -1;
+    m_inFlightRequestId = 0;
+    m_inFlightStreams.clear();
     m_timestamps.clear();
     m_timeline->setTimestamps({});
+    clearFrameCache();
+    m_segmentStore.clear();
+    m_videoSegments.clear();
+    m_emptyRanges.clear();
+    m_segmentRequestInFlight = false;
+    m_cacheRangeKey.clear();
     m_videoStrip->setStreams({});
     m_videoHeader->setMoment(QString());
     m_keystream->setText(QString(), QString());
@@ -3021,13 +3204,30 @@ void HistoryView::closeHistoryTab(int index)
 
 quint32 HistoryView::currentStreamId() const
 {
+    // The anchor for every session-wide query (programs, sites, keystrokes,
+    // charts, categories -- the host keys all of them by the employee, so any
+    // of their screens answers the same). It used to be "the first monitor in
+    // the list", but that list arrives in the host's hash order: once a second
+    // screen was plugged in, "first" could become the new screen, and History
+    // built its whole timeline from that screen alone -- which is why the
+    // single-screen stretch before it vanished. The lowest id is stable.
     const QList<quint32> streams = m_deviceMonitorStreams.value(m_currentDeviceKey);
-    return streams.isEmpty() ? 0 : streams.first();
+    return streams.isEmpty() ? 0 : *std::min_element(streams.cbegin(), streams.cend());
+}
+
+QList<quint32> HistoryView::historyStreams() const
+{
+    if (!m_historyStreams.isEmpty()) {
+        return m_historyStreams;
+    }
+    QList<quint32> streams = m_deviceMonitorStreams.value(m_currentDeviceKey);
+    std::sort(streams.begin(), streams.end());
+    return streams;
 }
 
 void HistoryView::rebuildMonitorStrip()
 {
-    m_videoStrip->setStreams(m_deviceMonitorStreams.value(m_currentDeviceKey));
+    m_videoStrip->setStreams(historyStreams());
     positionOverlays();
 }
 
@@ -3094,11 +3294,34 @@ void HistoryView::loadPeriod()
 {
     m_playbackTimer->stop();
     setPlaying(false);
+    // A new interval: every answer still on its way belongs to the old one
+    // and is dropped on arrival (see isCurrentGeneration).
+    ++m_frameGeneration;
     m_frameRequestInFlight = false;
-    m_desiredFrameIndex = -1;
-    m_inFlightFrameIndex = -1;
+    m_desiredMarker = -1;
+    m_inFlightMarker = -1;
+    m_inFlightRequestId = 0;
+    m_inFlightStreams.clear();
+    m_videoExport.active = false;
+    m_videoExport.pending.clear();
+    m_exportVideoButton->setEnabled(true);
+    m_segmentRequestInFlight = false;
+    m_videoSegments.clear();
+    m_emptyRanges.clear();
+    m_historyStreams.clear();
+    m_framesByStream.clear();
     m_timestamps.clear();
     m_timeline->setTimestamps({});
+    // Only a real change of interval or employee invalidates what has been
+    // downloaded; re-opening the same period (a new Time step, say) keeps it,
+    // so the blue overlay and instant seeking survive.
+    const QString nextRangeKey = ViewerConnection::rangeKey(periodStartMs(), periodStopMs());
+    if (nextRangeKey != m_cacheRangeKey || m_currentDeviceKey != m_cacheDeviceKey) {
+        clearFrameCache();
+        m_segmentStore.clear();
+    }
+    m_cacheRangeKey = nextRangeKey;
+    m_cacheDeviceKey = m_currentDeviceKey;
     m_videoStrip->setAllLoading();
     m_videoHeader->setMoment(QString());
     m_keystream->setText(QString(), QString());
@@ -3130,63 +3353,157 @@ void HistoryView::loadPeriod()
     // frame list (which populates the slider and is cheap) before the
     // heavier chart/app/keystroke queries -- the timeline loads first, as in
     // the original, instead of waiting behind them.
-    m_connection.requestHistoryFrames(streamId, start, stop);
+    // Which of the employee's screens recorded anything in the period comes
+    // first; their frame lists and video runs are asked for as soon as it
+    // answers (onScreensReceived). A screen unplugged since, or one plugged
+    // in only later, still shows for its own stretch.
+    m_periodAnchor = streamId;
+    m_connection.requestHistoryScreens(streamId, start, stop);
     m_connection.requestHistoryAppSegments(streamId, start, stop);
     m_connection.requestWebVisits(streamId, start, stop);
     m_connection.requestKeystrokes(streamId, start, stop);
     m_chartsModel->setQuery(streamId, start, stop, chartStep);
 }
 
-void HistoryView::onTimelineMoved(int index)
+void HistoryView::onTimelineMoved(int marker)
 {
-    requestFrameAt(index);
+    requestFrameAtMarker(marker);
 }
 
 void HistoryView::stepMarkers(int markers)
 {
-    // One marker = one Time step. Like setOnlineMarkerForRewind, a target
-    // with nothing recorded jumps to the next recorded frame after it
-    // (Right) or the last one before it (Left), clamped at the ends.
-    const int current = m_timeline->currentIndex();
-    if (current < 0 || current >= m_timestamps.size()) {
+    // One step = one marker of the Time step grid (SliderBar.qml's
+    // rewindLeft/rewindRight). Like setOnlineMarkerForRewind, a target with
+    // nothing recorded lands on the next recorded range in that direction.
+    const int current = m_timeline->currentMarker();
+    if (current < 0 || markers == 0) {
         return;
     }
-    const qint64 target = m_timestamps.at(current) + markers * m_timeStepMs;
-    int next = current;
-    if (markers > 0) {
-        const auto it = std::lower_bound(m_timestamps.cbegin(), m_timestamps.cend(), target);
-        next = it == m_timestamps.cend() ? m_timestamps.size() - 1 : int(it - m_timestamps.cbegin());
-    } else {
-        const auto it = std::upper_bound(m_timestamps.cbegin(), m_timestamps.cend(), target);
-        next = it == m_timestamps.cbegin() ? 0 : int(it - m_timestamps.cbegin()) - 1;
-    }
-    if (next != current) {
-        requestFrameAt(next);
+    const int target = qBound(0, current + markers, m_timeline->markersAmount() - 1);
+    const int next = m_timeline->nearestAllowedMarker(target, markers > 0);
+    if (next >= 0 && next != current) {
+        requestFrameAtMarker(next);
     }
 }
 
-void HistoryView::requestFrameAt(int index)
+quint64 HistoryView::allocateRequestId()
 {
-    if (index < 0 || index >= m_timestamps.size()) {
+    return (quint64(m_frameGeneration) << 32) | ++m_frameSequence;
+}
+
+QImage HistoryView::cachedFrame(quint32 streamId, qint64 timestampMs) const
+{
+    return m_frameCache.value(qMakePair(streamId, timestampMs));
+}
+
+void HistoryView::cacheFrame(quint32 streamId, qint64 timestampMs, const QImage &image)
+{
+    // A bounded cache: the real progress of a day is kept here (and drawn as
+    // the blue overlay), but a long period cannot grow it without limit.
+    constexpr qint64 kCacheBudgetBytes = 96 * 1024 * 1024;
+    const QPair<quint32, qint64> key(streamId, timestampMs);
+    if (m_frameCache.contains(key) || image.isNull()) {
         return;
     }
-    const qint64 timestampMs = m_timestamps.at(index);
-    // The marker, timeline, running-apps and chart move immediately -- the
-    // UI stays responsive even while holding "next".
+    m_frameCache.insert(key, image);
+    m_frameCacheOrder.append(key);
+    m_frameCacheBytes += image.sizeInBytes();
+    while (m_frameCacheBytes > kCacheBudgetBytes && m_frameCacheOrder.size() > 1) {
+        const QPair<quint32, qint64> oldest = m_frameCacheOrder.takeFirst();
+        m_frameCacheBytes -= m_frameCache.take(oldest).sizeInBytes();
+        // Its marker is no longer instantly available, but it is still
+        // recorded: the overlay keeps it only while the primary stream's
+        // copy is cached.
+        if (oldest.first == currentStreamId()) {
+            m_loadedTimestamps.remove(oldest.second);
+        }
+    }
+}
+
+void HistoryView::clearFrameCache()
+{
+    m_frameCache.clear();
+    m_frameCacheOrder.clear();
+    m_frameCacheBytes = 0;
+    m_loadedTimestamps.clear();
+    m_timeline->clearLoaded();
+}
+
+void HistoryView::noteFrameShown(qint64 timestampMs)
+{
+    // SliderBar.qml's loadedRanges: this one marker, not the whole period.
+    m_loadedTimestamps.insert(timestampMs);
+    m_timeline->markLoaded(m_timeline->markerForTimestamp(timestampMs));
+}
+
+void HistoryView::refreshLoadedOverlay()
+{
+    // A new Time step renumbers every marker, so the overlay is re-derived
+    // from what is actually in the cache instead of being thrown away.
+    m_timeline->clearLoaded();
+    for (qint64 timestampMs : std::as_const(m_loadedTimestamps)) {
+        m_timeline->markLoaded(m_timeline->markerForTimestamp(timestampMs));
+    }
+    // And every downloaded VP8 stretch -- these are most of what is loaded.
+    for (const QPair<qint64, qint64> &span : m_segmentStore.spans(currentStreamId())) {
+        m_timeline->markLoadedRange(span.first, span.second);
+    }
+}
+
+void HistoryView::requestFrameAtMarker(int marker)
+{
+    if (marker < 0 || marker >= m_timeline->markersAmount() || !m_timeline->hasData()) {
+        return;
+    }
+    // The handle follows the mouse immediately; everything expensive is
+    // coalesced into one applyMarker() per event-loop pass, for whichever
+    // position is the latest by then.
+    m_timeline->setCurrentMarker(marker);
+    m_pendingApplyMarker = marker;
+    if (!m_applyTimer->isActive()) {
+        m_applyTimer->start();
+    }
+}
+
+void HistoryView::applyMarker(int marker)
+{
+    if (marker < 0 || marker >= m_timeline->markersAmount() || !m_timeline->hasData()) {
+        return;
+    }
+    const qint64 timestampMs = m_timeline->timestampForMarker(marker);
+    if (timestampMs < 0) {
+        return;
+    }
+    QElapsedTimer applyTimer;
+    applyTimer.start();
+    ++m_seekOrdinal;
+    // The handle, the moment, the running-apps panel, the keystream and the
+    // chart marker all move now -- the UI never waits on the host.
     const QDateTime moment = QDateTime::fromMSecsSinceEpoch(timestampMs);
     m_videoHeader->setMoment(QStringLiteral("( %1 %2 )")
                                  .arg(QLocale(QLocale::English).toString(moment.date(), QStringLiteral("M/d/yy")),
                                       moment.toString(QStringLiteral("hh:mm:ss"))));
     updateTextLogHighlight(timestampMs);
     updateKeystream(timestampMs);
-    m_timeline->setCurrentIndex(index);
+    m_timeline->setCurrentMarker(marker);
     updateInfoPanel();
     m_chart->setCurrentPositionMs(timestampMs);
 
-    // The video itself is fetched with at most one request in flight (see
-    // dispatchFrameRequest); if more steps come while one is pending, only
-    // the latest target is fetched next.
-    m_desiredFrameIndex = index;
+    // Anything already held -- a downloaded VP8 run decoded locally, or a
+    // JPEG fetched earlier -- is drawn straight away, with no request at all.
+    // This is the whole point of the segment store: scrubbing over
+    // downloaded ground is as smooth as a video player.
+    const bool complete = showFromStore(timestampMs);
+    m_desiredMarker = marker;
+    // Keep pulling the period down around wherever the user just moved to.
+    dispatchPrefetch();
+    if (complete) {
+        qCDebug(lcHistoryTiming, "marker %d: served locally in %lld ms", marker,
+                applyTimer.elapsed());
+        return;
+    }
+
+    m_seekTimer.start();
     if (!m_frameRequestInFlight) {
         dispatchFrameRequest();
     }
@@ -3194,15 +3511,43 @@ void HistoryView::requestFrameAt(int index)
 
 void HistoryView::dispatchFrameRequest()
 {
-    if (m_desiredFrameIndex < 0 || m_desiredFrameIndex >= m_timestamps.size()) {
+    if (m_desiredMarker < 0 || m_desiredMarker >= m_timeline->markersAmount()) {
+        m_frameRequestInFlight = false;
         return;
     }
-    m_inFlightFrameIndex = m_desiredFrameIndex;
+    const qint64 timestampMs = m_timeline->timestampForMarker(m_desiredMarker);
+    if (timestampMs < 0) {
+        m_frameRequestInFlight = false;
+        return;
+    }
+    m_inFlightMarker = m_desiredMarker;
+    m_inFlightOrdinal = m_seekOrdinal;
+    m_inFlightRequestId = allocateRequestId();
+    m_inFlightStreams.clear();
+    // Every screen of the device is shown at once (see rebuildMonitorStrip),
+    // but only the ones not already cached are asked for.
+    for (quint32 streamId : historyStreams()) {
+        if (!cachedFrame(streamId, timestampMs).isNull()) {
+            continue;
+        }
+        m_inFlightStreams.insert(streamId);
+        m_connection.requestHistoryFrame(streamId, timestampMs, m_inFlightRequestId);
+    }
+    if (m_inFlightStreams.isEmpty()) {
+        m_frameRequestInFlight = false;
+        return;
+    }
     m_frameRequestInFlight = true;
-    const qint64 timestampMs = m_timestamps.at(m_inFlightFrameIndex);
-    // Every screen of the device is shown at once (see rebuildMonitorStrip).
-    for (quint32 streamId : m_deviceMonitorStreams.value(m_currentDeviceKey)) {
-        m_connection.requestHistoryFrame(streamId, timestampMs);
+    m_frameWatchdog->start();
+}
+
+void HistoryView::releaseFrameSlot()
+{
+    m_frameWatchdog->stop();
+    m_inFlightStreams.clear();
+    m_frameRequestInFlight = false;
+    if (m_desiredMarker != m_inFlightMarker) {
+        dispatchFrameRequest();
     }
 }
 
@@ -3216,8 +3561,8 @@ void HistoryView::onPlayClicked()
     if (m_timestamps.isEmpty()) {
         return;
     }
-    if (m_timeline->currentIndex() >= m_timeline->count() - 1) {
-        requestFrameAt(0);
+    if (m_timeline->currentMarker() >= m_timeline->lastAllowedMarker()) {
+        requestFrameAtMarker(m_timeline->nearestAllowedMarker(0, true));
     }
     setPlaying(true);
     m_playbackTimer->start();
@@ -3225,13 +3570,22 @@ void HistoryView::onPlayClicked()
 
 void HistoryView::onPlaybackTick()
 {
-    const int next = m_timeline->currentIndex() + 1;
-    if (next > m_timeline->count() - 1) {
+    // One marker per tick, skipping over the stretches with no recording
+    // instead of stalling on them.
+    const int current = m_timeline->currentMarker();
+    const int last = m_timeline->lastAllowedMarker();
+    if (current < 0 || current >= last) {
         m_playbackTimer->stop();
         setPlaying(false);
         return;
     }
-    requestFrameAt(next);
+    const int next = m_timeline->nearestAllowedMarker(current + 1, true);
+    if (next <= current) {
+        m_playbackTimer->stop();
+        setPlaying(false);
+        return;
+    }
+    requestFrameAtMarker(next);
 }
 
 void HistoryView::onToggleViolationPanel()
@@ -3293,6 +3647,9 @@ void HistoryView::applyTimeStep()
     m_leftColumn->setFixedWidth(12 + 140 + 5 + 60 + 5 + (audioVisible ? audioWidth + 5 : 0) + 1 + 10);
     m_chart->setGridLeft(10 + 140 + 60 + 20 + 12 + audioWidth);
     m_timeline->setStepMs(m_timeStepMs);
+    // The marker grid was renumbered: put the blue overlay (and the handle)
+    // back where the cache says they belong.
+    refreshLoadedOverlay();
     m_timeAxis->setStepMs(m_timeStepMs);
     m_chart->setMarkerStepMs(m_timeStepMs);
 }
@@ -3450,7 +3807,9 @@ void HistoryView::exportNextVideoFrame()
     showLoadingDialog(QStringLiteral("Se exporta %1/%2...")
                           .arg(m_videoExport.total - m_videoExport.pending.size() + 1)
                           .arg(m_videoExport.total));
-    m_connection.requestHistoryFrame(m_videoExport.streamId, timestampMs);
+    m_videoExport.requestId = allocateRequestId();
+    m_connection.requestHistoryFrame(m_videoExport.streamId, timestampMs,
+                                     m_videoExport.requestId);
 }
 
 void HistoryView::onToggleRunningApps()
@@ -3484,29 +3843,87 @@ void HistoryView::onChangeSettingsClicked()
 void HistoryView::onFramesReceived(quint32 streamId, const QString &day,
                                    const QList<qint64> &timestamps)
 {
-    if (streamId != currentStreamId() || day != m_rangeKey) {
+    if (day != m_rangeKey || !historyStreams().contains(streamId)) {
         return;
     }
-    m_timestamps = timestamps;
-    m_timeline->setTimestamps(timestamps);
-    if (timestamps.isEmpty()) {
+    const bool hadData = m_timeline->hasData();
+    m_framesByStream.insert(streamId, timestamps);
+    mergeFrameLists();
+    const bool allAnswered = m_framesByStream.size() >= historyStreams().size();
+    if (m_timestamps.isEmpty()) {
+        // Nothing yet -- but only say so once every screen has answered.
+        if (allAnswered) {
+            m_statusLabel->setText(QStringLiteral("No information for selected period"));
+            updateStatusVisibility();
+            m_videoStrip->setStreams({});
+            hideLoadingDialog();
+        }
+        return;
+    }
+    m_statusLabel->clear();
+    updateStatusVisibility();
+    hideLoadingDialog();
+    // The first screen to answer puts the player at the end of the period;
+    // the others only widen the gray layer under it.
+    if (!hadData) {
+        rebuildMonitorStrip();
+        requestFrameAtMarker(m_timeline->lastAllowedMarker());
+    }
+}
+
+void HistoryView::mergeFrameLists()
+{
+    // SliderBar.qml's effectiveRanges belong to the session block, not to a
+    // screen: the slider shows wherever ANY screen recorded something.
+    QList<qint64> merged;
+    for (auto it = m_framesByStream.cbegin(); it != m_framesByStream.cend(); ++it) {
+        merged += it.value();
+    }
+    std::sort(merged.begin(), merged.end());
+    merged.erase(std::unique(merged.begin(), merged.end()), merged.end());
+    m_timestamps = merged;
+    const int marker = m_timeline->currentMarker();
+    m_timeline->setTimestamps(m_timestamps);
+    if (marker >= 0) {
+        m_timeline->setCurrentMarker(marker);
+    }
+    // Whatever is already downloaded is blue again at once; everything else
+    // stays gray until its frames actually arrive.
+    refreshLoadedOverlay();
+}
+
+void HistoryView::onScreensReceived(quint32 streamId, const QString &day,
+                                    const QList<QPair<quint32, QString>> &screens)
+{
+    if (day != m_rangeKey || streamId != m_periodAnchor) {
+        return;
+    }
+    m_historyStreams.clear();
+    for (const QPair<quint32, QString> &screen : screens) {
+        m_historyStreams.append(screen.first);
+    }
+    if (m_historyStreams.isEmpty()) {
         m_statusLabel->setText(QStringLiteral("No information for selected period"));
         updateStatusVisibility();
         m_videoStrip->setStreams({});
         hideLoadingDialog();
         return;
     }
-    m_statusLabel->clear();
-    updateStatusVisibility();
     rebuildMonitorStrip();
-    hideLoadingDialog();
-    requestFrameAt(timestamps.size() - 1);
+    // Now the video side of the period, for every screen that has any.
+    const qint64 start = periodStartMs();
+    const qint64 stop = periodStopMs();
+    for (quint32 screen : std::as_const(m_historyStreams)) {
+        m_connection.requestHistoryFrames(screen, start, stop);
+        m_connection.requestHistorySegments(screen, start, stop);
+    }
 }
 
-void HistoryView::onFrameReceived(quint32 streamId, qint64 timestampMs, const QImage &image)
+void HistoryView::onFrameReceived(quint32 streamId, qint64 timestampMs, const QImage &image,
+                                  quint64 requestId)
 {
     if (m_videoExport.active && streamId == m_videoExport.streamId
-        && !m_videoExport.pending.isEmpty() && m_videoExport.pending.first() == timestampMs) {
+        && requestId == m_videoExport.requestId && !m_videoExport.pending.isEmpty()) {
         m_videoExport.pending.removeFirst();
         const QString fileName = QDateTime::fromMSecsSinceEpoch(timestampMs)
                                      .toString(QStringLiteral("HH-mm-ss"));
@@ -3516,49 +3933,230 @@ void HistoryView::onFrameReceived(quint32 streamId, qint64 timestampMs, const QI
                            Qt::KeepAspectRatio, Qt::SmoothTransformation);
         toSave.save(QStringLiteral("%1/%2.png").arg(m_videoExport.directory, fileName));
         exportNextVideoFrame();
+        return;
     }
 
-    if (m_deviceMonitorStreams.value(m_currentDeviceKey).contains(streamId)) {
+    // An answer prepared for a period or an employee the user has already
+    // left must never reach the screen.
+    if (!isCurrentGeneration(requestId)) {
+        qCDebug(lcHistoryTiming, "dropping frame of generation %u (now %u)",
+                quint32(requestId >> 32), m_frameGeneration);
+        return;
+    }
+    if (!historyStreams().contains(streamId)) {
+        return;
+    }
+    // Keep it even if it is not the position we are on any more: it is a real
+    // downloaded frame, and the next seek back here will be instant.
+    cacheFrame(streamId, timestampMs, image);
+
+    // An answer to a round that is no longer the one in flight: kept in the
+    // cache, nothing else.
+    if (requestId != m_inFlightRequestId) {
+        return;
+    }
+    // Show it as long as nothing newer is already on screen. While "next" is
+    // held down the user runs ahead of the host, and every frame that comes
+    // back is still a position they are scrubbing through -- it belongs on
+    // screen, exactly like dragging a video player's scrubber. Only an answer
+    // older than what is displayed (a late one for a position already
+    // overtaken by a cached frame) is dropped.
+    if (m_inFlightOrdinal >= m_displayedOrdinal) {
+        m_displayedOrdinal = m_inFlightOrdinal;
         m_videoStrip->setFrame(streamId, image);
-    }
-    // First frame of this view arrived -> the day is ready: flip the whole
-    // recorded range from gray-online to loaded (blue), matching when the
-    // video appears ("nu mai e gri, apare video").
-    if (streamId == currentStreamId()) {
-        m_timeline->setLoaded(true);
-    }
-    // The primary stream's frame for the in-flight index arrived -- free the
-    // slot and, if the user has since stepped further, fetch the latest.
-    if (streamId == currentStreamId() && m_frameRequestInFlight && m_inFlightFrameIndex >= 0
-        && m_inFlightFrameIndex < m_timestamps.size()
-        && timestampMs == m_timestamps.at(m_inFlightFrameIndex)) {
-        m_frameRequestInFlight = false;
-        if (m_desiredFrameIndex != m_inFlightFrameIndex) {
-            dispatchFrameRequest();
+        if (streamId == currentStreamId()) {
+            noteFrameShown(timestampMs);
+            if (m_seekTimer.isValid()) {
+                qCDebug(lcHistoryTiming, "marker %d: %lld ms from cursor to picture",
+                        m_inFlightMarker, m_seekTimer.elapsed());
+            }
         }
+    }
+    m_inFlightStreams.remove(streamId);
+    if (m_inFlightStreams.isEmpty()) {
+        // The whole round is answered: if the user has moved on meanwhile,
+        // fetch the latest position only -- never the ones it passed over.
+        releaseFrameSlot();
     }
 }
 
-void HistoryView::onHistoryFrameMissing(quint32 streamId)
+bool HistoryView::isEmptyRange(quint32 streamId, qint64 timestampMs) const
 {
-    if (m_videoExport.active && streamId == m_videoExport.streamId && !m_videoExport.pending.isEmpty()) {
-        m_videoExport.pending.removeFirst();
-        exportNextVideoFrame();
+    for (const QPair<qint64, qint64> &range : m_emptyRanges.value(streamId)) {
+        if (timestampMs >= range.first && timestampMs < range.second) {
+            return true;
+        }
     }
-    // PlayerVideoFrame.Offline: that screen has nothing near this moment.
-    if (m_deviceMonitorStreams.value(m_currentDeviceKey).contains(streamId)) {
-        m_videoStrip->setOffline(streamId);
+    return false;
+}
+
+void HistoryView::onSegmentsReceived(quint32 streamId, const QString &day,
+                                     const QList<HistoryVideoSegmentInfo> &segments)
+{
+    if (day != m_rangeKey || !historyStreams().contains(streamId)) {
+        return;
     }
-    // Primary stream had nothing: still free the in-flight slot so stepping
-    // doesn't wedge, and catch up if the target moved.
-    if (streamId == currentStreamId()) {
-        m_timeline->setLoaded(true); // the day is seekable even if this spot is empty
-        if (m_frameRequestInFlight) {
-            m_frameRequestInFlight = false;
-            if (m_desiredFrameIndex != m_inFlightFrameIndex) {
-                dispatchFrameRequest();
+    m_videoSegments.insert(streamId, segments);
+    dispatchPrefetch();
+}
+
+void HistoryView::dispatchPrefetch()
+{
+    // One run in flight at a time: the host serves frames the user is waiting
+    // on ahead of this anyway, and a single outstanding request keeps the
+    // order "nearest to the cursor first" meaningful.
+    if (m_segmentRequestInFlight || m_rangeKey.isEmpty()) {
+        return;
+    }
+    const qint64 periodStart = periodStartMs();
+    const qint64 periodStop = periodStopMs();
+    const int marker = m_timeline->currentMarker();
+    const qint64 around = marker >= 0 ? m_timeline->timestampForMarker(marker) : periodStart;
+
+    quint32 bestStream = 0;
+    qint64 bestSequence = 0;
+    qint64 bestFrom = 0;
+    qint64 bestTo = 0;
+    qint64 bestDistance = std::numeric_limits<qint64>::max();
+
+    for (quint32 streamId : historyStreams()) {
+        for (const HistoryVideoSegmentInfo &run : m_videoSegments.value(streamId)) {
+            const qint64 start = qMax(run.beginMs, periodStart);
+            const qint64 stop = qMin(run.endMs + 1, periodStop);
+            if (stop <= start) {
+                continue;
+            }
+            qint64 gap = 0;
+            if (!m_segmentStore.nextGap(streamId, start, stop, around < 0 ? start : around, &gap)) {
+                continue;
+            }
+            if (isEmptyRange(streamId, gap)) {
+                continue;
+            }
+            // The screen the user is actually looking at wins ties, and
+            // within a screen the stretch nearest the cursor goes first.
+            qint64 distance = qAbs(gap - (around < 0 ? start : around));
+            if (streamId != currentStreamId()) {
+                distance += 24LL * 3600 * 1000; // secondary screens come after
+            }
+            if (distance < bestDistance) {
+                bestDistance = distance;
+                bestStream = streamId;
+                bestSequence = run.sequenceId;
+                bestFrom = gap;
+                bestTo = stop;
             }
         }
+    }
+    if (bestStream == 0) {
+        return; // everything in the period is held
+    }
+    m_segmentRequestInFlight = true;
+    m_segmentStreamId = bestStream;
+    m_segmentFromMs = bestFrom;
+    m_segmentToMs = bestTo;
+    m_segmentRequestId = allocateRequestId();
+    m_connection.requestHistorySegment(bestStream, bestSequence, bestFrom, bestTo,
+                                       m_segmentRequestId);
+}
+
+void HistoryView::onSegmentReceived(quint32 streamId, quint64 requestId,
+                                    const ViewerProtocol::HistorySegmentPayload &segment)
+{
+    const bool wasOurs = requestId == m_segmentRequestId && m_segmentRequestInFlight;
+    if (wasOurs) {
+        m_segmentRequestInFlight = false;
+    }
+    // A run downloaded for the period we have since left is of no use.
+    if (!isCurrentGeneration(requestId)
+        || !historyStreams().contains(streamId)) {
+        if (wasOurs) {
+            dispatchPrefetch();
+        }
+        return;
+    }
+    if (m_segmentStore.addSegment(streamId, segment)) {
+        const int marker = m_timeline->currentMarker();
+        const qint64 around = marker >= 0 ? m_timeline->timestampForMarker(marker) : periodStartMs();
+        m_segmentStore.trim(around);
+        if (streamId == currentStreamId()) {
+            // SliderBar.qml's loadedRanges: the whole new stretch turns blue
+            // at once, which is what makes the progress actually visible.
+            // Only this segment -- re-marking every held span on each arrival
+            // grew with the period and did nothing new.
+            m_timeline->markLoadedRange(segment.frames.first().timestampMs,
+                                        segment.frames.last().timestampMs);
+        }
+        qCDebug(lcHistoryTiming, "segment: %lld frames for screen %u, %lld KB held",
+                qint64(segment.frames.size()), streamId, m_segmentStore.bytes() / 1024);
+        // The position the user is on may have just become available.
+        const qint64 moment = m_timeline->timestampForMarker(m_timeline->currentMarker());
+        if (moment >= 0) {
+            showFromStore(moment);
+        }
+    }
+    if (wasOurs) {
+        dispatchPrefetch();
+    }
+}
+
+void HistoryView::onSegmentMissing(quint32 streamId, quint64 requestId)
+{
+    if (requestId != m_segmentRequestId || !m_segmentRequestInFlight) {
+        return;
+    }
+    m_segmentRequestInFlight = false;
+    // Nothing recorded from there to the end of that run: remember it, or the
+    // prefetch would keep picking the same gap forever.
+    if (isCurrentGeneration(requestId) && streamId == m_segmentStreamId) {
+        m_emptyRanges[streamId].append({m_segmentFromMs, m_segmentToMs});
+    }
+    dispatchPrefetch();
+}
+
+bool HistoryView::showFromStore(qint64 timestampMs)
+{
+    bool complete = true;
+    for (quint32 streamId : historyStreams()) {
+        // Downloaded VP8 first -- decoding a delta locally is far cheaper
+        // than a round trip for a JPEG.
+        QImage image = m_segmentStore.frameAt(streamId, timestampMs);
+        if (image.isNull()) {
+            image = cachedFrame(streamId, timestampMs);
+        }
+        if (image.isNull()) {
+            complete = false;
+            continue;
+        }
+        m_videoStrip->setFrame(streamId, image);
+        m_displayedOrdinal = m_seekOrdinal;
+        if (streamId == currentStreamId()) {
+            noteFrameShown(timestampMs);
+        }
+    }
+    return complete;
+}
+
+void HistoryView::onHistoryFrameMissing(quint32 streamId, quint64 requestId)
+{
+    if (m_videoExport.active && streamId == m_videoExport.streamId
+        && requestId == m_videoExport.requestId && !m_videoExport.pending.isEmpty()) {
+        m_videoExport.pending.removeFirst();
+        exportNextVideoFrame();
+        return;
+    }
+    if (!isCurrentGeneration(requestId) || requestId != m_inFlightRequestId) {
+        return;
+    }
+    // PlayerVideoFrame.Offline: that screen has nothing near this moment --
+    // but only while nothing newer is already on screen (see onFrameReceived).
+    if (m_inFlightOrdinal >= m_displayedOrdinal
+        && historyStreams().contains(streamId)) {
+        m_videoStrip->setOffline(streamId);
+    }
+    m_inFlightStreams.remove(streamId);
+    if (m_inFlightStreams.isEmpty()) {
+        releaseFrameSlot();
     }
 }
 
@@ -3586,12 +4184,11 @@ void HistoryView::updateInfoPanel()
 {
     // infoFrame for the current marker: what was used during this Time step,
     // each resource's share of it, and which one was in use at the moment.
-    const int index = m_timeline->currentIndex();
-    if (index < 0 || index >= m_timestamps.size()) {
+    const qint64 moment = m_timeline->timestampForMarker(m_timeline->currentMarker());
+    if (moment < 0) {
         m_infoPanel->setItems({}, {});
         return;
     }
-    const qint64 moment = m_timestamps.at(index);
     const qint64 rangeStart = periodStartMs();
     const qint64 step = qMax<qint64>(1000, m_timeStepMs);
     const qint64 windowStart = rangeStart + (moment - rangeStart) / step * step;
@@ -3707,9 +4304,9 @@ void HistoryView::onKeystrokesReceived(quint32 streamId, const QString &day,
         m_textLog->setItem(i, 3, new QTableWidgetItem(row.windowTitle));
         m_textLog->setItem(i, 4, new QTableWidgetItem(row.text));
     }
-    const int index = m_timeline->currentIndex();
-    if (index >= 0 && index < m_timestamps.size()) {
-        updateKeystream(m_timestamps.at(index));
+    const qint64 moment = m_timeline->timestampForMarker(m_timeline->currentMarker());
+    if (moment >= 0) {
+        updateKeystream(moment);
     }
 }
 

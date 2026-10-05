@@ -7,6 +7,10 @@
 #include <QSslKey>
 #include <QTcpServer>
 
+#include <memory>
+
+class HistoryFrameService;
+
 class AgentServer final : public QTcpServer
 {
     Q_OBJECT
@@ -19,6 +23,8 @@ public:
     };
 
     explicit AgentServer(QObject *parent = nullptr);
+    // Out-of-line: m_frameService holds an incomplete type here.
+    ~AgentServer() override;
 
     bool startListening(quint16 port, const TlsConfig &tls, const AgentSettings &settings,
                         QString *error);
@@ -34,6 +40,8 @@ public:
 
     // Applied to every connection adopted from here on; existing
     // connections at the time of the call are updated too.
+    // Also spins up the shared history frame reader thread (getFrame is
+    // served from there, never on the event loop).
     void setHistoryRecorder(HistoryRecorder *recorder);
 
     int connectionCount() const { return m_connections.size(); }
@@ -55,4 +63,5 @@ private:
     QList<AgentConnection *> m_connections;
     QList<MonitorInfo> m_monitors;
     HistoryRecorder *m_historyRecorder = nullptr;
+    std::unique_ptr<HistoryFrameService> m_frameService;
 };

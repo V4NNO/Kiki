@@ -1,6 +1,9 @@
 #include "agentconnection.h"
 
+#include "historyframereader.h"
+
 #include <QBuffer>
+#include <QElapsedTimer>
 #include <QDataStream>
 #include <QJsonArray>
 #include <QJsonDocument>
@@ -102,6 +105,39 @@ AgentConnection::AgentConnection(QSslSocket *socket, AgentSettings settings, QOb
 
     m_heartbeatTimer.setInterval(5000);
     connect(&m_heartbeatTimer, &QTimer::timeout, this, &AgentConnection::onHeartbeatTimer);
+
+    // Deferred (SQL-heavy) history queries are drained one per event-loop
+    // turn, and only while no frame read is outstanding -- a scrub must
+    // never queue behind a chart query.
+    static quint64 nextConnectionId = 0;
+    m_connectionId = ++nextConnectionId;
+    m_deferredTimer.setSingleShot(true);
+    m_deferredTimer.setInterval(0);
+    connect(&m_deferredTimer, &QTimer::timeout, this, &AgentConnection::processDeferredQueries);
+    m_segmentTimer.setSingleShot(true);
+    m_segmentTimer.setInterval(0);
+    connect(&m_segmentTimer, &QTimer::timeout, this, [this] {
+        if (!m_frameInFlight) {
+            dispatchNextRead();
+        }
+    });
+}
+
+void AgentConnection::setHistoryFrameService(HistoryFrameService *service)
+{
+    if (m_frameService == service) {
+        return;
+    }
+    if (m_frameService) {
+        disconnect(m_frameService, nullptr, this, nullptr);
+    }
+    m_frameService = service;
+    if (m_frameService) {
+        connect(m_frameService, &HistoryFrameService::frameRead, this,
+                &AgentConnection::onFrameRead);
+        connect(m_frameService, &HistoryFrameService::segmentRead, this,
+                &AgentConnection::onSegmentRead);
+    }
 }
 
 AgentConnection::~AgentConnection() = default;
@@ -322,6 +358,29 @@ void AgentConnection::sendGoodbyeAndClose()
     m_socket->disconnectFromHost();
 }
 
+namespace {
+// Queries whose SQL is heavy enough to be felt as a stall if it runs while
+// the user is scrubbing: they are queued and drained only when no frame read
+// is outstanding, so the picture the user asked for always wins the race.
+bool isDeferrableHistoryAction(const QString &action)
+{
+    return action == QStringLiteral("chartSeries")
+        || action == QStringLiteral("listActivity")
+        || action == QStringLiteral("listAppSegments")
+        || action == QStringLiteral("listRunningApplications")
+        || action == QStringLiteral("listWebVisits")
+        || action == QStringLiteral("listWebPages")
+        || action == QStringLiteral("listKeystrokes");
+}
+
+// A viewer that keeps changing its mind faster than the host can answer must
+// not be able to grow this without bound.
+constexpr int kMaxDeferredQueries = 32;
+
+// Same idea for the prefetch queue.
+constexpr int kMaxPendingSegments = 24;
+} // namespace
+
 void AgentConnection::handleHistoryQuery(const ViewerProtocol::Header &header, const QByteArray &payload)
 {
     if (!m_authenticated) {
@@ -335,6 +394,52 @@ void AgentConnection::handleHistoryQuery(const ViewerProtocol::Header &header, c
     const QJsonObject request = document.object();
     const QString action = request.value(QStringLiteral("action")).toString();
     const quint32 monitorStreamId = header.streamId;
+
+    if (!m_historyRecorder) {
+        sendJson(ViewerProtocol::MessageType::HistoryQuery, monitorStreamId,
+                QJsonObject{{QStringLiteral("action"), action},
+                            {QStringLiteral("requestId"), request.value(QStringLiteral("requestId"))},
+                            {QStringLiteral("error"), QStringLiteral("Istoricul nu este activat pe host.")}});
+        return;
+    }
+
+    // The frame the user is looking at is served first and off this thread.
+    if (action == QStringLiteral("getFrame")) {
+        const qint64 timestampMs =
+            static_cast<qint64>(request.value(QStringLiteral("timestampMs")).toDouble());
+        const quint64 requestId =
+            static_cast<quint64>(request.value(QStringLiteral("requestId")).toDouble());
+        queueFrameRequest(monitorStreamId, timestampMs, requestId);
+        return;
+    }
+
+    // Background prefetch of a whole stretch of video: queued behind any
+    // frame the user is actually waiting for, ahead of the heavy queries.
+    if (action == QStringLiteral("getSegment")) {
+        queueSegmentRequest(
+            monitorStreamId,
+            static_cast<qint64>(request.value(QStringLiteral("sequenceId")).toDouble()),
+            static_cast<qint64>(request.value(QStringLiteral("fromMs")).toDouble()),
+            static_cast<qint64>(request.value(QStringLiteral("toMs")).toDouble()),
+            static_cast<quint64>(request.value(QStringLiteral("requestId")).toDouble()));
+        return;
+    }
+
+    if (isDeferrableHistoryAction(action)) {
+        while (m_deferred.size() >= kMaxDeferredQueries) {
+            m_deferred.dequeue();
+        }
+        m_deferred.enqueue(DeferredQuery{monitorStreamId, request});
+        scheduleDeferredQueries();
+        return;
+    }
+
+    runHistoryQuery(monitorStreamId, request);
+}
+
+void AgentConnection::runHistoryQuery(quint32 monitorStreamId, const QJsonObject &request)
+{
+    const QString action = request.value(QStringLiteral("action")).toString();
     // Day-scoped queries take an explicit [startMs, stopMs) range when the
     // viewer sends one (History works on multi-day / custom periods); else
     // the local day. "day" is echoed back either way, as the reply's key.
@@ -348,9 +453,6 @@ void AgentConnection::handleHistoryQuery(const ViewerProtocol::Header &header, c
     }();
 
     if (!m_historyRecorder) {
-        sendJson(ViewerProtocol::MessageType::HistoryQuery, monitorStreamId,
-                QJsonObject{{QStringLiteral("action"), action},
-                            {QStringLiteral("error"), QStringLiteral("Istoricul nu este activat pe host.")}});
         return;
     }
 
@@ -369,18 +471,36 @@ void AgentConnection::handleHistoryQuery(const ViewerProtocol::Header &header, c
                 QJsonObject{{QStringLiteral("action"), action},
                             {QStringLiteral("day"), day},
                             {QStringLiteral("timestamps"), array}});
-    } else if (action == QStringLiteral("getFrame")) {
-        const qint64 timestampMs = static_cast<qint64>(
-            request.value(QStringLiteral("timestampMs")).toDouble());
-        const QByteArray jpeg = m_historyRecorder->readFrame(monitorStreamId, timestampMs);
-        if (jpeg.isEmpty()) {
-            sendJson(ViewerProtocol::MessageType::HistoryQuery, monitorStreamId,
-                    QJsonObject{{QStringLiteral("action"), action},
-                                {QStringLiteral("error"), QStringLiteral("Cadru negasit.")}});
-            return;
+    } else if (action == QStringLiteral("listScreens")) {
+        // The employee's screens that recorded anything in the period --
+        // what History shows side by side, independent of what is plugged in
+        // right now.
+        QJsonArray array;
+        for (const RecordedScreen &screen :
+             m_historyRecorder->listRecordedScreens(monitorStreamId, rangeStart, rangeStop)) {
+            array.append(QJsonObject{{QStringLiteral("streamId"), double(screen.streamId)},
+                                     {QStringLiteral("name"), screen.name}});
         }
-        m_socket->write(ViewerProtocol::encodeMessage(ViewerProtocol::MessageType::HistoryFrame,
-                                                       monitorStreamId, 0, jpeg, timestampMs));
+        sendJson(ViewerProtocol::MessageType::HistoryQuery, monitorStreamId,
+                QJsonObject{{QStringLiteral("action"), action},
+                            {QStringLiteral("day"), day},
+                            {QStringLiteral("screens"), array}});
+    } else if (action == QStringLiteral("listSegments")) {
+        // The recorded runs in the window. The viewer uses these to plan
+        // which stretches of video to pull down and decode locally.
+        QJsonArray array;
+        for (const VideoSegmentInfo &info :
+             m_historyRecorder->listVideoSegments(monitorStreamId, rangeStart, rangeStop)) {
+            array.append(QJsonObject{{QStringLiteral("id"), double(info.sequenceId)},
+                                     {QStringLiteral("beginMs"), info.beginMs},
+                                     {QStringLiteral("endMs"), info.endMs},
+                                     {QStringLiteral("width"), info.width},
+                                     {QStringLiteral("height"), info.height}});
+        }
+        sendJson(ViewerProtocol::MessageType::HistoryQuery, monitorStreamId,
+                QJsonObject{{QStringLiteral("action"), action},
+                            {QStringLiteral("day"), day},
+                            {QStringLiteral("segments"), array}});
     } else if (action == QStringLiteral("listActivity")) {
         QJsonArray array;
         for (const ActivitySample &sample : m_historyRecorder->listActivity(monitorStreamId, rangeStart, rangeStop)) {
@@ -524,6 +644,152 @@ void AgentConnection::handleHistoryQuery(const ViewerProtocol::Header &header, c
                             {QStringLiteral("granulaMs"), granulaMs},
                             {QStringLiteral("series"), series}});
     }
+}
+
+void AgentConnection::queueFrameRequest(quint32 monitorStreamId, qint64 timestampMs,
+                                       quint64 requestId)
+{
+    if (!m_frameService) {
+        sendJson(ViewerProtocol::MessageType::HistoryQuery, monitorStreamId,
+                QJsonObject{{QStringLiteral("action"), QStringLiteral("getFrame")},
+                            {QStringLiteral("requestId"), static_cast<double>(requestId)},
+                            {QStringLiteral("error"), QStringLiteral("Cadru negasit.")}});
+        return;
+    }
+    // Only the newest position per screen survives: while the slider is
+    // being dragged every superseded position is dropped here instead of
+    // being read and decoded for nothing.
+    if (!m_pendingFrames.contains(monitorStreamId)) {
+        m_frameOrder.append(monitorStreamId);
+    }
+    m_pendingFrames.insert(monitorStreamId, PendingFrame{timestampMs, requestId});
+    if (!m_frameInFlight) {
+        dispatchNextRead();
+    }
+}
+
+void AgentConnection::queueSegmentRequest(quint32 monitorStreamId, qint64 sequenceId,
+                                         qint64 fromMs, qint64 toMs, quint64 requestId)
+{
+    if (!m_frameService) {
+        sendJson(ViewerProtocol::MessageType::HistoryQuery, monitorStreamId,
+                QJsonObject{{QStringLiteral("action"), QStringLiteral("getSegment")},
+                            {QStringLiteral("requestId"), static_cast<double>(requestId)},
+                            {QStringLiteral("error"), QStringLiteral("Segment negasit.")}});
+        return;
+    }
+    // Prefetch is best-effort: a viewer that keeps asking faster than the
+    // disk can answer loses its oldest requests rather than growing a queue.
+    while (m_pendingSegments.size() >= kMaxPendingSegments) {
+        m_pendingSegments.dequeue();
+    }
+    m_pendingSegments.enqueue(PendingSegment{monitorStreamId, sequenceId, fromMs, toMs, requestId});
+    // Deliberately not dispatched here: a viewer that is scrubbing sends the
+    // frame it is waiting for alongside its prefetch, and both land in the
+    // same read burst. Yielding a turn lets that frame be queued first, so
+    // the picture never waits behind a background download.
+    if (!m_frameInFlight && !m_segmentTimer.isActive()) {
+        m_segmentTimer.start();
+    }
+}
+
+void AgentConnection::dispatchNextRead()
+{
+    // A frame the user is looking at always goes before background prefetch.
+    while (!m_frameOrder.isEmpty()) {
+        const quint32 streamId = m_frameOrder.takeFirst();
+        const auto it = m_pendingFrames.find(streamId);
+        if (it == m_pendingFrames.end()) {
+            continue;
+        }
+        const PendingFrame pending = it.value();
+        m_pendingFrames.erase(it);
+        m_frameInFlight = true;
+        m_frameService->request(m_connectionId, streamId, pending.timestampMs, pending.requestId);
+        return;
+    }
+    if (!m_pendingSegments.isEmpty()) {
+        const PendingSegment pending = m_pendingSegments.dequeue();
+        m_frameInFlight = true;
+        m_frameService->requestSegment(m_connectionId, pending.streamId, pending.sequenceId,
+                                       pending.fromMs, pending.toMs, pending.requestId);
+        return;
+    }
+    m_frameInFlight = false;
+    // Nothing left to read: let the charts/keystrokes through.
+    scheduleDeferredQueries();
+}
+
+void AgentConnection::onSegmentRead(quint64 connectionId, quint32 monitorStreamId,
+                                    quint64 requestId, const QByteArray &payload, qint64 readMs)
+{
+    if (connectionId != m_connectionId) {
+        return;
+    }
+    if (payload.isEmpty()) {
+        sendJson(ViewerProtocol::MessageType::HistoryQuery, monitorStreamId,
+                QJsonObject{{QStringLiteral("action"), QStringLiteral("getSegment")},
+                            {QStringLiteral("requestId"), static_cast<double>(requestId)},
+                            {QStringLiteral("error"), QStringLiteral("Segment negasit.")}});
+    } else {
+        m_socket->write(ViewerProtocol::encodeMessage(ViewerProtocol::MessageType::HistorySegment,
+                                                       monitorStreamId, requestId, payload));
+    }
+    if (readMs >= 500) {
+        emit logMessage(QStringLiteral("History: segmentul pentru ecranul %1 a durat %2 ms.")
+                            .arg(monitorStreamId)
+                            .arg(readMs));
+    }
+    dispatchNextRead();
+}
+
+void AgentConnection::onFrameRead(quint64 connectionId, quint32 monitorStreamId, qint64 timestampMs,
+                                  quint64 requestId, const QByteArray &jpeg, qint64 decodeMs)
+{
+    if (connectionId != m_connectionId) {
+        return; // another viewer's frame (the reader is shared)
+    }
+    if (jpeg.isEmpty()) {
+        // The request id goes back with the miss too, so the viewer can tell
+        // "the position you are on now has nothing" from a stale answer to a
+        // position it has already left.
+        sendJson(ViewerProtocol::MessageType::HistoryQuery, monitorStreamId,
+                QJsonObject{{QStringLiteral("action"), QStringLiteral("getFrame")},
+                            {QStringLiteral("requestId"), static_cast<double>(requestId)},
+                            {QStringLiteral("timestampMs"), timestampMs},
+                            {QStringLiteral("error"), QStringLiteral("Cadru negasit.")}});
+    } else {
+        // sequence carries the request id: HistoryFrame is a binary message,
+        // and this is what lets the viewer drop an out-of-order answer.
+        m_socket->write(ViewerProtocol::encodeMessage(ViewerProtocol::MessageType::HistoryFrame,
+                                                       monitorStreamId, requestId, jpeg,
+                                                       timestampMs));
+    }
+    if (decodeMs >= 250) {
+        emit logMessage(QStringLiteral("History: cadrul %1 (ecran %2) a durat %3 ms de citit.")
+                            .arg(timestampMs)
+                            .arg(monitorStreamId)
+                            .arg(decodeMs));
+    }
+    dispatchNextRead();
+}
+
+void AgentConnection::scheduleDeferredQueries()
+{
+    if (m_deferred.isEmpty() || m_frameInFlight || m_deferredTimer.isActive()) {
+        return;
+    }
+    m_deferredTimer.start();
+}
+
+void AgentConnection::processDeferredQueries()
+{
+    if (m_frameInFlight || m_deferred.isEmpty()) {
+        return;
+    }
+    const DeferredQuery query = m_deferred.dequeue();
+    runHistoryQuery(query.streamId, query.request);
+    scheduleDeferredQueries();
 }
 
 void AgentConnection::onHandshakeTimeout()

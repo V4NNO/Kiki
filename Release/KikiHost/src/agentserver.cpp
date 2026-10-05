@@ -1,5 +1,7 @@
 #include "agentserver.h"
 
+#include "historyframereader.h"
+
 #include <QFile>
 #include <QHostAddress>
 
@@ -7,6 +9,8 @@ AgentServer::AgentServer(QObject *parent)
     : QTcpServer(parent)
 {
 }
+
+AgentServer::~AgentServer() = default;
 
 bool AgentServer::startListening(quint16 port, const TlsConfig &tls, const AgentSettings &settings,
                                  QString *error)
@@ -119,6 +123,7 @@ void AgentServer::adoptConnection(QSslSocket *socket)
 {
     auto *connection = new AgentConnection(socket, m_settings, this);
     connection->setHistoryRecorder(m_historyRecorder);
+    connection->setHistoryFrameService(m_frameService.get());
     connect(connection, &AgentConnection::logMessage, this, &AgentServer::logMessage);
     connect(connection, &AgentConnection::authenticated, this, [this](AgentConnection *self) {
         self->setMonitors(m_monitors);
@@ -135,8 +140,16 @@ void AgentServer::adoptConnection(QSslSocket *socket)
 void AgentServer::setHistoryRecorder(HistoryRecorder *recorder)
 {
     m_historyRecorder = recorder;
+    // One reader thread for the whole host: every viewer's seeks share it,
+    // and each connection picks its own answers out by connection id.
+    if (recorder && !m_frameService) {
+        m_frameService = std::make_unique<HistoryFrameService>(recorder->historyDir());
+    } else if (!recorder) {
+        m_frameService.reset();
+    }
     for (AgentConnection *connection : std::as_const(m_connections)) {
         connection->setHistoryRecorder(recorder);
+        connection->setHistoryFrameService(m_frameService.get());
     }
 }
 

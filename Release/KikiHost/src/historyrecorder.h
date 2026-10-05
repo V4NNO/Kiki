@@ -38,6 +38,23 @@ struct WebUsage {
     qint64 totalMs = 0;
 };
 
+// One recorded run of video for a monitor (video_sequence), as the viewer
+// needs it to plan which stretches to download.
+struct VideoSegmentInfo {
+    qint64 sequenceId = 0;
+    qint64 beginMs = 0;
+    qint64 endMs = 0;
+    int width = 0;
+    int height = 0;
+};
+
+// One screen of an employee that has video in a period (see
+// HistoryRecorder::listRecordedScreens).
+struct RecordedScreen {
+    quint32 streamId = 0;
+    QString name;
+};
+
 struct ActivitySample {
     qint64 timestampMs = 0;
     int inputEvents = 0;
@@ -81,6 +98,9 @@ public:
 
     bool start(QString *error);
     bool isValid() const { return m_database.isOpen(); }
+    // Where history.sqlite lives -- HistoryFrameReader opens the same file
+    // read-only from its own thread.
+    QString historyDir() const { return m_historyDir; }
 
     // How often a history frame is kept, as the original's video_history_fps
     // (frames/second). Call before start(). The schema default there was
@@ -151,9 +171,21 @@ public:
     static QPair<qint64, qint64> dayBounds(const QString &day);
     QStringList listDays(quint32 monitorStreamId) const;
     QList<qint64> listFrameTimestamps(quint32 monitorStreamId, qint64 startMs, qint64 stopMs) const;
-    // Non-const: keeps a warm VP8 decoder per monitor so stepping forward
-    // decodes one delta instead of replaying from the keyframe each call.
-    QByteArray readFrame(quint32 monitorStreamId, qint64 timestampMs);
+    // The video runs overlapping [startMs, stopMs) -- the viewer asks for
+    // these first, then downloads each run in keyframe-aligned chunks.
+    QList<VideoSegmentInfo> listVideoSegments(quint32 monitorStreamId, qint64 startMs,
+                                              qint64 stopMs) const;
+    // Every screen of the employee that monitorStreamId belongs to which has
+    // video in [startMs, stopMs), whether or not it is connected now, in
+    // stream id order. History is the employee's, not one monitor's: the
+    // original keys its player block by session (user/domain/computer) and
+    // finds the screens in the recorded data, so plugging in a second
+    // monitor never hides what the first one recorded before it.
+    QList<RecordedScreen> listRecordedScreens(quint32 monitorStreamId, qint64 startMs,
+                                              qint64 stopMs) const;
+    // Reading back a frame is NOT done here: it is VP8 decode work that
+    // would block the host event loop, so it lives in HistoryFrameReader on
+    // its own thread with its own read-only connection to this database.
     QList<ActivitySample> listActivity(quint32 monitorStreamId, qint64 startMs, qint64 stopMs) const;
     QList<AppSegment> listAppSegments(quint32 monitorStreamId, qint64 startMs, qint64 stopMs) const;
     // Totals are clipped to the range.
@@ -189,8 +221,6 @@ private:
     // The VP8 sequence currently open for one monitor (see recordFrame /
     // vp8codec.h). Defined in the .cpp so this header needn't pull in libvpx.
     struct OpenVideoSequence;
-    // A warm VP8 decoder for reads, with the position it's decoded up to.
-    struct VideoDecodeCache;
 
     struct OpenRange {
         qint64 rowId = -1;
@@ -216,8 +246,6 @@ private:
     int m_minIntervalMs = 1000;
     // One open VP8 sequence per monitor stream.
     std::unordered_map<quint32, std::unique_ptr<OpenVideoSequence>> m_openVideo;
-    // One warm decode cache per monitor stream (read side).
-    std::unordered_map<quint32, std::unique_ptr<VideoDecodeCache>> m_decodeCache;
     QHash<quint64, OpenSegment> m_openSegments; // key: sessionId (one per session)
     QHash<quint64, OpenWebSegment> m_openWebSegments; // key: (sessionId << 32) | monitorStreamId
     QHash<QString, OpenRange> m_openOnline;   // key: session username
