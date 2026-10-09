@@ -1,5 +1,4 @@
 #include "activityprobe.h"
-#include "browserurlprobe.h"
 #include "keylogger.h"
 #include "screencapture.h"
 #include "subservicehost.h"
@@ -17,28 +16,6 @@
 #include <QTimer>
 
 #include <memory>
-
-#ifdef Q_OS_WIN
-#include <windows.h>
-namespace {
-// The foreground window's title, recorded alongside the active application so
-// the viewer's "Programs" list can show a real title instead of "No title".
-QString foregroundWindowTitleForMetadata()
-{
-    HWND fg = GetForegroundWindow();
-    if (!fg) {
-        return QString();
-    }
-    wchar_t buffer[256] = {0};
-    GetWindowTextW(fg, buffer, 256);
-    return QString::fromWCharArray(buffer);
-}
-} // namespace
-#else
-namespace {
-QString foregroundWindowTitleForMetadata() { return QString(); }
-} // namespace
-#endif
 
 namespace {
 // This process is launched by KikiHost (itself a service) with no
@@ -108,7 +85,6 @@ int main(int argc, char *argv[])
 
     ScreenCaptureManager capture;
     ActivityProbe activityProbe;
-    BrowserUrlProbe browserUrlProbe;
     WindowListCapture windowCapture;
     Keylogger keylogger;
 
@@ -121,30 +97,31 @@ int main(int argc, char *argv[])
                                    .arg(screenName, detail));
                      });
 
-    // Tracks the latest known application/idle/url so the periodic
-    // activity-sample timer below (which needs to fire on a steady cadence
-    // to feed the History "Activity" bar) always has something current to
-    // send, even between ActivityProbe's/BrowserUrlProbe's own
-    // change-triggered updates.
-    auto currentApplication = std::make_shared<QString>();
+    // Tracks the latest foreground observation and idle state so the
+    // periodic activity-sample timer below (which needs to fire on a steady
+    // cadence to feed the History "Activity" bar) always has something
+    // current to send between ActivityProbe's own updates. The observation
+    // is kept and sent whole: application, window title and url were read
+    // from the same window in the same poll, and nothing here re-reads any
+    // of them on its own (a title read at push time, next to an application
+    // up to one poll old, is what paired OUTLOOK.EXE with Ghidra's title).
+    auto currentForeground = std::make_shared<ForegroundObservation>();
     auto currentIdleText = std::make_shared<QString>();
-    auto currentUrl = std::make_shared<QString>();
     // Raw session-state behind the History Activity bar's volume_activity
     // (see ActivityProbe): seconds since last input and whether the
     // screensaver is running.
     auto currentIdleSeconds = std::make_shared<double>(0.0);
     auto currentScreensaver = std::make_shared<bool>(false);
 
-    // Pushes the current (application, idle, url) snapshot for every
-    // monitor -- shared by every trigger that should cause an immediate
-    // metadata push (app change, url change) plus the periodic sampler
+    // Pushes the current (observation, idle) snapshot for every monitor --
+    // shared by ActivityProbe's per-poll update and the periodic sampler
     // below (which supplies the real inputEvents count).
-    auto pushCurrentMetadata = [&host, &capture, currentApplication, currentIdleText, currentUrl,
+    auto pushCurrentMetadata = [&host, &capture, currentForeground, currentIdleText,
                                 currentIdleSeconds, currentScreensaver](int inputEvents) {
-        // Same for every monitor this push -- which display currently holds
-        // the foreground window (the tile's "Show active monitor" target).
-        const quint32 activeMonitor = capture.foregroundMonitorStreamId();
-        const QString windowTitle = foregroundWindowTitleForMetadata();
+        const ForegroundObservation &foreground = *currentForeground;
+        // Same for every monitor this push -- which display holds the
+        // observed window (the tile's "Show active monitor" target).
+        const quint32 activeMonitor = capture.monitorStreamIdForWindow(foreground.window);
         // inputEvents is a session-wide count (keystrokes/clicks across the
         // whole machine, not per display), and the host records it once per
         // session -- so attach it to a single monitor this push and send 0
@@ -158,8 +135,8 @@ int main(int argc, char *argv[])
             const double idleForThisMonitor = sessionFieldsSent ? 0.0 : *currentIdleSeconds;
             const bool saverForThisMonitor = sessionFieldsSent ? false : *currentScreensaver;
             sessionFieldsSent = true;
-            host.pushMetadata(monitor.streamId, *currentApplication, *currentIdleText,
-                              eventsForThisMonitor, *currentUrl, activeMonitor, windowTitle,
+            host.pushMetadata(monitor.streamId, foreground.application, *currentIdleText,
+                              eventsForThisMonitor, foreground.url, activeMonitor, foreground.title,
                               idleForThisMonitor, saverForThisMonitor);
         }
     };
@@ -199,21 +176,17 @@ int main(int argc, char *argv[])
     });
     diagTimer.start();
     QObject::connect(&activityProbe, &ActivityProbe::activityChanged, &application,
-                     [currentApplication, currentIdleText, currentIdleSeconds, currentScreensaver,
-                      pushCurrentMetadata](const QString &application_, const QString &idleText,
-                                           double idleSeconds, bool screensaver) {
-                         *currentApplication = application_;
+                     [currentForeground, currentIdleText, currentIdleSeconds, currentScreensaver,
+                      pushCurrentMetadata](const ForegroundObservation &foreground,
+                                           const QString &idleText, double idleSeconds,
+                                           bool screensaver) {
+                         *currentForeground = foreground;
                          *currentIdleText = idleText;
                          *currentIdleSeconds = idleSeconds;
                          *currentScreensaver = screensaver;
                          pushCurrentMetadata(0);
                      });
-    QObject::connect(&browserUrlProbe, &BrowserUrlProbe::urlChanged, &application,
-                     [currentUrl, pushCurrentMetadata](const QString &url) {
-                         *currentUrl = url;
-                         pushCurrentMetadata(0);
-                     });
-    QObject::connect(&browserUrlProbe, &BrowserUrlProbe::logMessage, &application,
+    QObject::connect(&activityProbe, &ActivityProbe::logMessage, &application,
                      [](const QString &message) { printLine(message); });
     QObject::connect(&keylogger, &Keylogger::textFlushed, &host, &SubServiceHost::pushKeystroke);
 
@@ -260,7 +233,6 @@ int main(int argc, char *argv[])
 
     capture.start(IdleFps);
     activityProbe.start();
-    browserUrlProbe.start();
     windowCapture.start();
     if (!keylogger.start()) {
         printLine(QStringLiteral(

@@ -1,11 +1,13 @@
 #include "activityprobe.h"
 
 #include <QDateTime>
+#include <QElapsedTimer>
 #include <QTimer>
+
+#include <memory>
 
 #ifdef Q_OS_WIN
 #include <qt_windows.h>
-#include <psapi.h>
 
 namespace {
 // Same technique as WindowListCapture's lock detection (see
@@ -61,9 +63,25 @@ class ActivityProbe::Worker : public QObject
 public:
     using QObject::QObject;
 
+    ~Worker() override
+    {
+        // The UI Automation objects must go before COM is torn down.
+        m_source.reset();
+        if (m_comInitialized) {
+            CoUninitialize();
+        }
+    }
+
 public slots:
     void init()
     {
+        // MTA, not STA: UIA client calls can block on a provider (e.g. a
+        // browser tab building its accessibility tree for the first time),
+        // and MTA means that block only ever affects this thread's own
+        // queued work, never anyone else's.
+        m_comInitialized = SUCCEEDED(CoInitializeEx(nullptr, COINIT_MULTITHREADED));
+        m_source = std::make_unique<DesktopForegroundSource>();
+
         auto *timer = new QTimer(this);
         timer->setInterval(2000);
         connect(timer, &QTimer::timeout, this, &Worker::poll);
@@ -75,30 +93,23 @@ signals:
     // idleSeconds / screensaver are the raw session-state the node turns into
     // online_session_idle / online_session_saver ranges; idleText is only the
     // human-facing "Idle/Locked HH:MM:SS" the tile shows (60s floor kept).
-    void activityChanged(const QString &application, const QString &idleText, double idleSeconds,
-                         bool screensaver);
+    void activityChanged(const ForegroundObservation &foreground, const QString &idleText,
+                         double idleSeconds, bool screensaver);
+    void logMessage(const QString &message);
 
 private slots:
     void poll()
     {
-        QString application = QStringLiteral("desktop");
-        HWND foreground = GetForegroundWindow();
-        if (foreground) {
-            DWORD processId = 0;
-            GetWindowThreadProcessId(foreground, &processId);
-            if (processId != 0) {
-                HANDLE process = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, processId);
-                if (process) {
-                    wchar_t path[MAX_PATH] = {0};
-                    DWORD size = MAX_PATH;
-                    if (QueryFullProcessImageNameW(process, 0, path, &size)) {
-                        const QString fullPath = QString::fromWCharArray(path, static_cast<int>(size));
-                        const int slash = fullPath.lastIndexOf(QLatin1Char('\\'));
-                        application = slash >= 0 ? fullPath.mid(slash + 1) : fullPath;
-                    }
-                    CloseHandle(process);
-                }
-            }
+        QElapsedTimer stopwatch;
+        stopwatch.start();
+        const ForegroundObservation foreground = observeForeground(*m_source);
+        const qint64 elapsedMs = stopwatch.elapsed();
+        // BrowserUrlReader deliberately waits 350 ms for the address bar to
+        // settle after a navigation; only time beyond that is worth a line.
+        if (elapsedMs > 500) {
+            emit logMessage(QStringLiteral("[foreground] observatia pentru %1 a durat %2 ms")
+                                .arg(foreground.application)
+                                .arg(elapsedMs));
         }
 
         const bool locked = isSessionLocked();
@@ -132,14 +143,12 @@ private slots:
         // Always emit: idleSeconds / screensaver change every poll and the
         // host needs them to keep the session's online/idle/saver ranges
         // current, not only when the foreground app or the tile text changes.
-        m_lastApplication = application;
-        m_lastIdleText = idleText;
-        emit activityChanged(application, idleText, idleSeconds, screensaver);
+        emit activityChanged(foreground, idleText, idleSeconds, screensaver);
     }
 
 private:
-    QString m_lastApplication;
-    QString m_lastIdleText;
+    bool m_comInitialized = false;
+    std::unique_ptr<DesktopForegroundSource> m_source;
     // When the session was first noticed locked, 0 while unlocked -- lets
     // "Locked HH:MM:SS" count up from the actual lock moment instead of
     // restarting every poll.
@@ -156,11 +165,14 @@ public:
 public slots:
     void init()
     {
-        emit activityChanged(QStringLiteral("unknown"), QString(), 0.0, false);
+        ForegroundObservation foreground;
+        foreground.application = QStringLiteral("unknown");
+        emit activityChanged(foreground, QString(), 0.0, false);
     }
 signals:
-    void activityChanged(const QString &application, const QString &idleText, double idleSeconds,
-                         bool screensaver);
+    void activityChanged(const ForegroundObservation &foreground, const QString &idleText,
+                         double idleSeconds, bool screensaver);
+    void logMessage(const QString &message);
 };
 
 #endif
@@ -168,11 +180,13 @@ signals:
 ActivityProbe::ActivityProbe(QObject *parent)
     : QObject(parent)
 {
+    qRegisterMetaType<ForegroundObservation>();
     m_worker = new Worker();
     m_worker->moveToThread(&m_thread);
     connect(&m_thread, &QThread::started, m_worker, &Worker::init);
     connect(&m_thread, &QThread::finished, m_worker, &QObject::deleteLater);
     connect(m_worker, &Worker::activityChanged, this, &ActivityProbe::activityChanged);
+    connect(m_worker, &Worker::logMessage, this, &ActivityProbe::logMessage);
 }
 
 ActivityProbe::~ActivityProbe()

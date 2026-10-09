@@ -60,12 +60,14 @@ public:
     // Retires one WindowListCapture stream -- see MessageType::StreamClosed.
     void pushWindowClosed(quint32 streamId);
     void pushFrame(quint32 streamId, const QImage &image);
-    // url is empty when the foreground app isn't a recognized browser, or
-    // URL extraction failed -- see BrowserUrlProbe.
-    // activeMonitorStreamId: the (local) monitor stream the foreground
+    // application, windowTitle and url come from one foreground observation
+    // (see foregroundobserver.h) -- never combine values read at different
+    // moments. url is empty when the foreground app isn't a recognized
+    // browser, or URL extraction failed -- see BrowserUrlReader.
+    // activeMonitorStreamId: the (local) monitor stream that observation's
     // window is on, or 0 -- same for every monitor's metadata this tick;
     // the host translates it to its global id before relaying (see
-    // ScreenCaptureManager::foregroundMonitorStreamId).
+    // ScreenCaptureManager::monitorStreamIdForWindow).
     void pushMetadata(quint32 streamId, const QString &application, const QString &idleText,
                       int inputEvents, const QString &url, quint32 activeMonitorStreamId,
                       const QString &windowTitle, double idleSeconds = 0.0,

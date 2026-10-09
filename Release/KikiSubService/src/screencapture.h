@@ -46,12 +46,14 @@ public:
     bool isRunning() const { return m_timer.isActive(); }
 
     QList<MonitorInfo> monitors() const;
-    // The streamId of the monitor the foreground window is currently on
+    // The streamId of the monitor the given window (an HWND) is currently on
     // (MonitorFromWindow -> matching QScreen -> its stream), or 0 if there's
-    // no foreground window or it can't be matched. Drives the viewer tile's
-    // "Show active monitor" (automode) button, which follows whichever
-    // display holds the active program. Windows-only; 0 elsewhere.
-    quint32 foregroundMonitorStreamId() const;
+    // no window or it can't be matched. Called with the window of the
+    // foreground observation being pushed (see ActivityProbe), so the active
+    // monitor describes the same window as the application/title/url sent
+    // with it. Drives the viewer tile's "Show active monitor" (automode)
+    // button. Windows-only; 0 elsewhere.
+    quint32 monitorStreamIdForWindow(quintptr window) const;
 
 signals:
     void frameCaptured(quint32 streamId, const QImage &image);

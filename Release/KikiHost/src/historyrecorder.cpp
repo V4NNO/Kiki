@@ -379,8 +379,12 @@ bool HistoryRecorder::start(QString *error)
         "  monitor_stream_id INTEGER NOT NULL,"
         "  url TEXT NOT NULL,"
         "  start_ms INTEGER NOT NULL,"
-        "  end_ms INTEGER NOT NULL"
+        "  end_ms INTEGER NOT NULL,"
+        "  title TEXT NOT NULL DEFAULT ''"
         ")"));
+    // Migration for databases created before web_visits carried a title
+    // (fails harmlessly when the column already exists).
+    query.exec(QStringLiteral("ALTER TABLE web_visits ADD COLUMN title TEXT NOT NULL DEFAULT ''"));
     query.exec(QStringLiteral(
         "CREATE INDEX IF NOT EXISTS idx_web_visits_monitor_time "
         "ON web_visits(monitor_stream_id, start_ms)"));
@@ -767,18 +771,20 @@ void HistoryRecorder::noteApplication(quint32 sessionId, const QString &sessionU
     const qint64 now = QDateTime::currentMSecsSinceEpoch();
     auto it = m_openSegments.find(key);
 
-    if (it != m_openSegments.end() && it->application == application) {
-        // Same app still in front: extend the segment and keep its title
-        // current (the window title changes while the app stays the same).
+    if (it != m_openSegments.end() && it->application == application && it->title == title) {
+        // Same app AND same window title: just extend the open segment.
         QSqlQuery update(m_database);
-        update.prepare(QStringLiteral("UPDATE app_segments SET end_ms = ?, title = ? WHERE id = ?"));
+        update.prepare(QStringLiteral("UPDATE app_segments SET end_ms = ? WHERE id = ?"));
         update.addBindValue(now);
-        update.addBindValue(title);
         update.addBindValue(it->rowId);
         update.exec();
         return;
     }
 
+    // The app or the window title changed: start a new row so each
+    // (app, title) run has its own start/end, matching the original's
+    // online_session_program_title life spans instead of one latest title per
+    // program. The previous row's end_ms already reaches the last tick.
     QSqlQuery insert(m_database);
     insert.prepare(QStringLiteral(
         "INSERT INTO app_segments (session_id, monitor_stream_id, application, start_ms, end_ms, title, session_username) "
@@ -793,10 +799,11 @@ void HistoryRecorder::noteApplication(quint32 sessionId, const QString &sessionU
             QStringLiteral("Nu am putut scrie segmentul de aplicatie: %1").arg(insert.lastError().text()));
         return;
     }
-    m_openSegments[key] = OpenSegment{application, insert.lastInsertId().toLongLong()};
+    m_openSegments[key] = OpenSegment{application, insert.lastInsertId().toLongLong(), title};
 }
 
-void HistoryRecorder::noteUrl(quint32 sessionId, quint32 monitorStreamId, const QString &url)
+void HistoryRecorder::noteUrl(quint32 sessionId, quint32 monitorStreamId, const QString &url,
+                              const QString &title)
 {
     if (!m_database.isOpen()) {
         return;
@@ -819,7 +826,7 @@ void HistoryRecorder::noteUrl(quint32 sessionId, quint32 monitorStreamId, const 
         return;
     }
 
-    if (it != m_openWebSegments.end() && it->url == url) {
+    if (it != m_openWebSegments.end() && it->url == url && it->title == title) {
         QSqlQuery update(m_database);
         update.prepare(QStringLiteral("UPDATE web_visits SET end_ms = ? WHERE id = ?"));
         update.addBindValue(now);
@@ -830,19 +837,20 @@ void HistoryRecorder::noteUrl(quint32 sessionId, quint32 monitorStreamId, const 
 
     QSqlQuery insert(m_database);
     insert.prepare(QStringLiteral(
-        "INSERT INTO web_visits (session_id, monitor_stream_id, url, start_ms, end_ms) "
-        "VALUES (?, ?, ?, ?, ?)"));
+        "INSERT INTO web_visits (session_id, monitor_stream_id, url, start_ms, end_ms, title) "
+        "VALUES (?, ?, ?, ?, ?, ?)"));
     insert.addBindValue(sessionId);
     insert.addBindValue(monitorStreamId);
     insert.addBindValue(url);
     insert.addBindValue(now);
     insert.addBindValue(now);
+    insert.addBindValue(title);
     if (!insert.exec()) {
         emit logMessage(
             QStringLiteral("Nu am putut scrie vizita web: %1").arg(insert.lastError().text()));
         return;
     }
-    m_openWebSegments[key] = OpenWebSegment{url, insert.lastInsertId().toLongLong()};
+    m_openWebSegments[key] = OpenWebSegment{url, insert.lastInsertId().toLongLong(), title};
 }
 
 void HistoryRecorder::noteSessionState(const QString &sessionUsername, const QString &idleText,
@@ -1134,7 +1142,7 @@ QList<WebVisit> HistoryRecorder::listWebVisits(quint32 monitorStreamId, qint64 s
     }
     QSqlQuery query(m_database);
     query.prepare(QStringLiteral(
-        "SELECT url, start_ms, end_ms FROM web_visits WHERE monitor_stream_id = ? "
+        "SELECT url, start_ms, end_ms, title FROM web_visits WHERE monitor_stream_id = ? "
         "AND start_ms < ? AND end_ms > ? ORDER BY start_ms ASC"));
     query.addBindValue(monitorStreamId);
     query.addBindValue(stopMs);
@@ -1143,7 +1151,7 @@ QList<WebVisit> HistoryRecorder::listWebVisits(quint32 monitorStreamId, qint64 s
     if (query.exec()) {
         while (query.next()) {
             visits.append(WebVisit{query.value(0).toString(), query.value(1).toLongLong(),
-                                   query.value(2).toLongLong()});
+                                   query.value(2).toLongLong(), query.value(3).toString()});
         }
     }
     return visits;
@@ -1152,13 +1160,25 @@ QList<WebVisit> HistoryRecorder::listWebVisits(quint32 monitorStreamId, qint64 s
 QList<WebUsage> HistoryRecorder::listWebPages(quint32 monitorStreamId, qint64 startMs,
                                               qint64 stopMs) const
 {
+    // One row per url (the list's one line per page). A url can carry
+    // several titles over the range -- each web_visits row is one (url,
+    // title) run of the same window, like the original's program_url /
+    // program_title pairs that select_live_program keeps only where both
+    // spans overlap -- so the row shows the most recent non-empty one: the
+    // visits come back oldest-first and are sequential per monitor, so the
+    // last non-empty title seen is the latest. A visit without a title never
+    // overwrites a real one.
     QHash<QString, qint64> totals;
+    QHash<QString, QString> latestTitle;
     for (const WebVisit &visit : listWebVisits(monitorStreamId, startMs, stopMs)) {
         totals[visit.url] += qMax<qint64>(0, qMin(visit.endMs, stopMs) - qMax(visit.startMs, startMs));
+        if (!visit.title.isEmpty()) {
+            latestTitle[visit.url] = visit.title;
+        }
     }
     QList<WebUsage> usage;
     for (auto it = totals.cbegin(); it != totals.cend(); ++it) {
-        usage.append(WebUsage{it.key(), it.value()});
+        usage.append(WebUsage{it.key(), it.value(), latestTitle.value(it.key())});
     }
     std::sort(usage.begin(), usage.end(),
              [](const WebUsage &a, const WebUsage &b) { return a.totalMs > b.totalMs; });

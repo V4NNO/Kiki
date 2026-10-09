@@ -21,14 +21,14 @@ struct HistoryAppSegment {
     QString application;
     qint64 startMs = 0;
     qint64 endMs = 0;
-    QString title; // foreground window title (empty for web visits)
+    QString title; // window title of this run (empty when none was recorded)
 };
 
 struct HistoryAppUsage {
     QString application;
     qint64 totalMs = 0;
     QString category;
-    QString title; // foreground window title (empty for web pages)
+    QString title; // window title (for a web page: the browser window title while it was open)
 };
 
 // One recorded run of video (video_sequence on the host), as listSegments

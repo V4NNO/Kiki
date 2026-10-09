@@ -539,7 +539,8 @@ void AgentConnection::runHistoryQuery(quint32 monitorStreamId, const QJsonObject
         QJsonArray array;
         for (const WebUsage &usage : m_historyRecorder->listWebPages(monitorStreamId, rangeStart, rangeStop)) {
             array.append(QJsonObject{{QStringLiteral("url"), usage.url},
-                                     {QStringLiteral("totalMs"), usage.totalMs}});
+                                     {QStringLiteral("totalMs"), usage.totalMs},
+                                     {QStringLiteral("title"), usage.title}});
         }
         sendJson(ViewerProtocol::MessageType::HistoryQuery, monitorStreamId,
                 QJsonObject{{QStringLiteral("action"), action},
@@ -550,7 +551,8 @@ void AgentConnection::runHistoryQuery(quint32 monitorStreamId, const QJsonObject
         for (const WebVisit &visit : m_historyRecorder->listWebVisits(monitorStreamId, rangeStart, rangeStop)) {
             array.append(QJsonObject{{QStringLiteral("url"), visit.url},
                                      {QStringLiteral("startMs"), visit.startMs},
-                                     {QStringLiteral("endMs"), visit.endMs}});
+                                     {QStringLiteral("endMs"), visit.endMs},
+                                     {QStringLiteral("title"), visit.title}});
         }
         sendJson(ViewerProtocol::MessageType::HistoryQuery, monitorStreamId,
                 QJsonObject{{QStringLiteral("action"), action},

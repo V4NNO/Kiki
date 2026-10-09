@@ -150,19 +150,18 @@ QList<MonitorInfo> ScreenCaptureManager::monitors() const
     return m_monitors;
 }
 
-quint32 ScreenCaptureManager::foregroundMonitorStreamId() const
+quint32 ScreenCaptureManager::monitorStreamIdForWindow(quintptr window) const
 {
 #ifdef Q_OS_WIN
-    const HWND foreground = GetForegroundWindow();
-    if (!foreground) {
+    if (window == 0) {
         return 0;
     }
-    const HMONITOR target = MonitorFromWindow(foreground, MONITOR_DEFAULTTONEAREST);
+    const HMONITOR target = MonitorFromWindow(reinterpret_cast<HWND>(window), MONITOR_DEFAULTTONEAREST);
     if (!target) {
         return 0;
     }
-    // Match the foreground window's HMONITOR to a QScreen (the identifier Qt
-    // and Win32 agree on), then that screen's name to its announced stream.
+    // Match the window's HMONITOR to a QScreen (the identifier Qt and Win32
+    // agree on), then that screen's name to its announced stream.
     for (QScreen *screen : QGuiApplication::screens()) {
         if (static_cast<HMONITOR>(nativeMonitorHandle(screen)) != target) {
             continue;
@@ -173,6 +172,8 @@ quint32 ScreenCaptureManager::foregroundMonitorStreamId() const
             }
         }
     }
+#else
+    Q_UNUSED(window)
 #endif
     return 0;
 }

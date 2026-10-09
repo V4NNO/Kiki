@@ -31,11 +31,16 @@ struct WebVisit {
     QString url;
     qint64 startMs = 0;
     qint64 endMs = 0;
+    QString title; // browser window title while this url was in front
 };
 
 struct WebUsage {
     QString url;
     qint64 totalMs = 0;
+    // The most recent non-empty title this url had within the range; empty
+    // only when no visit of it in the range recorded a title (rows from
+    // before web_visits had a title column, or a browser window without one).
+    QString title;
 };
 
 // One recorded run of video for a monitor (video_sequence), as the viewer
@@ -139,7 +144,8 @@ public:
     // that's an expected, frequent state, not a "no data" edge case: an
     // empty url just closes whatever segment was open, without opening a
     // blank one.
-    void noteUrl(quint32 sessionId, quint32 monitorStreamId, const QString &url);
+    void noteUrl(quint32 sessionId, quint32 monitorStreamId, const QString &url,
+                 const QString &title = QString());
 
     // Call on every metadata push of a session (any monitor). Keeps the
     // session's online ranges (the node's online_session life minus
@@ -211,11 +217,13 @@ private:
     struct OpenSegment {
         QString application;
         qint64 rowId = -1;
+        QString title;
     };
 
     struct OpenWebSegment {
         QString url;
         qint64 rowId = -1;
+        QString title;
     };
 
     // The VP8 sequence currently open for one monitor (see recordFrame /

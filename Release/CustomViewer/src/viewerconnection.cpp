@@ -635,7 +635,8 @@ void ViewerConnection::processHistoryQuery(const ViewerProtocol::Header &header,
             visits.append(HistoryAppSegment{
                 entry.value(QStringLiteral("url")).toString(),
                 static_cast<qint64>(entry.value(QStringLiteral("startMs")).toDouble()),
-                static_cast<qint64>(entry.value(QStringLiteral("endMs")).toDouble())});
+                static_cast<qint64>(entry.value(QStringLiteral("endMs")).toDouble()),
+                entry.value(QStringLiteral("title")).toString()});
         }
         emit historyWebVisitsReceived(header.streamId, object.value(QStringLiteral("day")).toString(),
                                       visits);
@@ -655,9 +656,13 @@ void ViewerConnection::processHistoryQuery(const ViewerProtocol::Header &header,
         QList<HistoryAppUsage> pages;
         for (const QJsonValue &value : object.value(QStringLiteral("pages")).toArray()) {
             const QJsonObject entry = value.toObject();
+            // Web pages carry no category of their own (the rating comes
+            // from the categories list); title is the page's most recent
+            // non-empty title in the range, empty only when none was recorded.
             pages.append(HistoryAppUsage{entry.value(QStringLiteral("url")).toString(),
                                          static_cast<qint64>(entry.value(QStringLiteral("totalMs")).toDouble()),
-                                         QString()});
+                                         QString(),
+                                         entry.value(QStringLiteral("title")).toString()});
         }
         emit historyWebPagesReceived(header.streamId, object.value(QStringLiteral("day")).toString(),
                                      pages);

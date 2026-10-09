@@ -385,7 +385,10 @@ void SessionManager::onMetadataChanged(quint32 sessionId, quint32 localStreamId,
         // volume_activity (and the nodata subtraction of both charts).
         m_historyRecorder->noteSessionState(it.value().username, idleText, idleSeconds, screensaver);
         m_historyRecorder->noteApplication(sessionId, it.value().username, application, windowTitle);
-        m_historyRecorder->noteUrl(sessionId, globalId, url);
+        // The window title goes with the url too: the browser window title is
+        // the page's title (the original ties program_title and program_url to
+        // the same program segment).
+        m_historyRecorder->noteUrl(sessionId, globalId, url, windowTitle);
         // inputEvents is only meaningful on the periodic 10s sample tick
         // (see KikiSubService main.cpp); app-change-triggered metadata
         // pushes always carry 0, so this naturally only records real

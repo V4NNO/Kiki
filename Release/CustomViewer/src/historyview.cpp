@@ -4196,7 +4196,15 @@ void HistoryView::updateInfoPanel()
     const QHash<QString, QString> categories = effectiveCategories();
     const auto build = [&](const QList<HistoryAppSegment> &segments) {
         QHash<QString, qint64> usedMs;
-        QHash<QString, QString> latestTitle;
+        // The title shown for a resource is the one it had AT the current
+        // moment -- not the latest across the whole period. A resource can
+        // carry different window titles over time (now one row per title, see
+        // noteApplication), and the original's infoFrame shows the title of
+        // the segment covering the marker. momentTitle wins; windowTitle (the
+        // last title overlapping the visible step) is the fallback when the
+        // moment itself lands in a gap between this resource's segments.
+        QHash<QString, QString> momentTitle;
+        QHash<QString, QString> windowTitle;
         QString active;
         qint64 totalMs = 0;
         for (const HistoryAppSegment &segment : segments) {
@@ -4204,17 +4212,19 @@ void HistoryView::updateInfoPanel()
             if (overlap > 0) {
                 usedMs[segment.application] += overlap;
                 totalMs += overlap;
-            }
-            if (!segment.title.isEmpty()) {
-                latestTitle[segment.application] = segment.title;
+                if (!segment.title.isEmpty()) {
+                    windowTitle[segment.application] = segment.title;
+                }
             }
             if (segment.startMs <= moment && moment < segment.endMs) {
                 active = segment.application;
+                momentTitle[segment.application] = segment.title;
             }
         }
         QList<HistoryInfoPanel::Item> items;
         for (auto it = usedMs.cbegin(); it != usedMs.cend(); ++it) {
-            const QString title = latestTitle.value(it.key());
+            const QString title =
+                momentTitle.contains(it.key()) ? momentTitle.value(it.key()) : windowTitle.value(it.key());
             items.append({it.key(), title.isEmpty() ? QStringLiteral("No title") : title,
                           100.0 * it.value() / qMax<qint64>(1, totalMs),
                           categories.value(it.key()), it.key() == active});
