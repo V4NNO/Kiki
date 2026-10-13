@@ -1,4 +1,6 @@
 #include "historyview.h"
+#include "devicetilewidget.h"
+#include "multiswitch.h"
 
 #include <QComboBox>
 #include <QTabBar>
@@ -102,14 +104,14 @@ constexpr int kProductivityHeight = 22; // Line.qml singleLineHeight (not a filt
 // TimeLine above it does.
 constexpr int kViolationsRightMargin = 25;
 
-// Fonts.rb_small_b: Roboto Bold 10px -- a real screenshot's
-// "Friday, September 25, 2026" date label is exactly 134px wide, which is
-// what Roboto Bold measures at 10px.
+// Fonts.rb_small_b: 8pt. The running original draws it at regular weight
+// (its "Roboto Bold" family name is a face name -- see roboto() in
+// devicedetailview.cpp): "Wednesday, October 7, 2026" measures 138px of ink,
+// Roboto's design width at 8pt.
 QFont smallBoldFont()
 {
     QFont font(QStringLiteral("Roboto"));
-    font.setPixelSize(10);
-    font.setBold(true);
+    font.setPointSize(8);
     return font;
 }
 
@@ -468,6 +470,16 @@ void HistoryVideoStrip::setOffline(quint32 streamId)
     relayout();
 }
 
+void HistoryVideoStrip::setLoading(quint32 streamId)
+{
+    for (Screen &screen : m_screens) {
+        if (screen.streamId == streamId) {
+            screen.status = Status::Loading;
+        }
+    }
+    relayout();
+}
+
 void HistoryVideoStrip::setViewSize(const QSize &size)
 {
     if (size != m_viewSize) {
@@ -537,6 +549,13 @@ void HistoryVideoStrip::paintEvent(QPaintEvent *)
             painter.drawImage(r, screen.image);
             break;
         case Status::Loading:
+            if (!screen.image.isNull()) {
+                QSize fitted = screen.image.size();
+                fitted.scale(r.size(), Qt::KeepAspectRatio);
+                painter.drawImage(QRect(r.center().x() - fitted.width() / 2, r.center().y() - fitted.height() / 2,
+                                        fitted.width(), fitted.height()),
+                                  screen.image);
+            }
             painter.save();
             painter.translate(r.center());
             painter.rotate(m_spinnerAngle);
@@ -610,10 +629,6 @@ namespace {
 // TriLine.qml: 42px rows (content 5px down, 10px in), 1px apart.
 constexpr int kTriLineHeight = 42;
 constexpr int kTriLineSpacing = 1;
-// Info.qml / WebPagesAndPrograms.qml insets inside the 420px panel.
-constexpr int kInfoLeft = 10;
-constexpr int kInfoTop = 10;
-constexpr int kInfoWidth = 400; // panel.width - 20
 
 // ProgressBar { kind: "big" } (compiled C++, measured from a real
 // screenshot): a 78x14 inset pill with the rounded percentage centered.
@@ -654,6 +669,18 @@ void HistoryInfoPanel::setItems(const QList<Item> &webPages, const QList<Item> &
     relayout();
 }
 
+void HistoryInfoPanel::setInset(int inset)
+{
+    m_inset = inset;
+    relayout();
+}
+
+void HistoryInfoPanel::resizeEvent(QResizeEvent *event)
+{
+    QWidget::resizeEvent(event);
+    relayout();
+}
+
 void HistoryInfoPanel::relayout()
 {
     // WebPagesAndPrograms: Column(spacing 9) { WebPages, Programs }, each a
@@ -662,13 +689,16 @@ void HistoryInfoPanel::relayout()
     m_rows.clear();
     m_titles.clear();
     m_separatorsY.clear();
-    int y = kInfoTop;
+    // WebPagesAndPrograms rows are infoWidth wide (the panel minus its
+    // inset on both sides).
+    const int rowWidth = qMax(100, width() - 2 * m_inset);
+    int y = m_inset;
     m_separatorsY.append(0); // Info's own top HSeparator
     const auto addSection = [&](const QString &title, int height, const QList<Item> &items) {
-        m_titles.append({QRect(kInfoLeft, y, kInfoWidth, height), title});
+        m_titles.append({QRect(m_inset, y, rowWidth, height), title});
         y += height + 10;
         for (const Item &item : items) {
-            m_rows.append({QRect(kInfoLeft, y, kInfoWidth, kTriLineHeight), item});
+            m_rows.append({QRect(m_inset, y, rowWidth, kTriLineHeight), item});
             y += kTriLineHeight + kTriLineSpacing;
         }
         m_separatorsY.append(y);
@@ -676,7 +706,7 @@ void HistoryInfoPanel::relayout()
     };
     addSection(QStringLiteral("Web pages"), 20, m_webPages);
     addSection(QStringLiteral("Programs"), 20, m_programs);
-    setMinimumHeight(y + kInfoTop);
+    setMinimumHeight(y + m_inset);
     m_hoveredRow = -1;
     update();
 }
@@ -733,15 +763,14 @@ void HistoryInfoPanel::paintEvent(QPaintEvent *)
     painter.fillRect(rect(), QColor(0x46, 0x47, 0x4e));
 
     for (int y : std::as_const(m_separatorsY)) {
-        drawHorizontalSeparator(painter, y == 0 ? 0 : kInfoLeft, y, y == 0 ? width() : kInfoWidth);
+        drawHorizontalSeparator(painter, y == 0 ? 0 : m_inset, y, y == 0 ? width() : width() - 2 * m_inset);
     }
 
     painter.setPen(Qt::white);
-    // Section headers "Web pages"/"Programs" are Fonts.rb_big_b (Roboto Bold,
-    // 11pt bold) -- the row titles below use the regular rr_big instead.
-    QFont sectionFont = bigFont();
-    sectionFont.setBold(true);
-    painter.setFont(sectionFont);
+    // Section headers "Web pages"/"Programs" are Fonts.rb_big_b, which the
+    // running original draws at regular weight like rr_big (see roboto() in
+    // devicedetailview.cpp).
+    painter.setFont(bigFont());
     for (const Title &title : std::as_const(m_titles)) {
         painter.drawText(title.rect, Qt::AlignCenter, title.text);
     }
@@ -1586,7 +1615,9 @@ KeystreamBar::KeystreamBar(QWidget *parent)
     m_scrollBar = new QScrollBar(Qt::Horizontal, this);
     m_scrollBar->setStyleSheet(QStringLiteral(
         "QScrollBar:horizontal { background: transparent; height: 6px; margin: 0; }"
-        "QScrollBar::handle:horizontal { background: #5a5b63; border-radius: 3px; min-width: 30px; }"
+        "QScrollBar::handle:horizontal { background: none; min-width: 12px; border-width: 0 5px 0 7px; border-image: url(:/controls/scrollView/h_normal.png) 0 5 0 7 repeat repeat; }"
+        "QScrollBar::handle:horizontal:hover { border-image: url(:/controls/scrollView/h_hovered.png) 0 5 0 7 repeat repeat; }"
+        "QScrollBar::handle:horizontal:pressed { border-image: url(:/controls/scrollView/h_pressed.png) 0 5 0 7 repeat repeat; }"
         "QScrollBar::add-line:horizontal, QScrollBar::sub-line:horizontal { width: 0; }"
         "QScrollBar::add-page:horizontal, QScrollBar::sub-page:horizontal { background: none; }"));
     connect(m_scrollBar, &QScrollBar::valueChanged, this, qOverload<>(&QWidget::update));
@@ -1895,11 +1926,40 @@ QRect TimelineWidget::pickRect() const
         return {};
     }
     // SliderBar.qml's __slider: Math.max(markWidth, 19) wide, pulled half an
-    // image left only while it is at its natural 19px width.
-    const double step = markWidth();
-    const int pickWidth = qMax(19, int(step));
-    const double x = step * m_currentMarker - (pickWidth == 19 ? 9.5 : 0.0);
-    return QRect(qRound(x), kSliderBarY + kSliderBarHeight / 2 - 9, pickWidth, 19);
+    // image left only while it is at its natural 19px width; while dragged
+    // it sits at draggedX instead of on the marker.
+    const double width = pickWidth();
+    const bool natural = width == 19.0;
+    const double anchor = m_dragging ? m_dragX : markWidth() * m_currentMarker;
+    const double x = anchor - (natural ? 9.5 : 0.0);
+    return QRect(qRound(x), kSliderBarY + kSliderBarHeight / 2 - 9, qRound(width), 19);
+}
+
+double TimelineWidget::pickWidth() const
+{
+    return qMax(19.0, markWidth());
+}
+
+QRect TimelineWidget::barRect() const
+{
+    return QRect(0, kSliderBarY, width(), kSliderBarHeight);
+}
+
+int TimelineWidget::rewindTarget(int current, int target, bool right) const
+{
+    if (isAllowedMarker(target)) {
+        return target;
+    }
+    for (int i = 0; i < m_effectiveRanges.size(); ++i) {
+        const MarkerRange &range = m_effectiveRanges.at(i);
+        if (current >= range.start && current <= range.stop) {
+            if (right) {
+                return i < m_effectiveRanges.size() - 1 ? m_effectiveRanges.at(i + 1).start : range.stop;
+            }
+            return i > 0 ? m_effectiveRanges.at(i - 1).stop : range.start;
+        }
+    }
+    return current;
 }
 
 int TimelineWidget::markerForX(int x) const
@@ -1930,20 +1990,33 @@ void TimelineWidget::seekToX(int x)
 
 void TimelineWidget::mousePressEvent(QMouseEvent *event)
 {
-    // Only the bar itself (plus the pick) is clickable, like SliderBar.qml's
-    // MouseArea over __sliderBar.
-    const QRect hitArea(0, kSliderBarY - 8, width(), kSliderBarHeight + 16);
-    if (!hitArea.contains(event->pos()) && !pickRect().contains(event->pos())) {
+    if (event->button() != Qt::LeftButton || m_markersAmount <= 0) {
         return;
     }
-    m_pressed = true;
-    seekToX(event->pos().x());
+    // SliderBar.qml: only the pick starts a drag (mouseArea.onPressed); the
+    // 4px bar's own MouseArea acts on onClicked, i.e. on release.
+    if (pickRect().contains(event->pos())) {
+        m_pressed = true;
+        m_dragging = true;
+        m_dragBeginX = event->pos().x();
+        m_dragInitX = markWidth() * m_currentMarker;
+        m_dragX = m_dragInitX;
+        update();
+        return;
+    }
+    m_barPressed = barRect().contains(event->pos());
 }
 
 void TimelineWidget::mouseMoveEvent(QMouseEvent *event)
 {
-    if (m_pressed && (event->buttons() & Qt::LeftButton)) {
-        seekToX(event->pos().x());
+    if (m_dragging) {
+        // onPositionChanged: draggedX clamped to [0, lastX], lastX =
+        // bar width - pick width; the marker under it is requested whenever
+        // it changes (a gap is refused, the pick still follows the mouse).
+        const double lastX = width() - pickWidth();
+        m_dragX = qBound(0.0, m_dragInitX + (event->pos().x() - m_dragBeginX), qMax(0.0, lastX));
+        update();
+        seekToX(int(m_dragX));
         return;
     }
     const bool hovered = pickRect().contains(event->pos());
@@ -1953,8 +2026,15 @@ void TimelineWidget::mouseMoveEvent(QMouseEvent *event)
     }
 }
 
-void TimelineWidget::mouseReleaseEvent(QMouseEvent *)
+void TimelineWidget::mouseReleaseEvent(QMouseEvent *event)
 {
+    if (m_dragging) {
+        // onReleased: dragging = false -- the pick snaps back onto the marker.
+        m_dragging = false;
+    } else if (m_barPressed && barRect().contains(event->pos())) {
+        seekToX(event->pos().x());
+    }
+    m_barPressed = false;
     m_pressed = false;
     update();
 }
@@ -2555,6 +2635,155 @@ void HistoryChartsModel::onSeries(quint32 streamId, const HistoryChartResult &re
     }
 }
 
+namespace {
+// SpeedButton.qml:273-289's face: the speed_bg ImageButton (the stylesheet
+// draws it) with "<speed>x" (Fonts.rb_medium, white) and triangle_normal.png
+// side by side, 5px apart, centered.
+class SpeedFaceButton final : public QPushButton
+{
+public:
+    explicit SpeedFaceButton(QWidget *parent) : QPushButton(parent) {}
+    void setSpeedText(const QString &text)
+    {
+        m_text = text;
+        update();
+    }
+
+protected:
+    void paintEvent(QPaintEvent *event) override
+    {
+        QPushButton::paintEvent(event); // background only: no text/icon set
+        static const QPixmap triangle(QStringLiteral(":/history/speedButton/triangle_normal.png"));
+        QPainter painter(this);
+        QFont font(QStringLiteral("Roboto"));
+        font.setPointSize(9);
+        painter.setFont(font);
+        const int textWidth = painter.fontMetrics().horizontalAdvance(m_text);
+        const int x = (width() - (textWidth + 5 + triangle.width())) / 2;
+        painter.setPen(Qt::white);
+        painter.drawText(QRect(x, 0, textWidth + 1, height()), Qt::AlignLeft | Qt::AlignVCenter, m_text);
+        painter.drawPixmap(x + textWidth + 5, (height() - triangle.height()) / 2, triangle);
+    }
+
+private:
+    QString m_text;
+};
+
+// SpeedButton.qml's toolTip: a speedButton/toolTip.png BorderImage (1px
+// borders, stretched; the arrow on top) as tall as the image, holding a
+// MultiSwitch of the speeds (implicitTextMargin 4) 5px in, vertically
+// centered; rowSwitch.width + 16 wide.
+// utils/LoadingStatusDialog.qml: a 195x200 box on the window's top layer,
+// centered: grayHatching Background with a 1px #62626a radius-4 border, and
+// a centered Column (spacing 33) of the title (white, Fonts.rm_big_b) and a
+// running Spinner (spinner.png turned 45 degrees every 300 ms).
+class LoadingOverlay final : public QWidget
+{
+public:
+    explicit LoadingOverlay(QWidget *parent) : QWidget(parent)
+    {
+        setFixedSize(195, 200);
+        m_timer.setInterval(300);
+        QObject::connect(&m_timer, &QTimer::timeout, this, [this] {
+            m_angle = (m_angle + 45) % 360;
+            update();
+        });
+        hide();
+    }
+    void showMessage(const QString &text)
+    {
+        m_text = text;
+        QWidget *window = parentWidget();
+        move((window->width() - width()) / 2, (window->height() - height()) / 2);
+        raise();
+        show();
+        m_timer.start();
+        update();
+    }
+    void dismiss()
+    {
+        m_timer.stop();
+        hide();
+    }
+
+protected:
+    void paintEvent(QPaintEvent *) override
+    {
+        static const QPixmap hatching(QStringLiteral(":/activeCell/grayHatching.png"));
+        static const QPixmap spinner(QStringLiteral(":/history/spinner/spinner.png"));
+        QPainter painter(this);
+        painter.setRenderHint(QPainter::Antialiasing);
+        QPainterPath box;
+        box.addRoundedRect(QRectF(rect()).adjusted(0.5, 0.5, -0.5, -0.5), 4, 4);
+        painter.fillPath(box, QBrush(hatching));
+        painter.setPen(QColor(0x62, 0x62, 0x6a));
+        painter.drawPath(box);
+        QFont font(QStringLiteral("Roboto"));
+        font.setPointSize(11);
+        painter.setFont(font);
+        const QFontMetrics metrics(font);
+        const int blockHeight = metrics.height() + 33 + spinner.height();
+        const int top = (height() - blockHeight) / 2;
+        painter.setPen(Qt::white);
+        painter.drawText(QRect(0, top, width(), metrics.height()), Qt::AlignHCenter | Qt::AlignVCenter, m_text);
+        painter.translate(width() / 2.0, top + metrics.height() + 33 + spinner.height() / 2.0);
+        painter.rotate(m_angle);
+        painter.setRenderHint(QPainter::SmoothPixmapTransform);
+        painter.drawPixmap(-spinner.width() / 2, -spinner.height() / 2, spinner);
+    }
+
+private:
+    QString m_text;
+    QTimer m_timer;
+    int m_angle = 0;
+};
+
+class SpeedPopup final : public QWidget
+{
+public:
+    SpeedPopup(const QStringList &speeds, QWidget *parent) : QWidget(parent)
+    {
+        m_image = QPixmap(QStringLiteral(":/history/speedButton/toolTip.png"));
+        // Only the image's opaque part shows (the arrow sits on transparency).
+        setStyleSheet(QStringLiteral("background: transparent;"));
+        m_switch = new MultiSwitch(this);
+        m_switch->setTextMargin(4);
+        for (const QString &speed : speeds) {
+            m_switch->addTab(speed);
+        }
+        const QSize hint = m_switch->sizeHint();
+        setFixedSize(hint.width() + 16, m_image.height());
+        m_switch->setGeometry(5, (height() - hint.height()) / 2, hint.width(), hint.height());
+        hide();
+    }
+    MultiSwitch *multiSwitch() const { return m_switch; }
+
+protected:
+    void paintEvent(QPaintEvent *) override
+    {
+        QPainter painter(this);
+        const int w = m_image.width();
+        const int h = m_image.height();
+        const QRect r = rect();
+        // 9-slice, border 1 on every side, everything stretched.
+        const int xs[] = {0, 1, w - 1, w};
+        const int ys[] = {0, 1, h - 1, h};
+        const int xt[] = {0, 1, r.width() - 1, r.width()};
+        const int yt[] = {0, 1, r.height() - 1, r.height()};
+        for (int row = 0; row < 3; ++row) {
+            for (int col = 0; col < 3; ++col) {
+                painter.drawPixmap(QRect(xt[col], yt[row], xt[col + 1] - xt[col], yt[row + 1] - yt[row]), m_image,
+                                   QRect(xs[col], ys[row], xs[col + 1] - xs[col], ys[row + 1] - ys[row]));
+            }
+        }
+    }
+
+private:
+    QPixmap m_image;
+    MultiSwitch *m_switch = nullptr;
+};
+} // namespace
+
 HistoryView::HistoryView(ViewerConnection &connection, QWidget *parent)
     : QWidget(parent)
     , m_connection(connection)
@@ -2580,22 +2809,21 @@ HistoryView::HistoryView(ViewerConnection &connection, QWidget *parent)
     tabStrip->setFixedHeight(37);
     auto *tabRow = new QHBoxLayout(tabStrip);
     tabRow->setContentsMargins(0, 0, 3, 0);
-    tabRow->setSpacing(3);
+    tabRow->setSpacing(0);
     tabRow->addStretch(1);
-    auto *addTabButton = new QToolButton(tabStrip);
-    addTabButton->setObjectName(QStringLiteral("plus"));
-    addTabButton->setText(QStringLiteral("+"));
+    // Controls/ButtonPlus.qml (small), centered 1px low, then 5px.
+    auto *plusHolder = new QWidget(tabStrip);
+    auto *addTabButton = new PixmapButton(QStringLiteral(":/controls/buttonPlus/small"), plusHolder);
+    plusHolder->setFixedSize(addTabButton->width(), 37);
+    addTabButton->move(0, (37 - addTabButton->height()) / 2 + 1);
     addTabButton->setToolTip(QStringLiteral("Add history watching"));
-    connect(addTabButton, &QToolButton::clicked, this, &HistoryView::openAddTabDialog);
-    tabRow->addWidget(addTabButton);
-    tabRow->addSpacing(5);
-    m_historyTabBar = new QTabBar(tabStrip);
+    connect(addTabButton, &QAbstractButton::clicked, this, &HistoryView::openAddTabDialog);
+    tabRow->addWidget(plusHolder);
+    tabRow->addSpacing(5 + 3);
+    m_historyTabBar = new ViewerTabBar(tabStrip);
     m_historyTabBar->setObjectName(QStringLiteral("tabs"));
-    m_historyTabBar->setExpanding(false);
-    m_historyTabBar->setTabsClosable(true);
     m_historyTabBar->setMovable(true);
-    m_historyTabBar->setElideMode(Qt::ElideRight);
-    m_historyTabBar->setStyleSheet(QStringLiteral("QTabBar#tabs::tab { max-width: 200px; }"));
+    tabStrip->installEventFilter(this);
     connect(m_historyTabBar, &QTabBar::currentChanged, this, &HistoryView::showHistoryTab);
     connect(m_historyTabBar, &QTabBar::tabCloseRequested, this, &HistoryView::closeHistoryTab);
     connect(m_historyTabBar, &QTabBar::tabMoved, this, [this](int from, int to) {
@@ -2608,12 +2836,12 @@ HistoryView::HistoryView(ViewerConnection &connection, QWidget *parent)
             ++m_currentTab;
         }
     });
-    tabRow->addWidget(m_historyTabBar);
-    const auto addArrow = [&](Qt::ArrowType direction, int step) {
-        auto *arrow = new QToolButton(tabStrip);
-        arrow->setObjectName(QStringLiteral("plus"));
-        arrow->setArrowType(direction);
-        connect(arrow, &QToolButton::clicked, this, [this, step] {
+    tabRow->addWidget(m_historyTabBar, 0, Qt::AlignBottom);
+    tabRow->addSpacing(3);
+    // Controls/LeftRightButton.qml.
+    const auto addArrow = [&](const QString &prefix, int step) {
+        auto *arrow = new PixmapButton(prefix, tabStrip, QSize(9, 20));
+        connect(arrow, &QAbstractButton::clicked, this, [this, step] {
             const int target = m_historyTabBar->currentIndex() + step;
             if (target >= 0 && target < m_historyTabBar->count()) {
                 m_historyTabBar->setCurrentIndex(target);
@@ -2621,8 +2849,9 @@ HistoryView::HistoryView(ViewerConnection &connection, QWidget *parent)
         });
         tabRow->addWidget(arrow);
     };
-    addArrow(Qt::LeftArrow, -1);
-    addArrow(Qt::RightArrow, 1);
+    addArrow(QStringLiteral(":/controls/leftRightButton/left"), -1);
+    addArrow(QStringLiteral(":/controls/leftRightButton/right"), 1);
+    m_tabStrip = tabStrip;
     root->addWidget(tabStrip);
     // History.qml's panelViolation toggle button is anchored directly to
     // the bottom edge of the same container the slider lives in (bottomMargin
@@ -2641,7 +2870,9 @@ HistoryView::HistoryView(ViewerConnection &connection, QWidget *parent)
         " border-right: 1px solid #414248; }"
         "QScrollArea { background: transparent; border: none; }"
         "QScrollBar:horizontal { background: transparent; height: 8px; margin: 0; }"
-        "QScrollBar::handle:horizontal { background: #5a5b63; border-radius: 4px; min-width: 30px; }"
+        "QScrollBar::handle:horizontal { background: none; min-width: 12px; border-width: 0 5px 0 7px; border-image: url(:/controls/scrollView/h_normal.png) 0 5 0 7 repeat repeat; }"
+        "QScrollBar::handle:horizontal:hover { border-image: url(:/controls/scrollView/h_hovered.png) 0 5 0 7 repeat repeat; }"
+        "QScrollBar::handle:horizontal:pressed { border-image: url(:/controls/scrollView/h_pressed.png) 0 5 0 7 repeat repeat; }"
         "QScrollBar::add-line:horizontal, QScrollBar::sub-line:horizontal { width: 0; }"
         "QScrollBar::add-page:horizontal, QScrollBar::sub-page:horizontal { background: none; }"
         "QScrollArea#historyApps { border-left: 2px solid #43444c; border-right: 2px solid #43444c; }"));
@@ -2656,7 +2887,11 @@ HistoryView::HistoryView(ViewerConnection &connection, QWidget *parent)
     videoBody->setSpacing(0);
     m_monitorStripArea = new QScrollArea(m_videoPanel);
     m_monitorStripArea->setFrameShape(QFrame::NoFrame);
-    m_monitorStripArea->setHorizontalScrollBarPolicy(Qt::ScrollBarAsNeeded);
+    // Video.qml: the ScrollView reaches 8px below the video (hscrollTopMargin
+    // 8), so its scroll bar sits in the gap under the frames instead of
+    // taking their height -- the area's own bar stays hidden and
+    // m_stripScrollBar (positionOverlays) shows it there.
+    m_monitorStripArea->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
     m_monitorStripArea->setVerticalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
     m_monitorStripArea->viewport()->setAutoFillBackground(false);
     m_monitorStripArea->viewport()->installEventFilter(this);
@@ -2665,29 +2900,76 @@ HistoryView::HistoryView(ViewerConnection &connection, QWidget *parent)
     m_monitorStripArea->setWidget(m_videoStrip);
     connect(m_videoStrip, &HistoryVideoStrip::clicked, this, &HistoryView::togglePanelFull);
     videoBody->addWidget(m_monitorStripArea, 1);
-    // Running applications panel: 420px wide on the video's right edge,
-    // below the header (History.qml `panel`), closed by default.
-    // 2px #43444c lines left/right, WebPagesAndPrograms scrolling inside.
-    m_infoArea = new QScrollArea(m_videoPanel);
+    m_stripScrollBar = new QScrollBar(Qt::Horizontal, this);
+    m_stripScrollBar->setStyleSheet(QStringLiteral(
+        "QScrollBar:horizontal { background: transparent; height: 5px; margin: 0; }"
+        "QScrollBar::handle:horizontal { background: none; min-width: 12px; border-width: 0 5px 0 7px;"
+        " border-image: url(:/controls/scrollView/h_normal.png) 0 5 0 7 repeat repeat; }"
+        "QScrollBar::handle:horizontal:hover { border-image: url(:/controls/scrollView/h_hovered.png) 0 5 0 7 repeat repeat; }"
+        "QScrollBar::handle:horizontal:pressed { border-image: url(:/controls/scrollView/h_pressed.png) 0 5 0 7 repeat repeat; }"
+        "QScrollBar::add-line:horizontal, QScrollBar::sub-line:horizontal { width: 0; }"
+        "QScrollBar::add-page:horizontal, QScrollBar::sub-page:horizontal { background: none; }"));
+    {
+        QScrollBar *inner = m_monitorStripArea->horizontalScrollBar();
+        connect(inner, &QScrollBar::rangeChanged, this, [this](int min, int max) {
+            m_stripScrollBar->setRange(min, max);
+            m_stripScrollBar->setPageStep(m_monitorStripArea->horizontalScrollBar()->pageStep());
+            m_stripScrollBar->setVisible(max > min);
+        });
+        connect(inner, &QScrollBar::valueChanged, m_stripScrollBar, &QScrollBar::setValue);
+        connect(m_stripScrollBar, &QScrollBar::valueChanged, inner, &QScrollBar::setValue);
+        m_stripScrollBar->hide();
+    }
+    // Running applications panel (History.qml `panel`): 420px, laid OVER the
+    // video below its 24px header (the frames keep their full width), 2px
+    // #43444c lines left/right on the hatching, WebPagesAndPrograms
+    // scrolling inside (videoCell.height - 40 tall). It slides in from the
+    // video's right edge to width - 420 - 10 in 250 ms (animationPanel);
+    // closed by default. Geometry in positionOverlays().
+    m_appsPanel = new QFrame(this);
+    m_appsPanel->setObjectName(QStringLiteral("historyAppsPanel"));
+    m_appsPanel->setFixedWidth(420);
+    m_appsPanel->setStyleSheet(QStringLiteral(
+        "QFrame#historyAppsPanel { background: #46474e; border-left: 2px solid #43444c;"
+        " border-right: 2px solid #43444c; }"));
+    auto *appsLayout = new QVBoxLayout(m_appsPanel);
+    appsLayout->setContentsMargins(0, 0, 0, 0);
+    m_infoArea = new QScrollArea(m_appsPanel);
     m_infoArea->setObjectName(QStringLiteral("historyApps"));
-    m_infoArea->setFixedWidth(420);
+    m_infoArea->setFrameShape(QFrame::NoFrame);
     m_infoArea->setWidgetResizable(true);
     m_infoArea->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
     m_infoPanel = new HistoryInfoPanel;
     m_infoArea->setWidget(m_infoPanel);
     connect(m_infoPanel, &HistoryInfoPanel::categorizationRequested, this,
             &HistoryView::onCategorizationRequested);
-    m_infoArea->hide();
-    videoBody->addWidget(m_infoArea);
+    appsLayout->addWidget(m_infoArea);
+    appsLayout->addStretch(1);
+    m_appsPanel->hide();
+    m_appsAnimation = new QPropertyAnimation(m_appsPanel, "pos", this);
+    m_appsAnimation->setDuration(250);
+    connect(m_appsAnimation, &QPropertyAnimation::finished, this, [this] {
+        if (!m_appsOpen) {
+            m_appsPanel->hide();
+        }
+    });
     videoLayout->addLayout(videoBody, 1);
+
+    // History.qml statusIcon: over the video, no background, no mouse area
+    // (a click still reaches the video and toggles panelFull).
+    m_historyStatusIcon = new BigStatusIcon(m_monitorStripArea);
+    m_historyStatusIcon->setAttribute(Qt::WA_TransparentForMouseEvents);
+    m_historyStatusIcon->hide();
 
     // Video.qml's "excuse", centered over the video area (Fonts.rr_xtra).
     m_statusLabel = new QLabel(m_monitorStripArea);
     m_statusLabel->setAlignment(Qt::AlignCenter);
-    m_statusLabel->setWordWrap(true);
+    // Video.qml:44-48,156 excuse: Fonts.rr_xtra (Roboto 24pt), one line,
+    // centered in the video area.
+    m_statusLabel->setWordWrap(false);
     m_statusLabel->setAttribute(Qt::WA_TransparentForMouseEvents);
     m_statusLabel->setStyleSheet(QStringLiteral(
-        "background: transparent; color: white; font-family: Roboto; font-size: 20px;"));
+        "background: transparent; color: white; font-family: Roboto; font-size: 24pt;"));
     m_statusLabel->hide();
 
     auto *videoCell = new QVBoxLayout;
@@ -2751,6 +3033,7 @@ HistoryView::HistoryView(ViewerConnection &connection, QWidget *parent)
     // (audio, only at Time step = 1s) and then the slider + TimeLine; the
     // panelViolation button sits at its bottom center. Buttons use the
     // original history/*.png assets.
+    // qsTr("Change period") -- the running original shows its translation.
     m_changeSettingsButton = new QPushButton(QStringLiteral("Change settings"), this);
     m_changeSettingsButton->setObjectName(QStringLiteral("historyChangeButton"));
     m_changeSettingsButton->setFixedSize(140, 25);
@@ -2774,12 +3057,56 @@ HistoryView::HistoryView(ViewerConnection &connection, QWidget *parent)
     // SpeedButton.qml options.
     m_speedCombo = new QComboBox(this);
     m_speedCombo->setObjectName(QStringLiteral("historySpeed"));
-    m_speedCombo->addItems({QStringLiteral("0,5x"), QStringLiteral("0,75x"), QStringLiteral("1x"),
+    m_speedCombo->addItems({QStringLiteral("0.5x"), QStringLiteral("0.75x"), QStringLiteral("1x"),
                             QStringLiteral("2x"), QStringLiteral("4x"), QStringLiteral("8x"),
                             QStringLiteral("16x")});
     m_speedCombo->setFixedSize(65, 19);
     m_speedCombo->setCurrentIndex(2); // 1x
     connect(m_speedCombo, &QComboBox::currentIndexChanged, this, &HistoryView::onSpeedChanged);
+    // SpeedButton.qml:273-289: the face is speed_bg with "<speed>x" and
+    // triangle_normal.png centered in a Row (spacing 5); a click opens the
+    // speed choice (the original's toolTip.png MultiSwitch, here a menu).
+    // The combo stays as the speed model, hidden.
+    m_speedCombo->hide();
+    m_speedButton = new SpeedFaceButton(this);
+    m_speedButton->setObjectName(QStringLiteral("historySpeedButton"));
+    m_speedButton->setFixedSize(65, 19);
+    const auto updateSpeedFace = [this] {
+        static_cast<SpeedFaceButton *>(m_speedButton)->setSpeedText(m_speedCombo->currentText());
+    };
+    updateSpeedFace();
+    connect(m_speedCombo, &QComboBox::currentIndexChanged, this, updateSpeedFace);
+    {
+        QStringList speeds;
+        for (int i = 0; i < m_speedCombo->count(); ++i) {
+            speeds.append(m_speedCombo->itemText(i));
+        }
+        auto *popup = new SpeedPopup(speeds, this);
+        m_speedPopup = popup;
+        popup->multiSwitch()->setCurrentIndex(m_speedCombo->currentIndex());
+        connect(popup->multiSwitch(), &MultiSwitch::currentChanged, m_speedCombo, &QComboBox::setCurrentIndex);
+        connect(m_speedCombo, &QComboBox::currentIndexChanged, popup->multiSwitch(), &MultiSwitch::setCurrentIndex);
+    }
+    // onClicked: checked = !checked -- the toolTip shows while checked.
+    connect(m_speedButton, &QPushButton::clicked, this, [this] {
+        if (m_speedPopup->isVisible()) {
+            m_speedPopup->hide();
+            return;
+        }
+        // x = triangle.x - row.width - 51, y = triangle.y + 12 (button
+        // coordinates; the Row of "<speed>x", 5, the 8x5 triangle centered).
+        QFont font(QStringLiteral("Roboto"));
+        font.setPointSize(9);
+        const int textWidth = QFontMetrics(font).horizontalAdvance(m_speedCombo->currentText());
+        const int rowWidth = textWidth + 5 + 8;
+        const int triangleX = (m_speedButton->width() - rowWidth) / 2 + textWidth + 5;
+        const int triangleY = (m_speedButton->height() - 5) / 2;
+        m_speedPopup->move(m_speedButton->mapTo(this, QPoint(triangleX - rowWidth - 51, triangleY + 12)));
+        m_speedPopup->raise();
+        m_speedPopup->show();
+    });
+    // History.qml:62-65: a click anywhere else on History unchecks it.
+    qApp->installEventFilter(this);
     m_keylogTableButton = new QPushButton(exportIcon, QStringLiteral("Text"), this);
     m_keylogTableButton->setObjectName(QStringLiteral("historyAssetButton"));
     m_keylogTableButton->setIconSize(QSize(13, 9));
@@ -2791,6 +3118,7 @@ HistoryView::HistoryView(ViewerConnection &connection, QWidget *parent)
     m_playButton->setObjectName(QStringLiteral("historyPlay"));
     m_playButton->setFixedSize(60, 60);
     m_playButton->setIconSize(QSize(23, 30));
+    m_playButton->installEventFilter(this); // hover swaps to *_active.png
     connect(m_playButton, &QPushButton::clicked, this, &HistoryView::onPlayClicked);
     setPlaying(false);
     // Audio.qml -- only at Time step = 1s (see applyTimeStep). Always
@@ -2829,19 +3157,28 @@ HistoryView::HistoryView(ViewerConnection &connection, QWidget *parent)
     controlBlock->setObjectName(QStringLiteral("historyControls"));
     controlBlock->setFixedHeight(kControlBlockHeight);
     controlBlock->setStyleSheet(QStringLiteral(
-        "QWidget#historyControls { background: #474850; }"
+        // History.qml's root Background: grayHatching shows around sliderAndMeta.
+        "QWidget#historyControls { background-image: url(:/activeCell/grayHatching.png); }"
         ".QWidget { background: transparent; }"
-        "QPushButton#historyChangeButton { background: #404148; color: white; border: none;"
-        "  border-radius: 3px; font-family: Roboto; font-size: 12px; padding: 0; }"
-        "QPushButton#historyChangeButton:hover { background: #6b6d79; }"
-        "QPushButton#historyChangeButton:pressed { background: #34373e; }"
-        "QPushButton#historyAssetButton { border-image: url(:/history/speedButton/speed_bg.png);"
-        "  border: none; color: white; font-family: Roboto; font-size: 11px; text-align: left;"
-        "  padding: 0 0 0 10px; }"
-        "QPushButton#historyAssetButton:hover {"
-        "  border-image: url(:/history/speedButton/speed_bg_hovered.png); }"
-        "QPushButton#historyAssetButton:pressed {"
-        "  border-image: url(:/history/speedButton/speed_bg_pressed.png); }"
+        // Button.qml: button/*.png BorderImage, 10px borders; rr_medium_b.
+        "QPushButton#historyChangeButton { background: transparent; color: white; font-family: Roboto;"
+        "  font-size: 9pt; border-width: 10px; padding: -10px;"
+        "  border-image: url(:/activeCell/button/normal.png) 10 10 10 10 stretch stretch; }"
+        "QPushButton#historyChangeButton:hover {"
+        "  border-image: url(:/activeCell/button/hover.png) 10 10 10 10 stretch stretch; }"
+        "QPushButton#historyChangeButton:pressed {"
+        "  border-image: url(:/activeCell/button/press.png) 10 10 10 10 stretch stretch; }"
+        // ImageButton (5px borders) on speed_bg*.png; the Row 10px in,
+        // icon, 5, Fonts.rb_small text.
+        "QPushButton#historyAssetButton, QPushButton#historySpeedButton { background: transparent;"
+        "  color: white; font-family: Roboto; font-size: 8pt; text-align: left;"
+        "  border-width: 5px; padding: -5px -5px -5px 5px;"
+        "  border-image: url(:/history/speedButton/speed_bg.png) 5 5 5 5 stretch stretch; }"
+        "QPushButton#historySpeedButton { text-align: center; padding: -5px; }"
+        "QPushButton#historyAssetButton:hover, QPushButton#historySpeedButton:hover {"
+        "  border-image: url(:/history/speedButton/speed_bg_hovered.png) 5 5 5 5 stretch stretch; }"
+        "QPushButton#historyAssetButton:pressed, QPushButton#historySpeedButton:pressed {"
+        "  border-image: url(:/history/speedButton/speed_bg_pressed.png) 5 5 5 5 stretch stretch; }"
         "QComboBox#historySpeed { border-image: url(:/history/speedButton/speed_bg.png); border: none;"
         "  color: white; font-family: Roboto; font-size: 11px; padding: 0 0 0 10px; }"
         "QComboBox#historySpeed:hover {"
@@ -2851,8 +3188,8 @@ HistoryView::HistoryView(ViewerConnection &connection, QWidget *parent)
         "  image: url(:/history/speedButton/triangle_normal.png); width: 8px; height: 5px; }"
         "QComboBox#historySpeed::down-arrow:hover {"
         "  image: url(:/history/speedButton/triangle_hovered.png); }"
-        "QPushButton#historyPlay { border-image: url(:/history/bg_play.png); border: none;"
-        "  padding: 0 0 0 8px; }"
+        "QPushButton#historyPlay { background: transparent; border-image: url(:/history/bg_play.png);"
+        "  border: none; padding: 0 0 0 8px; }"
         "QPushButton#historyAudio { border-image: url(:/history/bg_audio.png); border: none;"
         "  padding: 0; }"));
     auto *controlLayout = new QVBoxLayout(controlBlock);
@@ -2870,7 +3207,7 @@ HistoryView::HistoryView(ViewerConnection &connection, QWidget *parent)
     auto *twoButtons = new QHBoxLayout;
     twoButtons->setSpacing(10);
     twoButtons->addWidget(m_exportVideoButton);
-    twoButtons->addWidget(m_speedCombo);
+    twoButtons->addWidget(m_speedButton);
     column1->addLayout(twoButtons);
     column1->addWidget(m_keylogTableButton, 0, Qt::AlignLeft);
     column1->addStretch(1);
@@ -2925,19 +3262,22 @@ HistoryView::HistoryView(ViewerConnection &connection, QWidget *parent)
     applyTimeStep();
 
     // utils/LoadingStatusDialog.qml equivalent.
-    m_loadingDialog = new QDialog(this, Qt::FramelessWindowHint | Qt::Tool);
-    m_loadingDialog->setModal(false);
-    m_loadingDialog->setFixedSize(220, 60);
-    m_loadingDialog->setStyleSheet(
-        QStringLiteral("QDialog { background: #24272e; border: 1px solid #414248; }"));
-    auto *loadingLayout = new QVBoxLayout(m_loadingDialog);
-    m_loadingLabel = new QLabel(m_loadingDialog);
-    m_loadingLabel->setAlignment(Qt::AlignCenter);
-    m_loadingLabel->setStyleSheet(QStringLiteral("color: #9fa5ae;"));
-    loadingLayout->addWidget(m_loadingLabel);
+    // LoadingStatusDialog lives on the window's top layer; it is created on
+    // first use, once this page is inside the main window.
+
+    m_loadingDelay = new QTimer(this);
+    m_loadingDelay->setSingleShot(true);
+    m_loadingDelay->setInterval(200);
+    connect(m_loadingDelay, &QTimer::timeout, this, [this] {
+        for (quint32 streamId : std::as_const(m_inFlightStreams)) {
+            m_videoStrip->setLoading(streamId);
+        }
+    });
 
     m_playbackTimer = new QTimer(this);
-    m_playbackTimer->setInterval(800);
+    // History.qml: markersPerSecond = speed -- at 1x one Time step marker
+    // per second.
+    m_playbackTimer->setInterval(1000);
     connect(m_playbackTimer, &QTimer::timeout, this, &HistoryView::onPlaybackTick);
 
     // SliderBar.qml's rewind actions (Left/Right = one marker, Ctrl = ten)
@@ -2968,6 +3308,24 @@ HistoryView::HistoryView(ViewerConnection &connection, QWidget *parent)
     connect(&m_connection, &ViewerConnection::historyKeystrokesReceived, this,
             &HistoryView::onKeystrokesReceived);
     connect(&m_connection, &ViewerConnection::historyError, this, &HistoryView::onHistoryError);
+    connect(&m_connection, &ViewerConnection::historySessionStatesReceived, this,
+            [this](quint32 streamId, const QString &day, const QList<QPair<qint64, qint64>> &online,
+                   const QList<QPair<qint64, qint64>> &lock, const QList<QPair<qint64, qint64>> &saver) {
+                if (day != m_rangeKey || streamId != m_periodAnchor) {
+                    return;
+                }
+                m_onlineRanges = online;
+                m_lockRanges = lock;
+                m_saverRanges = saver;
+                m_statesLoaded = true;
+                const int marker = m_timeline->currentMarker();
+                if (marker >= 0) {
+                    updateHistoryStatusIcon(m_timeline->timestampForMarker(marker));
+                }
+            });
+    connect(&m_connection, &ViewerConnection::statusChanged, this,
+            [this](const QString &, bool connected) { onConnectionStatus(connected); });
+    connect(&m_connection, &ViewerConnection::sessionStarted, this, &HistoryView::onSessionStarted);
     connect(&m_connection, &ViewerConnection::historyFrameMissing, this,
             &HistoryView::onHistoryFrameMissing);
     connect(&m_connection, &ViewerConnection::historySegmentsReceived, this,
@@ -3000,6 +3358,10 @@ void HistoryView::setDevices(const QHash<quint32, QString> &deviceNames,
     for (int i = 0; i < m_historyTabs.size(); ++i) {
         updateHistoryTabText(i);
     }
+    if (m_reloadPending && !deviceMonitorStreams.value(m_currentDeviceKey).isEmpty()) {
+        resumeAfterReconnect();
+        return;
+    }
     if (m_currentDeviceKey != 0 && deviceNames.contains(m_currentDeviceKey)) {
         // The list is re-sent on every live update, so only act when this
         // employee's screens actually changed -- and then fetch the current
@@ -3017,25 +3379,38 @@ void HistoryView::setDevices(const QHash<quint32, QString> &deviceNames,
 
 void HistoryView::activate()
 {
-    if (m_activated || m_currentTab < 0) {
+    if (m_activated) {
         return;
     }
+    if (m_currentTab < 0) {
+        // Opened before any employee is known (History restored at start):
+        // load as soon as the first tab exists.
+        m_activateWhenReady = true;
+        return;
+    }
+    m_activateWhenReady = false;
     m_activated = true;
     showHistoryTab(m_currentTab);
 }
 
 void HistoryView::showLoadingDialog(const QString &message)
 {
-    m_loadingLabel->setText(message);
-    const QPoint center = mapToGlobal(rect().center()) - QPoint(m_loadingDialog->width() / 2,
-                                                                m_loadingDialog->height() / 2);
-    m_loadingDialog->move(center);
-    m_loadingDialog->show();
+    if (!m_loadingDialog) {
+        m_loadingDialog = new LoadingOverlay(window());
+    }
+    static_cast<LoadingOverlay *>(m_loadingDialog.data())->showMessage(message);
+    // History.qml:51,359: sliderAndMeta.enabled = !lockButtons (waitingForLoad).
+    m_leftColumn->setEnabled(false);
+    m_timeline->setEnabled(false);
 }
 
 void HistoryView::hideLoadingDialog()
 {
-    m_loadingDialog->hide();
+    if (m_loadingDialog) {
+        static_cast<LoadingOverlay *>(m_loadingDialog.data())->dismiss();
+    }
+    m_leftColumn->setEnabled(true);
+    m_timeline->setEnabled(true);
 }
 
 void HistoryView::openForDevice(quint32 deviceKey, const QString &day)
@@ -3117,7 +3492,7 @@ void HistoryView::storeCurrentTab()
     if (m_currentTab < 0 || m_currentTab >= m_historyTabs.size()) {
         return;
     }
-    m_historyTabs[m_currentTab] = {m_currentDeviceKey, m_period, m_timeStepMs};
+    m_historyTabs[m_currentTab] = {m_currentDeviceKey, m_period, m_timeStepMs, m_speedCombo->currentIndex()};
 }
 
 void HistoryView::addHistoryTab(const HistoryTab &tab)
@@ -3131,6 +3506,8 @@ void HistoryView::addHistoryTab(const HistoryTab &tab)
     m_currentTab = m_historyTabs.size() - 1;
     if (m_activated) {
         showHistoryTab(m_currentTab);
+    } else if (m_activateWhenReady) {
+        activate();
     }
 }
 
@@ -3149,6 +3526,7 @@ void HistoryView::showHistoryTab(int index)
     const HistoryTab tab = m_historyTabs.at(index);
     m_timeStepMs = tab.timeStepMs;
     applyTimeStep();
+    m_speedCombo->setCurrentIndex(tab.speedIndex);
     jumpTo(tab.deviceKey, tab.period);
 }
 
@@ -3233,17 +3611,29 @@ void HistoryView::rebuildMonitorStrip()
 
 void HistoryView::positionOverlays()
 {
-    // The strip reserves the scrollbar's height up front so a horizontal
-    // scrollbar appearing (screens wider than the view) can't shrink the
-    // frames and make it disappear again.
-    const int scrollbarHeight = m_monitorStripArea->horizontalScrollBar()->sizeHint().height();
-    m_videoStrip->setViewSize(QSize(m_monitorStripArea->viewport()->width(),
-                                    m_monitorStripArea->height() - scrollbarHeight));
-    m_statusLabel->setGeometry(m_monitorStripArea->rect().adjusted(20, 0, -20, 0));
+    // Video.qml: the frames take the whole height (H - 24 - 5); the scroll
+    // bar lives in the gap below (m_stripScrollBar), so it appearing can't
+    // shrink them.
+    m_videoStrip->setViewSize(QSize(m_monitorStripArea->viewport()->width(), m_monitorStripArea->height()));
+    m_statusLabel->setGeometry(m_monitorStripArea->rect());
+    m_historyStatusIcon->setGeometry(m_monitorStripArea->rect());
     // Right edge 1px inside the video's right border, top on the header's
     // last line (videoCell 7px inset + 24px header - 1).
     const QSize hint = m_toggleAppsButton->sizeHint();
     const QRect video(m_videoPanel->mapTo(this, QPoint(0, 0)), m_videoPanel->size());
+    // panel: top at the video header's bottom, height = History - 48 -
+    // sliderAndMeta - chartsItem - keylogger; the scroll is videoCell - 40.
+    const int panelHeight = qMax(0, height() - 48 - (m_controlBlock->isVisible() ? m_controlBlock->height() : 0)
+                                        - (m_chart->isVisible() ? m_chart->height() : 0) - m_keystream->height());
+    const int panelX = m_appsAnimation->state() == QAbstractAnimation::Running ? m_appsPanel->x()
+                     : m_appsOpen ? width() - m_appsPanel->width() - 10
+                                  : video.right() + 1;
+    m_appsPanel->setGeometry(panelX, video.top() + 24, m_appsPanel->width(), panelHeight);
+    // The strip's bar in the 8px+ gap under the video (hscroll margins 2/4).
+    m_stripScrollBar->setGeometry(video.left() + 2, video.bottom() + 3, video.width() - 2, 5);
+    m_stripScrollBar->raise();
+    m_infoArea->setFixedHeight(qMax(0, video.height() - 40));
+    m_appsPanel->raise();
     m_toggleAppsButton->setGeometry(video.right() - hint.width(), video.top() + 24 - 1, hint.width(), 25);
     m_toggleAppsButton->raise();
 }
@@ -3252,6 +3642,7 @@ void HistoryView::updateStatusVisibility()
 {
     m_statusLabel->setVisible(!m_statusLabel->text().isEmpty());
     m_statusLabel->raise();
+    updateAppsButton();
 }
 
 void HistoryView::resizeEvent(QResizeEvent *event)
@@ -3268,7 +3659,22 @@ void HistoryView::paintEvent(QPaintEvent *)
 
 bool HistoryView::eventFilter(QObject *watched, QEvent *event)
 {
-    if (watched == m_monitorStripArea->viewport() && event->type() == QEvent::Resize) {
+    if (event->type() == QEvent::MouseButtonPress && m_speedPopup && m_speedPopup->isVisible()) {
+        auto *widget = qobject_cast<QWidget *>(watched);
+        if (widget && !m_speedPopup->isAncestorOf(widget) && widget != m_speedPopup && widget != m_speedButton) {
+            m_speedPopup->hide();
+        }
+    }
+    if (watched == m_tabStrip && event->type() == QEvent::Resize) {
+        // Tabs.qml lv.maxWidth: the strip minus the plus (13 + 5), the
+        // arrows (18) and the Row's spacing/margin.
+        m_historyTabBar->setAvailableWidth(qMax(100, m_tabStrip->width() - 18 - 18 - 3 * 3));
+    }
+    if (watched == m_playButton && m_playIcons.size() == 2
+        && (event->type() == QEvent::Enter || event->type() == QEvent::Leave)) {
+        m_playButton->setIcon(m_playIcons.at(event->type() == QEvent::Enter ? 1 : 0));
+    }
+    if (m_monitorStripArea && watched == m_monitorStripArea->viewport() && event->type() == QEvent::Resize) {
         positionOverlays();
     }
     return QWidget::eventFilter(watched, event);
@@ -3359,6 +3765,13 @@ void HistoryView::loadPeriod()
     // in only later, still shows for its own stretch.
     m_periodAnchor = streamId;
     m_connection.requestHistoryScreens(streamId, start, stop);
+    m_statesLoaded = false;
+    m_onlineRanges.clear();
+    m_lockRanges.clear();
+    m_saverRanges.clear();
+    m_historyStatusIcon->setKind(QString());
+    m_historyStatusIcon->hide();
+    m_connection.requestSessionStates(streamId, start, stop);
     m_connection.requestHistoryAppSegments(streamId, start, stop);
     m_connection.requestWebVisits(streamId, start, stop);
     m_connection.requestKeystrokes(streamId, start, stop);
@@ -3380,7 +3793,7 @@ void HistoryView::stepMarkers(int markers)
         return;
     }
     const int target = qBound(0, current + markers, m_timeline->markersAmount() - 1);
-    const int next = m_timeline->nearestAllowedMarker(target, markers > 0);
+    const int next = m_timeline->rewindTarget(current, target, markers > 0);
     if (next >= 0 && next != current) {
         requestFrameAtMarker(next);
     }
@@ -3485,6 +3898,7 @@ void HistoryView::applyMarker(int marker)
                                       moment.toString(QStringLiteral("hh:mm:ss"))));
     updateTextLogHighlight(timestampMs);
     updateKeystream(timestampMs);
+    updateHistoryStatusIcon(timestampMs);
     m_timeline->setCurrentMarker(marker);
     updateInfoPanel();
     m_chart->setCurrentPositionMs(timestampMs);
@@ -3539,6 +3953,7 @@ void HistoryView::dispatchFrameRequest()
     }
     m_frameRequestInFlight = true;
     m_frameWatchdog->start();
+    m_loadingDelay->start();
 }
 
 void HistoryView::releaseFrameSlot()
@@ -3602,6 +4017,9 @@ void HistoryView::togglePanelFull()
     m_panelFull = !m_panelFull;
     m_controlBlock->setVisible(!m_panelFull);
     m_chart->setVisible(m_chartOpen && !m_panelFull);
+    // Over the whole window: no History tab strip above it either.
+    m_tabStrip->setVisible(!m_panelFull);
+    emit panelFullChanged(m_panelFull);
 }
 
 void HistoryView::updateViolationToggleText()
@@ -3626,11 +4044,16 @@ void HistoryView::setPlaying(bool playing)
                                    : QStringLiteral(":/history/play_active.png")),
                    QIcon::Active);
     m_playButton->setIcon(icon);
+    m_playIcons = {QIcon(QPixmap(playing ? QStringLiteral(":/history/pause_normal.png")
+                                         : QStringLiteral(":/history/play_normal.png"))),
+                   QIcon(QPixmap(playing ? QStringLiteral(":/history/pause_active.png")
+                                         : QStringLiteral(":/history/play_active.png")))};
+    m_playButton->setIcon(m_playIcons.at(m_playButton->underMouse() ? 1 : 0));
     // play_normal is nudged 4px right of center, pause_normal 2px
     // (History.qml's horizontalCenterOffset).
     m_playButton->setStyleSheet(
-        QStringLiteral("QPushButton { border-image: url(:/history/bg_play.png); border: none;"
-                       " padding: 0 0 0 %1px; }")
+        QStringLiteral("QPushButton { background: transparent; border-image: url(:/history/bg_play.png);"
+                       " border: none; padding: 0 0 0 %1px; }")
             .arg(playing ? 4 : 8));
 }
 
@@ -3656,11 +4079,11 @@ void HistoryView::applyTimeStep()
 
 void HistoryView::onSpeedChanged(int index)
 {
-    // Matches m_speedCombo's real 0.5x/0.75x/1x/2x/4x/8x/16x options --
-    // interval scales inversely with the multiplier, based off 1x = 800ms.
+    // SpeedButton.qml's 0.5x/0.75x/1x/2x/4x/8x/16x are markersPerSecond:
+    // one marker every 1000 / speed ms.
     static const double multipliers[] = {0.5, 0.75, 1.0, 2.0, 4.0, 8.0, 16.0};
     const double multiplier = multipliers[qBound(0, index, 6)];
-    m_playbackTimer->setInterval(qMax(20, static_cast<int>(800.0 / multiplier)));
+    m_playbackTimer->setInterval(qMax(20, static_cast<int>(1000.0 / multiplier)));
 }
 
 void HistoryView::onKeylogTableClicked()
@@ -3814,13 +4237,65 @@ void HistoryView::exportNextVideoFrame()
 
 void HistoryView::onToggleRunningApps()
 {
-    // Matches History.qml's appButton: closed by default (see the
-    // constructor's m_runningAppsList->hide()), arrow flips direction.
-    const bool visible = m_infoArea->isHidden();
-    m_infoArea->setVisible(visible);
-    m_toggleAppsButton->setIcon(QIcon(visible
+    // History.qml's appButton (checkable, closed by default): the arrow
+    // flips and animationPanel moves the panel in from the video's right
+    // edge, or back out of it.
+    m_appsOpen = !m_appsOpen;
+    m_toggleAppsButton->setIcon(QIcon(m_appsOpen
         ? QStringLiteral(":/history/video/buttonRunningApp/applications_arrow_right.png")
         : QStringLiteral(":/history/video/buttonRunningApp/applications_arrow_left.png")));
+    const QRect video(m_videoPanel->mapTo(this, QPoint(0, 0)), m_videoPanel->size());
+    const int openX = width() - m_appsPanel->width() - 10;
+    const int closedX = video.right() + 1;
+    m_appsAnimation->stop();
+    if (m_appsOpen) {
+        positionOverlays();
+        m_appsPanel->move(closedX, m_appsPanel->y());
+        m_appsPanel->show();
+        m_toggleAppsButton->raise();
+        m_appsAnimation->setEndValue(QPoint(openX, m_appsPanel->y()));
+    } else {
+        m_appsAnimation->setEndValue(QPoint(closedX, m_appsPanel->y()));
+    }
+    m_appsAnimation->setStartValue(m_appsPanel->pos());
+    m_appsAnimation->start();
+}
+
+void HistoryView::updateHistoryStatusIcon(qint64 momentMs)
+{
+    // History.qml statusIcon.kind from infoFrames[0]: noData, then inLock,
+    // then inSaver, else none. ("videoWatchDisabled" never applies here.)
+    const auto inRanges = [momentMs](const QList<QPair<qint64, qint64>> &ranges) {
+        for (const auto &range : ranges) {
+            if (momentMs >= range.first && momentMs < range.second) {
+                return true;
+            }
+        }
+        return false;
+    };
+    QString kind;
+    if (m_statesLoaded && momentMs >= 0) {
+        if (!inRanges(m_onlineRanges)) {
+            kind = QStringLiteral("noData");
+        } else if (inRanges(m_lockRanges)) {
+            kind = QStringLiteral("lock");
+        } else if (inRanges(m_saverRanges)) {
+            kind = QStringLiteral("saver");
+        }
+    }
+    m_historyStatusIcon->setKind(kind);
+    m_historyStatusIcon->setVisible(!kind.isEmpty());
+    m_historyStatusIcon->raise();
+    // History.qml:172-178: a status icon takes the view out of panelFull.
+    if (!kind.isEmpty() && m_panelFull) {
+        togglePanelFull();
+    }
+}
+
+void HistoryView::updateAppsButton()
+{
+    // appButton.enabled: historyModel.videoFrames && historyModel.isOnline.
+    m_toggleAppsButton->setEnabled(m_timeline->hasData() && m_connection.isAuthenticated());
 }
 
 void HistoryView::onChangeSettingsClicked()
@@ -3867,8 +4342,78 @@ void HistoryView::onFramesReceived(quint32 streamId, const QString &day,
     // the others only widen the gray layer under it.
     if (!hadData) {
         rebuildMonitorStrip();
-        requestFrameAtMarker(m_timeline->lastAllowedMarker());
+        if (m_resumeMarker >= 0) {
+            // Reloaded after a reconnect: the same moment, playing again if
+            // it was.
+            const int marker = m_timeline->nearestAllowedMarker(m_resumeMarker, false);
+            m_resumeMarker = -1;
+            requestFrameAtMarker(marker >= 0 ? marker : m_timeline->lastAllowedMarker());
+            if (m_resumePlaying) {
+                m_resumePlaying = false;
+                setPlaying(true);
+                m_playbackTimer->start();
+            }
+        } else {
+            requestFrameAtMarker(m_timeline->lastAllowedMarker());
+        }
     }
+}
+
+void HistoryView::onConnectionStatus(bool connected)
+{
+    if (connected || m_connectionLost || m_rangeKey.isEmpty()) {
+        return;
+    }
+    m_connectionLost = true;
+    // Nothing sent before the drop will be answered: stop playing (frames
+    // cannot arrive) and free every request slot, keeping the last pictures.
+    if (m_resumeMarker < 0) {
+        m_resumeMarker = m_timeline->currentMarker();
+        m_resumePlaying = m_playbackTimer->isActive();
+    }
+    m_playbackTimer->stop();
+    setPlaying(false);
+    m_frameWatchdog->stop();
+    m_frameRequestInFlight = false;
+    m_inFlightStreams.clear();
+    m_inFlightMarker = -1;
+    m_inFlightRequestId = 0;
+    m_segmentRequestInFlight = false;
+    hideLoadingDialog();
+    updateAppsButton();
+}
+
+void HistoryView::onSessionStarted()
+{
+    if (!m_connectionLost) {
+        return;
+    }
+    m_connectionLost = false;
+    if (!m_activated || m_currentTab < 0) {
+        m_resumeMarker = -1;
+        m_resumePlaying = false;
+        return;
+    }
+    // The device list comes back with the agent's hello (setDevices); the
+    // period is reloaded once this employee's screens are known again.
+    m_reloadPending = true;
+    if (!m_deviceMonitorStreams.value(m_currentDeviceKey).isEmpty()) {
+        QTimer::singleShot(0, this, [this] {
+            if (m_reloadPending) {
+                resumeAfterReconnect();
+            }
+        });
+    }
+}
+
+void HistoryView::resumeAfterReconnect()
+{
+    m_reloadPending = false;
+    const int marker = m_resumeMarker;
+    const bool playing = m_resumePlaying;
+    loadPeriod();
+    m_resumeMarker = marker;
+    m_resumePlaying = playing;
 }
 
 void HistoryView::mergeFrameLists()

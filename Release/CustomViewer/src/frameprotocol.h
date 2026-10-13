@@ -55,7 +55,16 @@ enum class MessageType : quint16 {
     // grows in visible chunks. header.streamId is the monitor,
     // header.sequence the viewer's requestId. Payload: see HistorySegment
     // below.
-    HistorySegment = 14
+    HistorySegment = 14,
+    // Viewer -> host: which live streams this viewer is watching and at what
+    // rate -- the original's node::protocol::video::SelectIds (viewer.exe
+    // keeps, per stream, the highest Monitor.fps among everything showing
+    // it: 1/2 for a Tracker tile, 2 for the enlarged cell / full monitor).
+    // JSON {"streams":[{"id":N,"fps":F},...]}, the full set each time; a
+    // stream left out (or fps <= 0) is not sent at all. Until a viewer
+    // sends its first one, every stream is pushed as it changes (old
+    // viewers keep working).
+    SelectStreams = 15
 };
 
 // The payload of a MessageType::HistorySegment message.

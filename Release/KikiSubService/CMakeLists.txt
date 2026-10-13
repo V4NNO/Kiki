@@ -41,7 +41,7 @@ target_link_libraries(KikiSubService PRIVATE
 )
 
 if(WIN32)
-    target_link_libraries(KikiSubService PRIVATE user32 d3d11 dxgi uuid ole32 oleaut32)
+    target_link_libraries(KikiSubService PRIVATE user32 d3d11 dxgi uuid ole32 oleaut32 wtsapi32)
 endif()
 
 target_compile_definitions(KikiSubService PRIVATE

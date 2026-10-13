@@ -15,6 +15,14 @@ qt_add_executable(KikiViewer WIN32
     src/mainwindow.h
     src/monitorwidget.cpp
     src/monitorwidget.h
+    src/livemonitoroverlay.cpp
+    src/livemonitoroverlay.h
+    src/videoselectormodel.cpp
+    src/videoselectormodel.h
+    src/viewertabbar.cpp
+    src/viewertabbar.h
+    src/multiswitch.cpp
+    src/multiswitch.h
     src/devicetilewidget.cpp
     src/devicetilewidget.h
     src/devicedetailview.cpp

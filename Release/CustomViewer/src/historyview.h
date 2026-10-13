@@ -3,6 +3,11 @@
 #include "historysegmentstore.h"
 #include "viewerconnection.h"
 
+#include <QIcon>
+#include <QPropertyAnimation>
+#include <QFrame>
+#include <QPointer>
+#include "viewertabbar.h"
 #include <QDate>
 #include <QDateTime>
 #include <QDialog>
@@ -64,6 +69,9 @@ public:
     void setAllLoading();
     void setFrame(quint32 streamId, const QImage &image);
     void setOffline(quint32 streamId);
+    // Video.qml: a frame still on its way -- the Spinner over whatever the
+    // screen showed before (its Image keeps the old url meanwhile).
+    void setLoading(quint32 streamId);
     // The scroll area's usable size -- frames are its height minus 5, and
     // width/count / centering are relative to its width.
     void setViewSize(const QSize &size);
@@ -119,6 +127,9 @@ public:
     };
     explicit HistoryInfoPanel(QWidget *parent = nullptr);
     void setItems(const QList<Item> &webPages, const QList<Item> &programs);
+    // Space around the rows: 10 in History's 420px panel (Info.qml);
+    // 0 in the active cell's SessionInfo, whose rows are infoWidth wide.
+    void setInset(int inset);
 
 signals:
     void categorizationRequested(const QString &resource);
@@ -128,6 +139,7 @@ protected:
     void mouseMoveEvent(QMouseEvent *event) override;
     void mousePressEvent(QMouseEvent *event) override;
     void leaveEvent(QEvent *event) override;
+    void resizeEvent(QResizeEvent *event) override;
 
 private:
     struct Row {
@@ -147,6 +159,7 @@ private:
     QList<Title> m_titles;
     QList<int> m_separatorsY;
     int m_hoveredRow = -1;
+    int m_inset = 10;
 };
 
 // utils/sessionInfo/CategorizationPanel.qml (a GenericBox): "Efficiency
@@ -348,6 +361,10 @@ public:
     // target itself has nothing -- the next recorded range to the right
     // (preferRight) or the previous one to the left, clamped at the ends.
     int nearestAllowedMarker(int marker, bool preferRight) const;
+    // HistoryTab.setOnlineMarkerForRewind: target itself if recorded, else
+    // the neighbouring range of the one holding `current` (its start going
+    // right, its stop going left), or the current range's own end.
+    int rewindTarget(int current, int target, bool right) const;
     // The captured frame that belongs to a marker (-1 if none at all):
     // inside the marker's own slice when there is one, else the nearest.
     qint64 timestampForMarker(int marker) const;
@@ -371,6 +388,8 @@ private:
     int markerForX(int x) const;
     void seekToX(int x);
     QRect pickRect() const;
+    double pickWidth() const;
+    QRect barRect() const;
     void rebuildRanges();
     // Adds one marker to a sorted, non-overlapping range list, merging it
     // with the neighbours it touches.
@@ -388,6 +407,13 @@ private:
     qint64 m_stepMs = 5 * 60 * 1000;
     bool m_pickHovered = false;
     bool m_pressed = false;
+    // SliderBar.qml's mouseArea on the pick: while dragging, the pick sits at
+    // draggedX (its center for the natural 19px width), not on the marker.
+    bool m_dragging = false;
+    double m_dragX = 0.0;
+    double m_dragInitX = 0.0;
+    int m_dragBeginX = 0;
+    bool m_barPressed = false;
 };
 
 // chart/TimeLine.qml, as History's MultiSessionsSlider uses it: one date
@@ -517,9 +543,16 @@ private:
 // screenshot the user provided, not on guesswork (see
 // polished-singing-seahorse.md for the fidelity/scope decisions made with
 // the user, including keylogging being explicitly requested and confirmed).
+class BigStatusIcon;
+
 class HistoryView final : public QWidget
 {
     Q_OBJECT
+
+signals:
+    // History.qml panelFull: the History view goes onto the window's top
+    // layer (HistoryTab.qml:508) and the top panel is held collapsed.
+    void panelFullChanged(bool full);
 
 public:
     explicit HistoryView(ViewerConnection &connection, QWidget *parent = nullptr);
@@ -719,6 +752,7 @@ private:
         quint32 deviceKey = 0;
         HistoryPeriod period;
         qint64 timeStepMs = 5 * 60 * 1000;
+        int speedIndex = 2; // each tab's History has its own speed (1x)
     };
     void addHistoryTab(const HistoryTab &tab);
     void showHistoryTab(int index);
@@ -728,7 +762,8 @@ private:
     void updateHistoryTabText(int index);
     QList<QPair<quint32, QString>> employeeList() const;
     QList<HistoryTab> m_historyTabs;
-    QTabBar *m_historyTabBar = nullptr;
+    QWidget *m_tabStrip = nullptr;
+    ViewerTabBar *m_historyTabBar = nullptr;
     int m_currentTab = -1;
     // The current tab's period; replies are matched by its range key.
     HistoryPeriod m_period;
@@ -783,8 +818,7 @@ private:
     // video, shown while the initial days/frames request for a device or
     // day is in flight. m_statusLabel is kept too (it also carries
     // non-loading messages like "no history yet"), this is additive.
-    QDialog *m_loadingDialog = nullptr;
-    QLabel *m_loadingLabel = nullptr;
+    QPointer<QWidget> m_loadingDialog; // LoadingOverlay on the window (owned by it)
     void showLoadingDialog(const QString &message);
     void hideLoadingDialog();
 
@@ -799,6 +833,26 @@ private:
     void applyTimeStep();
 
     QTimer *m_playbackTimer = nullptr;
+    QList<QIcon> m_playIcons; // normal, hovered (*_active.png)
+    QPushButton *m_speedButton = nullptr;
+    QWidget *m_speedPopup = nullptr; // SpeedButton.qml's toolTip
+    QScrollBar *m_stripScrollBar = nullptr; // Video.qml's hscroll, under the video
+    // History.qml statusIcon (typeSize big) over the video: noData / lock /
+    // saver for the moment under the playhead, from the period's ranges.
+    BigStatusIcon *m_historyStatusIcon = nullptr;
+    QList<QPair<qint64, qint64>> m_onlineRanges;
+    QList<QPair<qint64, qint64>> m_lockRanges;
+    QList<QPair<qint64, qint64>> m_saverRanges;
+    bool m_statesLoaded = false;
+    void updateHistoryStatusIcon(qint64 momentMs);
+    // History.qml `panel` (Running applications) over the video, and its
+    // 250 ms slide.
+    QFrame *m_appsPanel = nullptr;
+    QPropertyAnimation *m_appsAnimation = nullptr;
+    bool m_appsOpen = false;
+    void updateAppsButton();
+    // A requested frame not back after this long shows the loading spinner.
+    QTimer *m_loadingDelay = nullptr;
 
     void setPlaying(bool playing);
     void updateViolationToggleText();
@@ -817,6 +871,19 @@ private:
     QList<HistoryAppSegment> m_appSegments;
     QList<HistoryKeystrokeEntry> m_keystrokeEntries;
     bool m_activated = false;
+    bool m_activateWhenReady = false;
+
+    // The connection to the host dropped while a period was open: nothing
+    // in flight can be answered any more. On the next authenticated session
+    // the period is loaded again (the host may renumber the streams) and the
+    // player put back where it was, playing if it was.
+    void onConnectionStatus(bool connected);
+    void onSessionStarted();
+    void resumeAfterReconnect();
+    bool m_connectionLost = false;
+    bool m_reloadPending = false;
+    int m_resumeMarker = -1;
+    bool m_resumePlaying = false;
 
     // In-progress "export imagini" job (see onExportVideoClicked): requests
     // one frame at a time (via the same requestHistoryFrame/onFrameReceived

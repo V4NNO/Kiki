@@ -378,7 +378,8 @@ void SessionManager::onMetadataChanged(quint32 sessionId, quint32 localStreamId,
             ? 0
             : it.value().localToGlobal.value(activeMonitorLocalStreamId, 0);
     if (m_server) {
-        m_server->broadcastMetadata(globalId, application, idleText, activeMonitorGlobalId);
+        m_server->broadcastMetadata(globalId, application, idleText, activeMonitorGlobalId,
+                                    screensaver);
     }
     if (m_historyRecorder) {
         // Online / idle / lock / saver ranges behind the Activity chart's

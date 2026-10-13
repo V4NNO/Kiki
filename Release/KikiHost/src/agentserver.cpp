@@ -4,6 +4,7 @@
 
 #include <QFile>
 #include <QHostAddress>
+#include <QSet>
 
 AgentServer::AgentServer(QObject *parent)
     : QTcpServer(parent)
@@ -127,6 +128,13 @@ void AgentServer::adoptConnection(QSslSocket *socket)
     connect(connection, &AgentConnection::logMessage, this, &AgentServer::logMessage);
     connect(connection, &AgentConnection::authenticated, this, [this](AgentConnection *self) {
         self->setMonitors(m_monitors);
+        for (auto it = m_latestMetadata.cbegin(); it != m_latestMetadata.cend(); ++it) {
+            self->pushMetadata(it.key(), it->application, it->idleText,
+                               it->activeMonitorStreamId, it->saver);
+        }
+        for (auto it = m_latestFrames.cbegin(); it != m_latestFrames.cend(); ++it) {
+            self->pushFrame(it.key(), it.value());
+        }
     });
     connect(connection, &AgentConnection::closed, this, [this](AgentConnection *self) {
         m_connections.removeOne(self);
@@ -155,6 +163,7 @@ void AgentServer::setHistoryRecorder(HistoryRecorder *recorder)
 
 void AgentServer::broadcastFrame(quint32 streamId, const QImage &image)
 {
+    m_latestFrames.insert(streamId, image);
     for (AgentConnection *connection : std::as_const(m_connections)) {
         if (connection->isAuthenticated()) {
             connection->pushFrame(streamId, image);
@@ -163,17 +172,21 @@ void AgentServer::broadcastFrame(quint32 streamId, const QImage &image)
 }
 
 void AgentServer::broadcastMetadata(quint32 streamId, const QString &application,
-                                    const QString &idleText, quint32 activeMonitorStreamId)
+                                    const QString &idleText, quint32 activeMonitorStreamId,
+                                    bool saver)
 {
+    m_latestMetadata.insert(streamId, {application, idleText, activeMonitorStreamId, saver});
     for (AgentConnection *connection : std::as_const(m_connections)) {
         if (connection->isAuthenticated()) {
-            connection->pushMetadata(streamId, application, idleText, activeMonitorStreamId);
+            connection->pushMetadata(streamId, application, idleText, activeMonitorStreamId, saver);
         }
     }
 }
 
 void AgentServer::broadcastStreamClosed(quint32 streamId)
 {
+    m_latestFrames.remove(streamId);
+    m_latestMetadata.remove(streamId);
     for (AgentConnection *connection : std::as_const(m_connections)) {
         if (connection->isAuthenticated()) {
             connection->pushStreamClosed(streamId);
@@ -184,6 +197,16 @@ void AgentServer::broadcastStreamClosed(quint32 streamId)
 void AgentServer::broadcastMonitorList(const QList<MonitorInfo> &monitors)
 {
     m_monitors = monitors;
+    QSet<quint32> present;
+    for (const MonitorInfo &monitor : monitors) {
+        present.insert(monitor.streamId);
+    }
+    for (auto it = m_latestFrames.begin(); it != m_latestFrames.end();) {
+        it = present.contains(it.key()) ? std::next(it) : m_latestFrames.erase(it);
+    }
+    for (auto it = m_latestMetadata.begin(); it != m_latestMetadata.end();) {
+        it = present.contains(it.key()) ? std::next(it) : m_latestMetadata.erase(it);
+    }
     for (AgentConnection *connection : std::as_const(m_connections)) {
         if (connection->isAuthenticated()) {
             connection->setMonitors(monitors);

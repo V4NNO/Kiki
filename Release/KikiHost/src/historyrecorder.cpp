@@ -1082,6 +1082,32 @@ QList<ActivitySample> HistoryRecorder::listActivity(quint32 monitorStreamId, qin
     return samples;
 }
 
+SessionStates HistoryRecorder::listSessionStates(quint32 monitorStreamId, qint64 startMs, qint64 stopMs) const
+{
+    SessionStates states;
+    if (!m_database.isOpen()) {
+        return states;
+    }
+    const QString username = usernameForStream(monitorStreamId);
+    states.online = loadRanges(QStringLiteral("session_online"), username, startMs, stopMs);
+    for (const QString &kind : {QStringLiteral("lock"), QStringLiteral("saver")}) {
+        QSqlQuery query(m_database);
+        query.prepare(QStringLiteral("SELECT begin_ms, end_ms FROM session_inactive WHERE session_username = ? "
+                                     "AND kind = ? AND begin_ms < ? AND end_ms > ? ORDER BY begin_ms"));
+        query.addBindValue(username);
+        query.addBindValue(kind);
+        query.addBindValue(stopMs);
+        query.addBindValue(startMs);
+        QList<QPair<qint64, qint64>> &ranges = kind == QStringLiteral("lock") ? states.lock : states.saver;
+        if (query.exec()) {
+            while (query.next()) {
+                ranges.append({qMax(startMs, query.value(0).toLongLong()), qMin(stopMs, query.value(1).toLongLong())});
+            }
+        }
+    }
+    return states;
+}
+
 QList<AppSegment> HistoryRecorder::listAppSegments(quint32 monitorStreamId, qint64 startMs,
                                                    qint64 stopMs) const
 {

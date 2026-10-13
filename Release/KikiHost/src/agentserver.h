@@ -34,7 +34,7 @@ public:
     // activeMonitorStreamId: the global monitor stream the foreground window
     // is on (0 = none/unknown), for the tile's "Show active monitor" button.
     void broadcastMetadata(quint32 streamId, const QString &application, const QString &idleText,
-                           quint32 activeMonitorStreamId);
+                           quint32 activeMonitorStreamId, bool saver);
     void broadcastMonitorList(const QList<MonitorInfo> &monitors);
     void broadcastStreamClosed(quint32 streamId);
 
@@ -62,6 +62,17 @@ private:
     QSslKey m_privateKey;
     QList<AgentConnection *> m_connections;
     QList<MonitorInfo> m_monitors;
+    // Every stream's newest frame and metadata, handed to a viewer the moment
+    // it authenticates: a still screen sends nothing new, so without these a
+    // viewer that (re)connects would show "No video" until something moved.
+    struct LatestMetadata {
+        QString application;
+        QString idleText;
+        quint32 activeMonitorStreamId = 0;
+        bool saver = false;
+    };
+    QHash<quint32, QImage> m_latestFrames;
+    QHash<quint32, LatestMetadata> m_latestMetadata;
     HistoryRecorder *m_historyRecorder = nullptr;
     std::unique_ptr<HistoryFrameService> m_frameService;
 };

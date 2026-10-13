@@ -10,6 +10,17 @@ int main(int argc, char *argv[])
     QApplication application(argc, argv);
     QCoreApplication::setOrganizationName(QStringLiteral("Kiki"));
     QCoreApplication::setApplicationName(QStringLiteral("viewer"));
+    // --settings-name=<name>: keep this instance's QSettings (tabs, cells,
+    // connection, preferences) apart from the normal viewer's -- for test
+    // runs next to a viewer in real use.
+    for (const QString &argument : application.arguments()) {
+        if (argument.startsWith(QStringLiteral("--settings-name="))) {
+            const QString name = argument.mid(QStringLiteral("--settings-name=").size());
+            if (!name.isEmpty()) {
+                QCoreApplication::setApplicationName(name);
+            }
+        }
+    }
     QCoreApplication::setApplicationVersion(QStringLiteral("0.1.0"));
     // The Roboto faces embedded in the real viewer.exe (resources/fonts).
     for (const QString &font : {QStringLiteral(":/fonts/Roboto-Regular.ttf"),
@@ -20,6 +31,12 @@ int main(int argc, char *argv[])
 
     MainWindow window;
     window.show();
+    // The windows opened with "addWindow" last time come back.
+    for (int index : MainWindow::savedExtraWindows()) {
+        auto *extra = new MainWindow(index);
+        extra->setAttribute(Qt::WA_DeleteOnClose);
+        extra->show();
+    }
     const bool smokeTest = application.arguments().contains(QStringLiteral("--smoke-test"));
     const bool screenshotTest = application.arguments().contains(QStringLiteral("--ui-screenshot"));
     if (smokeTest || screenshotTest) {

@@ -8,14 +8,61 @@
 
 #ifdef Q_OS_WIN
 #include <qt_windows.h>
+#include <wtsapi32.h>
 
 namespace {
-// Same technique as WindowListCapture's lock detection (see
-// windowlistcapture.cpp): OpenInputDesktop() failing is the standard way to
-// tell "not on the interactive desktop right now" (locked, UAC secure
-// desktop, etc.) apart from merely idle.
+// The session's own lock flag (WTSSessionInfoEx, Windows 8+; the inverted
+// flag is a Windows 7 bug only). OpenInputDesktop() failing alone is not
+// enough: the Windows 10/11 lock screen curtain (LockApp, clock + picture)
+// runs on the normal input desktop, so that only notices the lock once the
+// password prompt (Winlogon's secure desktop) is up -- a few seconds of a
+// lock that lasts much longer. Both are checked.
+// MinGW's wtsapi32.h stops at WTSSessionInfo (24): WTSSessionInfoEx (25)
+// and WTSINFOEXW as the Windows SDK declares them.
+constexpr int kWtsSessionInfoEx = 25;
+constexpr LONG kWtsSessionStateLock = 0; // WTS_SESSIONSTATE_LOCK
+struct WtsInfoExLevel1 {
+    ULONG SessionId;
+    WTS_CONNECTSTATE_CLASS SessionState;
+    LONG SessionFlags;
+    WCHAR WinStationName[33];
+    WCHAR UserName[21];
+    WCHAR DomainName[18];
+    LARGE_INTEGER LogonTime;
+    LARGE_INTEGER ConnectTime;
+    LARGE_INTEGER DisconnectTime;
+    LARGE_INTEGER LastInputTime;
+    LARGE_INTEGER CurrentTime;
+    DWORD IncomingBytes;
+    DWORD OutgoingBytes;
+    DWORD IncomingFrames;
+    DWORD OutgoingFrames;
+    DWORD IncomingCompressedBytes;
+    DWORD OutgoingCompressedBytes;
+};
+struct WtsInfoEx {
+    DWORD Level;
+    union {
+        WtsInfoExLevel1 Level1;
+    } Data;
+};
+
 bool isSessionLocked()
 {
+    LPWSTR buffer = nullptr;
+    DWORD bytes = 0;
+    if (WTSQuerySessionInformationW(WTS_CURRENT_SERVER_HANDLE, WTS_CURRENT_SESSION,
+                                    static_cast<WTS_INFO_CLASS>(kWtsSessionInfoEx), &buffer, &bytes)) {
+        bool locked = false;
+        const auto *info = reinterpret_cast<const WtsInfoEx *>(buffer);
+        if (buffer && bytes >= sizeof(WtsInfoEx) && info->Level == 1) {
+            locked = info->Data.Level1.SessionFlags == kWtsSessionStateLock;
+        }
+        WTSFreeMemory(buffer);
+        if (locked) {
+            return true;
+        }
+    }
     HDESK desktop = OpenInputDesktop(0, FALSE, DESKTOP_READOBJECTS);
     if (!desktop) {
         return true;

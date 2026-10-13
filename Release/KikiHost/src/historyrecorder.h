@@ -60,6 +60,15 @@ struct RecordedScreen {
     QString name;
 };
 
+// One employee's session states over a period, for History's StatusIcon
+// (History.qml: infoFrame noData / inLock / inSaver): when it was online
+// (no gap of "no data"), locked, or in the screensaver.
+struct SessionStates {
+    QList<QPair<qint64, qint64>> online;
+    QList<QPair<qint64, qint64>> lock;
+    QList<QPair<qint64, qint64>> saver;
+};
+
 struct ActivitySample {
     qint64 timestampMs = 0;
     int inputEvents = 0;
@@ -193,6 +202,7 @@ public:
     // would block the host event loop, so it lives in HistoryFrameReader on
     // its own thread with its own read-only connection to this database.
     QList<ActivitySample> listActivity(quint32 monitorStreamId, qint64 startMs, qint64 stopMs) const;
+    SessionStates listSessionStates(quint32 monitorStreamId, qint64 startMs, qint64 stopMs) const;
     QList<AppSegment> listAppSegments(quint32 monitorStreamId, qint64 startMs, qint64 stopMs) const;
     // Totals are clipped to the range.
     QList<AppUsage> listRunningApplications(quint32 monitorStreamId, qint64 startMs,

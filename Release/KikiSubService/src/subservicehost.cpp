@@ -8,67 +8,65 @@
 #include <QPointer>
 #include <QThreadPool>
 
+#include <cstring>
+
 namespace {
 
 enum class DiffResult { NoChange, Delta, Full };
 
-// Identical technique to computeChangedRect() in agentconnection.cpp (Host
-// -> Viewer leg): compare cheap downscaled copies of the previous and
-// current frame, then map the differing bounding box back to full
-// resolution, instead of a full-resolution pixel compare every tick.
+// The bounding box of every pixel that differs from the last frame sent,
+// at full resolution. The captures are exact (no codec noise), so a plain
+// compare finds every change -- a sampled one (the old 200px-wide grid)
+// skipped small ones such as a clock's digits, which then never reached the
+// host or the viewers.
 DiffResult computeChangedRect(const QImage &prev, const QImage &curr, double fullFrameThreshold,
                               QRect *outRect)
 {
-    if (prev.isNull() || prev.size() != curr.size()) {
+    if (prev.isNull() || prev.size() != curr.size() || prev.format() != curr.format()
+        || curr.depth() != 32) {
         return DiffResult::Full;
     }
-
-    constexpr int SampleWidth = 200;
-    const double scale = static_cast<double>(SampleWidth) / curr.width();
-    const int sampleHeight = qMax(1, static_cast<int>(curr.height() * scale));
-    const QImage prevSmall = prev.scaled(SampleWidth, sampleHeight, Qt::IgnoreAspectRatio,
-                                         Qt::FastTransformation)
-                                  .convertToFormat(QImage::Format_Grayscale8);
-    const QImage currSmall = curr.scaled(SampleWidth, sampleHeight, Qt::IgnoreAspectRatio,
-                                         Qt::FastTransformation)
-                                  .convertToFormat(QImage::Format_Grayscale8);
-
-    int minX = SampleWidth;
-    int minY = sampleHeight;
-    int maxX = -1;
+    const int width = curr.width();
+    const int height = curr.height();
+    const qsizetype rowBytes = static_cast<qsizetype>(width) * 4;
+    int minY = -1;
     int maxY = -1;
-    constexpr int NoiseTolerance = 8;
-    for (int y = 0; y < sampleHeight; ++y) {
-        const uchar *rowPrev = prevSmall.constScanLine(y);
-        const uchar *rowCurr = currSmall.constScanLine(y);
-        for (int x = 0; x < SampleWidth; ++x) {
-            if (qAbs(int(rowPrev[x]) - int(rowCurr[x])) > NoiseTolerance) {
-                minX = qMin(minX, x);
-                minY = qMin(minY, y);
-                maxX = qMax(maxX, x);
-                maxY = qMax(maxY, y);
+    for (int y = 0; y < height; ++y) {
+        if (memcmp(prev.constScanLine(y), curr.constScanLine(y), rowBytes) != 0) {
+            minY = y;
+            break;
+        }
+    }
+    if (minY < 0) {
+        return DiffResult::NoChange;
+    }
+    for (int y = height - 1; y >= minY; --y) {
+        if (memcmp(prev.constScanLine(y), curr.constScanLine(y), rowBytes) != 0) {
+            maxY = y;
+            break;
+        }
+    }
+    int minX = width;
+    int maxX = -1;
+    for (int y = minY; y <= maxY; ++y) {
+        const auto *rowPrev = reinterpret_cast<const quint32 *>(prev.constScanLine(y));
+        const auto *rowCurr = reinterpret_cast<const quint32 *>(curr.constScanLine(y));
+        for (int x = 0; x < minX; ++x) {
+            if (rowPrev[x] != rowCurr[x]) {
+                minX = x;
+                break;
+            }
+        }
+        for (int x = width - 1; x > maxX; --x) {
+            if (rowPrev[x] != rowCurr[x]) {
+                maxX = x;
+                break;
             }
         }
     }
-
-    if (maxX < 0) {
-        return DiffResult::NoChange;
-    }
-
-    const double invScaleX = static_cast<double>(curr.width()) / SampleWidth;
-    const double invScaleY = static_cast<double>(curr.height()) / sampleHeight;
-    constexpr int PaddingSamples = 2;
-    QRect rect(static_cast<int>((minX - PaddingSamples) * invScaleX),
-              static_cast<int>((minY - PaddingSamples) * invScaleY),
-              static_cast<int>((maxX - minX + 1 + 2 * PaddingSamples) * invScaleX),
-              static_cast<int>((maxY - minY + 1 + 2 * PaddingSamples) * invScaleY));
-    rect = rect.intersected(curr.rect());
-    if (rect.isEmpty()) {
-        return DiffResult::NoChange;
-    }
-
+    const QRect rect(minX, minY, maxX - minX + 1, maxY - minY + 1);
     const double area = static_cast<double>(rect.width()) * rect.height();
-    const double totalArea = static_cast<double>(curr.width()) * curr.height();
+    const double totalArea = static_cast<double>(width) * height;
     if (area / totalArea > fullFrameThreshold) {
         return DiffResult::Full;
     }

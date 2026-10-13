@@ -19,9 +19,11 @@ class QSlider;
 // Defined in devicedetailview.cpp -- the TabView MultiSwitch strip, the
 // StatusUser box, and the big offline/no-session placeholder, all
 // custom-painted from the original viewer.exe assets.
-class DetailTabSwitch;
+class BackButton;
+class MultiSwitch;
 class StatusUserBox;
 class BigStatusIcon;
+class MonitorColumn;
 class QScrollArea;
 class ViewerConnection;
 class MonitorWidget;
@@ -75,6 +77,17 @@ public:
     // "idle"/"other") -- drives the big StatusIcon placeholder on Monitors
     // (Windows.qml's instantStatusIcon), same mapping as DeviceTileWidget.
     void setSessionState(const QString &state);
+    // Re-points the Monitors column at the device's current monitor set
+    // (after a reconnect the streams are new).
+    void setMonitors(const QList<MonitorWidget *> &monitors);
+    // False while there is no connection to KikiHost (nodeOffline).
+    void setNodeOnline(bool online);
+    // Lock / screensaver of the session (StatusIcon lock / saver; the video
+    // stays, as Windows.qml only hides it for the other kinds).
+    void setActivityState(bool locked, bool saver);
+    // The streams the Monitors / Programs column shows live (fps 2); empty
+    // on the other tabs or while the StatusIcon replaces the video.
+    QList<quint32> wantedStreams() const;
     void activate();  // called when this page becomes visible
     void deactivate(); // called when navigating away
     // Updates just the header caption -- used after a rename (see
@@ -95,6 +108,12 @@ signals:
     // is shown (Tracker tiles, this header). MainWindow owns the actual
     // override map since it also owns deviceDisplayName().
     void renameRequested(quint32 sessionKey, const QString &currentName);
+    // TrackerQuadratorActiveCell.wantShowFullMonitor(displayId) /
+    // wantShowWindow(stream): a click on a monitor / window.
+    void fullMonitorRequested(quint32 streamId);
+    void windowMonitorRequested(quint32 streamId);
+    // What wantedStreams() returns may have changed.
+    void streamsChanged();
 
 protected:
     void resizeEvent(QResizeEvent *event) override;
@@ -110,25 +129,29 @@ private:
     void onCategorizationRequested(const QString &resource);
     void rebuildKeyloggerTable();
     void filterKeyloggerTable();
-    void resizeMonitorsToFit();
+    void updateVideoGeometry();
+    QString cellStatusKind() const;
+    bool showsVideo() const;
     // index into the tab strip: 0 Programs, 1 Monitors, 2 Violations
     // (ignored), 3 Keylogger.
     void switchSubTab(int index);
     void updateMonitorStatusIcon();
-    static void layoutPreviewWidgets(QVBoxLayout *layout, QWidget *container,
-                                     const QList<MonitorWidget *> &widgets);
-    static void resizePreviewWidgetsToFit(QWidget *container, const QList<MonitorWidget *> &widgets);
+    void layoutHeader();
 
     ViewerConnection &m_connection;
     quint32 m_sessionKey = 0;
     quint32 m_primaryStreamId = 0;
 
+    // TabView.qml's topLine (17px down): Back, caption, MultiSwitch and the
+    // headerZone, each at its own verticalCenterOffset -- see layoutHeader().
+    QWidget *m_headerRow = nullptr;
+    BackButton *m_backButton = nullptr;
     QLabel *m_nameLabel = nullptr;
     // Widgets/TabView.qml's MultiSwitch selector: the Programs / Monitors /
     // Violations / Keylogger tab strip (icon + label with the sliding pick
     // handle) drawn from the original Controls/Widgets assets. Violations is
     // shown but not selectable (no violation-detection system exists).
-    DetailTabSwitch *m_tabSwitch = nullptr;
+    MultiSwitch *m_tabSwitch = nullptr;
     // StatusUser.qml: the "Not active: HH:MM:SS" box (info_bg.png +
     // info_not_active.png), top-right above the SessionInfo panel like the
     // real Windows.qml puts it (parented to TabView's headerZone).
@@ -140,15 +163,18 @@ private:
     QStackedWidget *m_monitorInnerStack = nullptr;
     BigStatusIcon *m_monitorStatusIcon = nullptr;
     QString m_sessionState;
-    QWidget *m_monitorContainer = nullptr;
-    QVBoxLayout *m_monitorLayout = nullptr;
+    MonitorColumn *m_monitorColumn = nullptr;
     QList<MonitorWidget *> m_currentMonitors;
+    QWidget *m_leftColumn = nullptr;
+    bool m_nodeOnline = true;
+    bool m_locked = false;
+    bool m_saver = false;
 
     // "Programs" sub-tab: shows every currently open window on the device,
     // live, stacked the same way "Monitors" stacks screens -- see
     // windowlistcapture.h. Falls back to a placeholder label until at least
     // one window stream has been discovered.
-    QWidget *m_windowsContainer = nullptr;
+    MonitorColumn *m_windowsColumn = nullptr;
     // Windows.qml shows the same big StatusIcon placeholder on Programs as on
     // Monitors when there's nothing to display -- not a plain text label.
     QStackedWidget *m_programsInnerStack = nullptr;
@@ -182,7 +208,6 @@ private:
     void applyViolationsStepForRange();
     void setViolationsStepIndex(int stepIndex);
     void saveViolationsState() const;
-    QVBoxLayout *m_windowsLayout = nullptr;
     QList<MonitorWidget *> m_currentWindowPreviews;
 
     // keylogger/Table.qml equivalent: Date/Pressing period/Window/Keystrokes

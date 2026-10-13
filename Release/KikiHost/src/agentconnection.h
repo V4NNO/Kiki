@@ -39,9 +39,15 @@ public:
     ~AgentConnection() override;
 
     void setMonitors(const QList<MonitorInfo> &monitors);
+    // The stream's newest image. Sent at once, or -- once the viewer has
+    // sent SelectStreams -- only for a stream it selected and no faster than
+    // the fps it asked for; the newest image waits in the meantime, so the
+    // last change before a screen goes still is never lost.
     void pushFrame(quint32 streamId, const QImage &image);
+    // saver: the session's screensaver is running (Session.inSaver, the
+    // tile's "saver" status icon).
     void pushMetadata(quint32 streamId, const QString &application, const QString &idleText,
-                      quint32 activeMonitorStreamId);
+                      quint32 activeMonitorStreamId, bool saver);
     // See MessageType::StreamClosed -- tells this viewer to drop the stream
     // outright, instead of waiting to notice it stopped getting frames
     // (which, for a WindowListCapture window stream, never happens on its
@@ -85,7 +91,20 @@ private:
         QImage lastImage;
         quint64 sequence = 0;
         bool primed = false;
+        // Newest image not yet sent (pacing or not selected).
+        QImage pending;
+        // SelectStreams rate; 0 = not selected.
+        double fps = 0.0;
+        // m_pacingClock time of the last send, -1 = send the next one at once.
+        qint64 lastSentMs = -1;
     };
+
+    // Sends state.pending now if the selection and the stream's rate allow
+    // it, else leaves it for flushPendingFrames().
+    void trySendPending(quint32 streamId, StreamState &state);
+    void sendPending(quint32 streamId, StreamState &state);
+    void flushPendingFrames();
+    void handleSelectStreams(const QByteArray &payload);
 
     void parseAvailableMessages();
     void processMessage(const ViewerProtocol::Header &header, const QByteArray &payload);
@@ -144,6 +163,11 @@ private:
     QTimer m_segmentTimer;
     ViewerProtocol::PsvFrameReader m_frameReader;
     QHash<quint32, StreamState> m_streams;
+    // True once the viewer sent SelectStreams: from then on only selected
+    // streams are sent, each at its own rate.
+    bool m_selectionActive = false;
+    QElapsedTimer m_pacingClock;
+    QTimer m_pacingTimer;
     QList<MonitorInfo> m_monitors;
     QTimer m_handshakeTimeout;
     QTimer m_heartbeatTimer;

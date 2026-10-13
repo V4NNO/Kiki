@@ -75,6 +75,10 @@ class ViewerConnection final : public QObject
 
 public:
     explicit ViewerConnection(QObject *parent = nullptr);
+    // Detaches from the socket first: closing it would otherwise emit
+    // disconnected -> statusChanged into owners (and timers) that are
+    // already half destroyed.
+    ~ViewerConnection() override;
 
     void connectToAgent(const QString &host, quint16 port, const QString &token,
                         bool useTls, const QString &certificateSha256);
@@ -82,6 +86,14 @@ public:
     void startDemo();
     void stopDemo();
     bool isConnected() const;
+    // Connected and past ServerHello -- the only state History queries can
+    // be answered in (sendHistoryQuery drops them otherwise).
+    bool isAuthenticated() const;
+
+    // SelectStreams: the live streams this viewer shows and the rate each is
+    // wanted at (the highest Monitor.fps among the views showing it). Sent
+    // whenever it changes and again after every (re)authentication.
+    void setStreamSubscriptions(const QHash<quint32, double> &fpsByStream);
 
     // History (Faza 2): served by KikiHost over this same connection,
     // so it works whether or not viewer and host are on the same machine.
@@ -122,6 +134,9 @@ public:
     // The employee's screens that recorded anything in the period -- what
     // History shows, whether or not they are connected now.
     void requestHistoryScreens(quint32 streamId, qint64 startMs, qint64 stopMs);
+    // The employee's online / lock / screensaver ranges in the period
+    // (History's StatusIcon: noData / lock / saver).
+    void requestSessionStates(quint32 streamId, qint64 startMs, qint64 stopMs);
     void requestHistorySegment(quint32 streamId, qint64 sequenceId, qint64 fromMs, qint64 toMs,
                                quint64 requestId);
 
@@ -149,8 +164,12 @@ signals:
     // window is on (0 = none/unknown), for the tile's "Show active monitor"
     // button. Same value on every one of the device's monitor metadata
     // pushes.
+    // saver: the session's screensaver is running (Session.inSaver).
     void metadataChanged(quint32 streamId, const QString &application,
-                         const QString &idleText, quint32 activeMonitorStreamId);
+                         const QString &idleText, quint32 activeMonitorStreamId, bool saver);
+    // Authenticated with the host -- the start of a (re)connected session:
+    // AgentHello/frames for every stream follow.
+    void sessionStarted();
     // See MessageType::StreamClosed -- this streamId is gone for good
     // (its WindowListCapture window closed). MainWindow removes the
     // MonitorWidget and drops it from every tile/DeviceDetailView that
@@ -167,6 +186,10 @@ signals:
     void historyError(quint32 streamId, const QString &message);
     // A getFrame request had no frame for that screen near that moment.
     void historyFrameMissing(quint32 streamId, quint64 requestId);
+    void historySessionStatesReceived(quint32 streamId, const QString &day,
+                                      const QList<QPair<qint64, qint64>> &online,
+                                      const QList<QPair<qint64, qint64>> &lock,
+                                      const QList<QPair<qint64, qint64>> &saver);
     void historyActivityReceived(quint32 streamId, const QString &day,
                                  const QList<HistoryActivitySample> &samples);
     void historyAppSegmentsReceived(quint32 streamId, const QString &day,
@@ -211,6 +234,7 @@ private:
     };
 
     void sendClientHello();
+    void sendStreamSubscriptions();
     // Opens the socket with the stored connection params -- shared by the
     // initial connectToAgent() and the auto-reconnect timer.
     void attemptConnect();
@@ -247,5 +271,9 @@ private:
     // the user wants a live connection, so drops trigger a reconnect.
     bool m_wantConnected = false;
     quint64 m_demoSequence = 0;
+    QHash<quint32, double> m_subscriptions;
+    // What the host was last told, to send only real changes.
+    QHash<quint32, double> m_sentSubscriptions;
+    bool m_authenticated = false;
 };
 

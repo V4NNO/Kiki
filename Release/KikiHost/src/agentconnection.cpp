@@ -10,67 +10,67 @@
 #include <QJsonObject>
 #include <QHostAddress>
 
+#include <algorithm>
+#include <cstring>
+
 namespace {
 
 enum class DiffResult { NoChange, Delta, Full };
 
-// Cheap change detection: compare a small downscaled copy of the previous
-// and current frame, then map the differing bounding box back to full
-// resolution. Good enough to decide "send nothing / a patch / a full frame"
-// without paying for a full-resolution pixel compare every tick.
+// The bounding box of every pixel that differs from what this viewer was
+// last sent, at full resolution. Frames reach the host as the sub-service's
+// JPEG full frames plus delta patches, so outside a patch the pixels are
+// byte-identical and an exact compare finds precisely what changed -- a
+// sampled compare (the old 200px-wide one) could miss a clock's digits and
+// leave a tile showing a stale picture.
 DiffResult computeChangedRect(const QImage &prev, const QImage &curr, double fullFrameThreshold,
                               QRect *outRect)
 {
-    if (prev.isNull() || prev.size() != curr.size()) {
+    if (prev.isNull() || prev.size() != curr.size() || prev.format() != curr.format()
+        || curr.depth() != 32) {
         return DiffResult::Full;
     }
-
-    constexpr int SampleWidth = 200;
-    const double scale = static_cast<double>(SampleWidth) / curr.width();
-    const int sampleHeight = qMax(1, static_cast<int>(curr.height() * scale));
-    const QImage prevSmall = prev.scaled(SampleWidth, sampleHeight, Qt::IgnoreAspectRatio,
-                                         Qt::FastTransformation)
-                                  .convertToFormat(QImage::Format_Grayscale8);
-    const QImage currSmall = curr.scaled(SampleWidth, sampleHeight, Qt::IgnoreAspectRatio,
-                                         Qt::FastTransformation)
-                                  .convertToFormat(QImage::Format_Grayscale8);
-
-    int minX = SampleWidth;
-    int minY = sampleHeight;
-    int maxX = -1;
+    const int width = curr.width();
+    const int height = curr.height();
+    const qsizetype rowBytes = static_cast<qsizetype>(width) * 4;
+    int minY = -1;
     int maxY = -1;
-    constexpr int NoiseTolerance = 8;
-    for (int y = 0; y < sampleHeight; ++y) {
-        const uchar *rowPrev = prevSmall.constScanLine(y);
-        const uchar *rowCurr = currSmall.constScanLine(y);
-        for (int x = 0; x < SampleWidth; ++x) {
-            if (qAbs(int(rowPrev[x]) - int(rowCurr[x])) > NoiseTolerance) {
-                minX = qMin(minX, x);
-                minY = qMin(minY, y);
-                maxX = qMax(maxX, x);
-                maxY = qMax(maxY, y);
+    for (int y = 0; y < height; ++y) {
+        if (memcmp(prev.constScanLine(y), curr.constScanLine(y), rowBytes) != 0) {
+            minY = y;
+            break;
+        }
+    }
+    if (minY < 0) {
+        return DiffResult::NoChange;
+    }
+    for (int y = height - 1; y >= minY; --y) {
+        if (memcmp(prev.constScanLine(y), curr.constScanLine(y), rowBytes) != 0) {
+            maxY = y;
+            break;
+        }
+    }
+    int minX = width;
+    int maxX = -1;
+    for (int y = minY; y <= maxY; ++y) {
+        const auto *rowPrev = reinterpret_cast<const quint32 *>(prev.constScanLine(y));
+        const auto *rowCurr = reinterpret_cast<const quint32 *>(curr.constScanLine(y));
+        for (int x = 0; x < minX; ++x) {
+            if (rowPrev[x] != rowCurr[x]) {
+                minX = x;
+                break;
+            }
+        }
+        for (int x = width - 1; x > maxX; --x) {
+            if (rowPrev[x] != rowCurr[x]) {
+                maxX = x;
+                break;
             }
         }
     }
-
-    if (maxX < 0) {
-        return DiffResult::NoChange;
-    }
-
-    const double invScaleX = static_cast<double>(curr.width()) / SampleWidth;
-    const double invScaleY = static_cast<double>(curr.height()) / sampleHeight;
-    constexpr int PaddingSamples = 2;
-    QRect rect(static_cast<int>((minX - PaddingSamples) * invScaleX),
-              static_cast<int>((minY - PaddingSamples) * invScaleY),
-              static_cast<int>((maxX - minX + 1 + 2 * PaddingSamples) * invScaleX),
-              static_cast<int>((maxY - minY + 1 + 2 * PaddingSamples) * invScaleY));
-    rect = rect.intersected(curr.rect());
-    if (rect.isEmpty()) {
-        return DiffResult::NoChange;
-    }
-
+    const QRect rect(minX, minY, maxX - minX + 1, maxY - minY + 1);
     const double area = static_cast<double>(rect.width()) * rect.height();
-    const double totalArea = static_cast<double>(curr.width()) * curr.height();
+    const double totalArea = static_cast<double>(width) * height;
     if (area / totalArea > fullFrameThreshold) {
         return DiffResult::Full;
     }
@@ -105,6 +105,10 @@ AgentConnection::AgentConnection(QSslSocket *socket, AgentSettings settings, QOb
 
     m_heartbeatTimer.setInterval(5000);
     connect(&m_heartbeatTimer, &QTimer::timeout, this, &AgentConnection::onHeartbeatTimer);
+
+    m_pacingClock.start();
+    m_pacingTimer.setInterval(50);
+    connect(&m_pacingTimer, &QTimer::timeout, this, &AgentConnection::flushPendingFrames);
 
     // Deferred (SQL-heavy) history queries are drained one per event-loop
     // turn, and only while no frame read is outstanding -- a scrub must
@@ -149,8 +153,21 @@ QString AgentConnection::peerLabel() const
 
 void AgentConnection::setMonitors(const QList<MonitorInfo> &monitors)
 {
+    // A stream that left the list (its session ended) is retired explicitly,
+    // or the viewer would keep its last frame forever.
+    QList<quint32> removed;
+    for (const MonitorInfo &old : std::as_const(m_monitors)) {
+        const bool kept = std::any_of(monitors.cbegin(), monitors.cend(),
+                                      [&old](const MonitorInfo &m) { return m.streamId == old.streamId; });
+        if (!kept) {
+            removed.append(old.streamId);
+        }
+    }
     m_monitors = monitors;
     if (m_authenticated) {
+        for (quint32 streamId : removed) {
+            pushStreamClosed(streamId);
+        }
         sendAgentHellos();
     }
 }
@@ -199,6 +216,9 @@ void AgentConnection::processMessage(const ViewerProtocol::Header &header, const
         break;
     case MessageType::HistoryQuery:
         handleHistoryQuery(header, payload);
+        break;
+    case MessageType::SelectStreams:
+        handleSelectStreams(payload);
         break;
     default:
         fail(QStringLiteral("Viewer-ul a trimis un tip de mesaj neasteptat."));
@@ -252,6 +272,9 @@ void AgentConnection::handleClientHello(const QByteArray &payload)
     }
 
     m_authenticated = true;
+    // A viewer that will send SelectStreams gets no live frame before it
+    // says which streams it wants.
+    m_selectionActive = capabilities.value(QStringLiteral("selectStreams")).toBool();
     sendJson(ViewerProtocol::MessageType::AuthResult, 0, QJsonObject{{QStringLiteral("accepted"), true}});
     m_heartbeatTimer.start();
     emit logMessage(QStringLiteral("Viewer autentificat: %1").arg(peerLabel()));
@@ -286,6 +309,91 @@ void AgentConnection::pushFrame(quint32 streamId, const QImage &image)
         return;
     }
     StreamState &state = m_streams[streamId];
+    state.pending = image;
+    trySendPending(streamId, state);
+}
+
+void AgentConnection::trySendPending(quint32 streamId, StreamState &state)
+{
+    if (state.pending.isNull()) {
+        return;
+    }
+    if (m_selectionActive) {
+        if (state.fps <= 0.0) {
+            return; // kept: it is the first thing sent once selected
+        }
+        const qint64 intervalMs = static_cast<qint64>(1000.0 / qMax(state.fps, 1e-6));
+        const qint64 now = m_pacingClock.elapsed();
+        // A slow link must not pile frames up in the socket: the newest image
+        // simply waits (and gets replaced) until the backlog drains.
+        constexpr qint64 MaxBacklogBytes = 4 * 1024 * 1024;
+        if ((state.lastSentMs >= 0 && now - state.lastSentMs < intervalMs)
+            || m_socket->bytesToWrite() > MaxBacklogBytes) {
+            if (!m_pacingTimer.isActive()) {
+                m_pacingTimer.start();
+            }
+            return;
+        }
+        state.lastSentMs = now;
+    }
+    sendPending(streamId, state);
+}
+
+void AgentConnection::flushPendingFrames()
+{
+    bool waiting = false;
+    for (auto it = m_streams.begin(); it != m_streams.end(); ++it) {
+        if (!it->pending.isNull() && it->fps > 0.0) {
+            trySendPending(it.key(), it.value());
+            waiting = waiting || !it->pending.isNull();
+        }
+    }
+    if (!waiting) {
+        m_pacingTimer.stop();
+    }
+}
+
+void AgentConnection::handleSelectStreams(const QByteArray &payload)
+{
+    if (!m_authenticated) {
+        fail(QStringLiteral("SelectStreams inainte de autentificare."));
+        return;
+    }
+    const QJsonDocument document = QJsonDocument::fromJson(payload);
+    if (!document.isObject()) {
+        fail(QStringLiteral("SelectStreams invalid."));
+        return;
+    }
+    QHash<quint32, double> selected;
+    const QJsonArray streams = document.object().value(QStringLiteral("streams")).toArray();
+    for (const QJsonValue &value : streams) {
+        const QJsonObject stream = value.toObject();
+        const quint32 id = static_cast<quint32>(stream.value(QStringLiteral("id")).toDouble());
+        const double fps = stream.value(QStringLiteral("fps")).toDouble();
+        if (id != 0 && fps > 0.0) {
+            selected.insert(id, qMin(fps, 30.0));
+        }
+    }
+    m_selectionActive = true;
+    for (auto it = m_streams.begin(); it != m_streams.end(); ++it) {
+        if (!selected.contains(it.key())) {
+            it->fps = 0.0;
+        }
+    }
+    for (auto it = selected.cbegin(); it != selected.cend(); ++it) {
+        StreamState &state = m_streams[it.key()];
+        if (state.fps <= 0.0) {
+            state.lastSentMs = -1; // newly selected: its current image goes now
+        }
+        state.fps = it.value();
+        trySendPending(it.key(), state);
+    }
+}
+
+void AgentConnection::sendPending(quint32 streamId, StreamState &state)
+{
+    const QImage image = state.pending;
+    state.pending = QImage();
 
     QRect changedRect;
     DiffResult result = state.primed
@@ -320,7 +428,8 @@ void AgentConnection::pushFrame(quint32 streamId, const QImage &image)
 }
 
 void AgentConnection::pushMetadata(quint32 streamId, const QString &application,
-                                   const QString &idleText, quint32 activeMonitorStreamId)
+                                   const QString &idleText, quint32 activeMonitorStreamId,
+                                   bool saver)
 {
     if (!m_authenticated) {
         return;
@@ -329,7 +438,8 @@ void AgentConnection::pushMetadata(quint32 streamId, const QString &application,
             QJsonObject{{QStringLiteral("application"), application},
                         {QStringLiteral("idle"), idleText},
                         {QStringLiteral("activeMonitor"),
-                         static_cast<qint64>(activeMonitorStreamId)}});
+                         static_cast<qint64>(activeMonitorStreamId)},
+                        {QStringLiteral("saver"), saver}});
 }
 
 void AgentConnection::pushStreamClosed(quint32 streamId)
@@ -337,6 +447,7 @@ void AgentConnection::pushStreamClosed(quint32 streamId)
     if (!m_authenticated) {
         return;
     }
+    m_streams.remove(streamId);
     m_socket->write(ViewerProtocol::encodeMessage(ViewerProtocol::MessageType::StreamClosed,
                                                   streamId, 0, QByteArray()));
 }
@@ -366,6 +477,7 @@ bool isDeferrableHistoryAction(const QString &action)
 {
     return action == QStringLiteral("chartSeries")
         || action == QStringLiteral("listActivity")
+        || action == QStringLiteral("listSessionStates")
         || action == QStringLiteral("listAppSegments")
         || action == QStringLiteral("listRunningApplications")
         || action == QStringLiteral("listWebVisits")
@@ -511,6 +623,21 @@ void AgentConnection::runHistoryQuery(quint32 monitorStreamId, const QJsonObject
                 QJsonObject{{QStringLiteral("action"), action},
                             {QStringLiteral("day"), day},
                             {QStringLiteral("samples"), array}});
+    } else if (action == QStringLiteral("listSessionStates")) {
+        const SessionStates states = m_historyRecorder->listSessionStates(monitorStreamId, rangeStart, rangeStop);
+        const auto toArray = [](const QList<QPair<qint64, qint64>> &ranges) {
+            QJsonArray array;
+            for (const auto &range : ranges) {
+                array.append(QJsonArray{range.first, range.second});
+            }
+            return array;
+        };
+        sendJson(ViewerProtocol::MessageType::HistoryQuery, monitorStreamId,
+                QJsonObject{{QStringLiteral("action"), action},
+                            {QStringLiteral("day"), day},
+                            {QStringLiteral("online"), toArray(states.online)},
+                            {QStringLiteral("lock"), toArray(states.lock)},
+                            {QStringLiteral("saver"), toArray(states.saver)}});
     } else if (action == QStringLiteral("listAppSegments")) {
         QJsonArray array;
         for (const AppSegment &segment : m_historyRecorder->listAppSegments(monitorStreamId, rangeStart, rangeStop)) {

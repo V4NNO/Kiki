@@ -18,6 +18,15 @@ QString normalizedFingerprint(QString value)
 }
 }
 
+ViewerConnection::~ViewerConnection()
+{
+    m_wantConnected = false;
+    m_reconnectTimer.stop();
+    m_demoTimer.stop();
+    m_socket.disconnect(this);
+    m_socket.abort();
+}
+
 ViewerConnection::ViewerConnection(QObject *parent)
     : QObject(parent)
 {
@@ -27,6 +36,7 @@ ViewerConnection::ViewerConnection(QObject *parent)
     connect(&m_socket, &QSslSocket::errorOccurred, this, &ViewerConnection::onSocketError);
     connect(&m_socket, &QSslSocket::sslErrors, this, &ViewerConnection::onSslErrors);
     connect(&m_socket, &QSslSocket::disconnected, this, [this] {
+        m_authenticated = false;
         if (m_wantConnected) {
             emit statusChanged(QStringLiteral("Deconectat; reincercare..."), false);
             scheduleReconnect();
@@ -75,7 +85,12 @@ void ViewerConnection::connectToAgent(const QString &host, quint16 port,
 
 void ViewerConnection::attemptConnect()
 {
+    // A new connection starts every stream over with a full frame; the old
+    // images must not serve as delta baselines.
     m_frameReader.clear();
+    m_streams.clear();
+    m_authenticated = false;
+    m_sentSubscriptions.clear();
     emit statusChanged(QStringLiteral("Conectare la %1:%2...").arg(m_host).arg(m_port), false);
     if (m_useTls) {
         m_socket.connectToHostEncrypted(m_host, m_port);
@@ -146,6 +161,11 @@ void ViewerConnection::stopDemo()
 bool ViewerConnection::isConnected() const
 {
     return m_demoMode || m_socket.state() == QAbstractSocket::ConnectedState;
+}
+
+bool ViewerConnection::isAuthenticated() const
+{
+    return !m_demoMode && m_authenticated && m_socket.state() == QAbstractSocket::ConnectedState;
 }
 
 void ViewerConnection::onSocketConnected()
@@ -219,6 +239,8 @@ void ViewerConnection::sendClientHello()
         {QStringLiteral("capabilities"), QJsonObject{
              {QStringLiteral("video"), true},
              {QStringLiteral("deltaFrames"), true},
+             // Live streams only as asked for by SelectStreams.
+             {QStringLiteral("selectStreams"), true},
              {QStringLiteral("audio"), false},
              {QStringLiteral("remoteControl"), false},
              {QStringLiteral("clipboard"), false},
@@ -309,7 +331,10 @@ void ViewerConnection::processJsonMessage(const ViewerProtocol::Header &header,
             failProtocol(QStringLiteral("Autentificarea a fost refuzata de agent."));
             return;
         }
+        m_authenticated = true;
         emit statusChanged(QStringLiteral("Conectat si autentificat"), true);
+        emit sessionStarted();
+        sendStreamSubscriptions();
         return;
     }
     if (header.type == ViewerProtocol::MessageType::AgentHello) {
@@ -336,7 +361,31 @@ void ViewerConnection::processJsonMessage(const ViewerProtocol::Header &header,
                          object.value(QStringLiteral("application")).toString(),
                          object.value(QStringLiteral("idle")).toString(),
                          static_cast<quint32>(
-                             object.value(QStringLiteral("activeMonitor")).toDouble()));
+                             object.value(QStringLiteral("activeMonitor")).toDouble()),
+                         object.value(QStringLiteral("saver")).toBool());
+}
+
+void ViewerConnection::setStreamSubscriptions(const QHash<quint32, double> &fpsByStream)
+{
+    m_subscriptions = fpsByStream;
+    sendStreamSubscriptions();
+}
+
+void ViewerConnection::sendStreamSubscriptions()
+{
+    if (m_demoMode || !m_authenticated || m_socket.state() != QAbstractSocket::ConnectedState
+        || m_subscriptions == m_sentSubscriptions) {
+        return;
+    }
+    QJsonArray streams;
+    for (auto it = m_subscriptions.cbegin(); it != m_subscriptions.cend(); ++it) {
+        streams.append(QJsonObject{{QStringLiteral("id"), static_cast<qint64>(it.key())},
+                                   {QStringLiteral("fps"), it.value()}});
+    }
+    const QByteArray payload =
+        QJsonDocument(QJsonObject{{QStringLiteral("streams"), streams}}).toJson(QJsonDocument::Compact);
+    m_socket.write(ViewerProtocol::encodeMessage(ViewerProtocol::MessageType::SelectStreams, 0, 0, payload));
+    m_sentSubscriptions = m_subscriptions;
 }
 
 void ViewerConnection::processFullFrame(const ViewerProtocol::Header &header,
@@ -518,6 +567,11 @@ void ViewerConnection::requestHistoryScreens(quint32 streamId, qint64 startMs, q
     sendHistoryQuery(streamId, rangeQuery(QStringLiteral("listScreens"), startMs, stopMs));
 }
 
+void ViewerConnection::requestSessionStates(quint32 streamId, qint64 startMs, qint64 stopMs)
+{
+    sendHistoryQuery(streamId, rangeQuery(QStringLiteral("listSessionStates"), startMs, stopMs));
+}
+
 void ViewerConnection::requestHistorySegment(quint32 streamId, qint64 sequenceId, qint64 fromMs,
                                              qint64 toMs, quint64 requestId)
 {
@@ -541,6 +595,11 @@ void ViewerConnection::requestChartSeries(quint32 streamId, const QString &kind,
 
 void ViewerConnection::sendHistoryQuery(quint32 streamId, const QJsonObject &object)
 {
+    // Nothing can answer a query sent before authentication or after the
+    // socket dropped; HistoryView re-asks on sessionStarted instead.
+    if (!isAuthenticated()) {
+        return;
+    }
     const QByteArray payload = QJsonDocument(object).toJson(QJsonDocument::Compact);
     m_socket.write(ViewerProtocol::encodeMessage(ViewerProtocol::MessageType::HistoryQuery, streamId,
                                                  0, payload));
@@ -606,6 +665,17 @@ void ViewerConnection::processHistoryQuery(const ViewerProtocol::Header &header,
         }
         emit historySegmentsReceived(header.streamId,
                                      object.value(QStringLiteral("day")).toString(), segments);
+    } else if (action == QStringLiteral("listSessionStates")) {
+        const auto ranges = [&object](const char *key) {
+            QList<QPair<qint64, qint64>> result;
+            for (const QJsonValue &value : object.value(QLatin1String(key)).toArray()) {
+                const QJsonArray pair = value.toArray();
+                result.append({static_cast<qint64>(pair.at(0).toDouble()), static_cast<qint64>(pair.at(1).toDouble())});
+            }
+            return result;
+        };
+        emit historySessionStatesReceived(header.streamId, object.value(QStringLiteral("day")).toString(),
+                                          ranges("online"), ranges("lock"), ranges("saver"));
     } else if (action == QStringLiteral("listActivity")) {
         QList<HistoryActivitySample> samples;
         for (const QJsonValue &value : object.value(QStringLiteral("samples")).toArray()) {
@@ -799,17 +869,17 @@ void ViewerConnection::renderDemoFrame()
         emit metadataChanged(display.first,
                              display.first % 3 == 0 ? QStringLiteral("ms-teams.exe")
                                                     : QStringLiteral("chrome.exe"),
-                             QStringLiteral("Browser is active"), 0);
+                             QStringLiteral("Browser is active"), 0, false);
     }
 
     emit metadataChanged(4, QStringLiteral("microsoft.lockapp"),
-                         QStringLiteral("Locked 00:10:15"), 0);
+                         QStringLiteral("Locked 00:10:15"), 0, false);
     emit metadataChanged(7, QStringLiteral("microsoft.lockapp"),
-                         QStringLiteral("Locked 00:06:34"), 0);
+                         QStringLiteral("Locked 00:06:34"), 0, false);
     emit metadataChanged(12, QStringLiteral("microsoft.lockapp"),
-                         QStringLiteral("Locked 00:36:52"), 0);
+                         QStringLiteral("Locked 00:36:52"), 0, false);
     emit metadataChanged(15, QStringLiteral("microsoft.lockapp"),
-                         QStringLiteral("Locked 00:01:31"), 0);
+                         QStringLiteral("Locked 00:01:31"), 0, false);
 }
 
 void ViewerConnection::processHistorySegment(const ViewerProtocol::Header &header,

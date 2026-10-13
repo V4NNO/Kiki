@@ -4,12 +4,16 @@
 
 #include <QDateTime>
 #include <QHash>
+#include <QJsonObject>
 #include <QList>
 #include <QMainWindow>
 #include <QPointer>
 #include <QSet>
 
+class QAbstractButton;
+class ViewerTabBar;
 class QAction;
+class QMenu;
 class QCheckBox;
 class QDialog;
 class QFrame;
@@ -27,6 +31,8 @@ class MonitorWidget;
 class DeviceTileWidget;
 class DeviceDetailView;
 class HistoryView;
+class LiveMonitorOverlay;
+class VideoSelectorModel;
 // Defined in mainwindow.cpp -- the top header's Tracker/Reports/History/
 // Remote Control buttons (TopPanel.qml).
 class TopNavButton;
@@ -37,7 +43,16 @@ class MainWindow final : public QMainWindow
     Q_OBJECT
 
 public:
-    explicit MainWindow(QWidget *parent = nullptr);
+    // windowIndex 0 is the first window; WindowContent.qml's "addWindow"
+    // opens more (1, 2, ...), each with its own tabs and page, reopened on
+    // the next start (the original's windowManager config).
+    explicit MainWindow(int windowIndex = 0, QWidget *parent = nullptr);
+    // The extra windows that were open when the viewer last ran.
+    static QList<int> savedExtraWindows();
+    // Members die before the child widgets: stop the application-wide event
+    // filter and the connection's signals from reaching a half-destroyed
+    // window first.
+    ~MainWindow() override;
 
     // Used by --autostart-* command-line switches for unattended interop
     // testing (fills the settings dialog fields, then connects).
@@ -74,9 +89,8 @@ private slots:
     void updateFrame(quint32 streamId, const QImage &image, quint64 sequence,
                      qint64 latencyMs);
     void updateMetadata(quint32 streamId, const QString &application, const QString &idleText,
-                        quint32 activeMonitorStreamId);
+                        quint32 activeMonitorStreamId, bool saver);
     void selectMonitor(quint32 streamId);
-    void showMonitorFullScreen(quint32 streamId);
     void showProtocolError(const QString &message);
 
     void showTrackerPage();
@@ -115,20 +129,54 @@ private slots:
     void setSimpleMode(bool simple);
     void openDeviceDetail(quint32 sessionKey);
     void closeDeviceDetail();
-    // ViewerConnection::monitorClosed -- removes a window stream (and its
-    // MonitorWidget) for good; see the member comment on
-    // m_deviceWindowStreams for why this replaced a frame-staleness guess.
-    void removeWindowStream(quint32 streamId);
+    // ViewerConnection::monitorClosed -- removes a stream (and its
+    // MonitorWidget) for good: a window that closed (see the member comment
+    // on m_deviceWindowStreams for why this replaced a frame-staleness
+    // guess) or a monitor whose session ended.
+    void removeStream(quint32 streamId);
 
 private:
+    // SelectStreams: every live view's streams at its Monitor.fps -- 1/2 for
+    // the current tab's tiles, 2 for the enlarged cell and its full monitor
+    // -- the highest per stream, sent when it changes. Coalesced to one
+    // computation per event-loop turn.
+    void scheduleSubscriptionRefresh();
+    void refreshStreamSubscriptions();
+    // The connection to KikiHost came up / went down (StatusIcon
+    // "nodeOffline" on every cell while it is down).
+    void setNodeOnline(bool online);
+    // Forgets every live stream (they are renumbered by the next session)
+    // but keeps the tabs, the cells and what each cell is set to show.
+    void resetLiveStreams();
+    // TrackerQuadratorActiveCell's FullMonitor / WindowMonitor top layer.
+    void showFullMonitor(quint32 displayStream);
+    void showWindowMonitor(quint32 windowStream);
+    void closeLiveOverlay();
+    // Tabs, cells (device + user name) and each cell's VideoSelector config,
+    // kept across restarts like the original's per-cell Config.
+    void saveTabs() const;
+    void loadTabs();
+    void storeTileSelector(quint32 tileId, const QJsonObject &config);
+    // A saved cell's device came back under another session id: re-point
+    // the cells of that user to it.
+    void rebindCellsForUser(const QString &username, quint32 deviceKey);
     void buildInterface();
+    // TopPanel.qml expanded/docked state (WindowContent.qml): docked under
+    // the panel when windowed or pinned; unpinned full screen collapses it
+    // and shows it over the content while the mouse is at the top edge (or
+    // on it) or its menu is open. Also picks the buttons for the window state.
+    void updateTopPanel();
     void applyStyle();
-    void clearMonitors();
     void relayoutCurrentTab();
     // QuadratorGrid.qml's + TrackerQuadrator.qml's onWantFill / onWantFree,
     // ported 1:1 (see the definitions).
     void fillTarget(const GridFillTarget &target, quint32 deviceKey);
     void fillCell(int cell, quint32 deviceKey, bool canCollapse, int minColumns, int minRows);
+    // TrackerQuadrator.qml onWantMoveCell: the dragged cell's slot and the
+    // one it was dropped on swap (into a fictive strip the grid grows).
+    void moveCell(int cellTarget, const GridFillTarget &cellPlace);
+    // TrackerQuadratorCell.qml's drag of a cell onto another (see eventFilter).
+    bool handleCellDrag(QWidget *cell, QEvent *event);
     void removeTile(quint32 tileId);
     void loadSettings();
     void saveSettings() const;
@@ -147,6 +195,8 @@ private:
 
 protected:
     void resizeEvent(QResizeEvent *event) override;
+    void changeEvent(QEvent *event) override;
+    void closeEvent(QCloseEvent *event) override;
     // Swallows QEvent::ToolTip application-wide when m_tooltipsEnabled is
     // false -- the real, working effect behind the Preferences dialog's
     // "Tooltips" checkbox (Settings.qml's Settings.Tooltips).
@@ -177,6 +227,24 @@ protected:
     // the header (green/red) with a server-name tooltip. m_staterNodeName is
     // the agent's reported name, shown in that tooltip.
     QLabel *m_staterNodeDot = nullptr;
+    QFrame *m_topPanel = nullptr;
+    QWidget *m_topPanelSpacer = nullptr;
+    QMenu *m_mainMenu = nullptr;
+    QAbstractButton *m_pinButton = nullptr;
+    QAbstractButton *m_unpinButton = nullptr;
+    QAbstractButton *m_maximizeButton = nullptr;
+    QAbstractButton *m_minimizeButton = nullptr;
+    QAbstractButton *m_closeButton = nullptr;
+    bool m_topPanelPinned = false;  // WindowContent's topPanelPinned (persisted)
+    bool m_topPanelHovered = false; // TopPanel's sensor.containsMouse (see eventFilter)
+    bool m_maximizedBeforeFullScreen = false;
+    // HistoryTab.qml: topPanel.expanded = false while History is panelFull.
+    bool m_historyPanelFull = false;
+    int m_windowIndex = 0;
+    QAbstractButton *m_addWindowButton = nullptr;
+    // Per-window settings keys: window 0 keeps the plain ones.
+    QString windowKey(const QString &key) const;
+    void openNewWindow();
     QString m_staterNodeName;
     QLabel *m_agentLabel = nullptr; // utils/NoEmployeesAssignedInformer.qml equivalent
     // utils/NoCNodeConnectionBlocker.qml / NoEmployeesAssignedInformer.qml
@@ -190,6 +258,15 @@ protected:
     QWidget *m_monitorContainer = nullptr;
     // The empty "+" cells of the current relayout -- rebuilt every time.
     QList<QWidget *> m_emptyCellWidgets;
+    // Every grid cell widget of the current tab: its target and geometry.
+    QHash<QWidget *, GridFillTarget> m_cellTargets;
+    QHash<QWidget *, QRect> m_cellRects;
+    QSize m_dragCellSize; // ddCellWidth/Height = cell [0,0]
+    QPointer<QWidget> m_dragCell;
+    QPointer<QWidget> m_dropCell;
+    QPoint m_dragPressPos;    // in the cell
+    QPoint m_dragPressGlobal;
+    bool m_dragging = false;
 
     // Every monitor ever discovered, regardless of which (if any) tab shows
     // its device. Canonical owner of every MonitorWidget instance -- the
@@ -243,7 +320,7 @@ protected:
     // window on that machine -- not counted among its "monitors"
     // (m_deviceMonitorStreams), just their own MonitorWidgets (still owned
     // by m_monitors) shown on the Programs sub-tab of the detail page.
-    // Windows come and go a lot more than monitors do; removeWindowStream()
+    // Windows come and go a lot more than monitors do; removeStream()
     // drops one for good the moment ViewerConnection::monitorClosed says
     // it's actually closed (StreamClosed on the wire) -- not by guessing
     // from missing frames, since a backgrounded window's frame never
@@ -275,6 +352,10 @@ protected:
         struct TileEntry {
             quint32 tileId;
             quint32 deviceKey;
+            // The device's user (the persistent identity across sessions)
+            // and the cell's VideoSelector.save().
+            QString username = QString();
+            QJsonObject videoSelector = QJsonObject();
         };
         QString title;
         // TrackerQuadrator.qml's quadrator.cells: positional, with holes --
@@ -302,7 +383,7 @@ protected:
     };
     QList<TrackerTab> m_tabs;
     int m_currentTabIndex = 0;
-    QTabBar *m_tabBar = nullptr;
+    ViewerTabBar *m_tabBar = nullptr;
     quint32 m_selectedStream = 0;
 
     QStackedWidget *m_contentStack = nullptr;
@@ -328,7 +409,20 @@ protected:
     // TrackerFiltersPanel.qml equivalent -- see toggleFiltersPanel().
     QFrame *m_filtersPanel = nullptr;
     QPushButton *m_filtersButton = nullptr;
+    // Grids / Filters are only offered while no cell of the tab is expanded
+    // (Tracker.qml's allowGridsPanel / allowFiltersPanel); the tab row stays.
+    QPushButton *m_gridsButton = nullptr;
 
     bool m_simpleMode = false;
     QAction *m_simpleModeAction = nullptr;
+
+    bool m_nodeOnline = false;
+    bool m_subscriptionRefreshQueued = false;
+    // Lock / screensaver per device (the screensaver flag of its primary
+    // stream's metadata; locked comes from the idle text).
+    QHash<quint32, bool> m_deviceSaver; // key: deviceKey
+    // The enlarged cell's own VideoSelector (TrackerQuadratorActiveCell's,
+    // never loaded -- it starts on the active display) and its top layer.
+    VideoSelectorModel *m_activeCellSelector = nullptr;
+    LiveMonitorOverlay *m_liveOverlay = nullptr;
 };
