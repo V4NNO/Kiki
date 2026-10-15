@@ -1564,7 +1564,7 @@ int KeystreamBar::rowWidth() const
 void KeystreamBar::updateScrollRange()
 {
     const int viewport = width() - 10;
-    const int overflow = qMax(0, rowWidth() - viewport);
+    const int overflow = m_viewDisabled ? 0 : qMax(0, rowWidth() - viewport);
     m_scrollBar->setRange(0, overflow);
     m_scrollBar->setPageStep(qMax(1, viewport));
     m_scrollBar->setSingleStep(20);
@@ -1589,6 +1589,16 @@ void KeystreamBar::setText(const QString &past, const QString &future)
     update();
 }
 
+void KeystreamBar::setViewDisabled(bool disabled)
+{
+    if (disabled == m_viewDisabled) {
+        return;
+    }
+    m_viewDisabled = disabled;
+    updateScrollRange();
+    update();
+}
+
 void KeystreamBar::wheelEvent(QWheelEvent *event)
 {
     const int delta = event->angleDelta().x() != 0 ? event->angleDelta().x() : event->angleDelta().y();
@@ -1606,6 +1616,22 @@ void KeystreamBar::paintEvent(QPaintEvent *)
     painter.drawTiledPixmap(QRect(0, height() - 2, width(), 2), background.copy(0, bgHeight - 2, 1, 2));
     painter.drawTiledPixmap(QRect(0, 2, width(), height() - 4),
                             background.copy(0, 2, 1, bgHeight - 4).scaled(1, height() - 4));
+
+    if (m_viewDisabled) {
+        // Row { spacing 10; centerIn } of history/warning.png and the white
+        // text (default font).
+        static const QPixmap warning(QStringLiteral(":/history/warning.png"));
+        const QString text = QStringLiteral("viewer keylogger disabled");
+        const QFontMetrics metrics(font());
+        const int rowWidth = warning.width() + 10 + metrics.horizontalAdvance(text);
+        int x = (width() - rowWidth) / 2;
+        painter.drawPixmap(x, (height() - warning.height()) / 2, warning);
+        x += warning.width() + 10;
+        painter.setFont(font());
+        painter.setPen(Qt::white);
+        painter.drawText(QRect(x, 0, width() - x, height()), Qt::AlignLeft | Qt::AlignVCenter, text);
+        return;
+    }
 
     // Row of two Keystream texts (Fonts.rr_medium): typed so far in white,
     // still to come in gray; x = max(0, (viewport - row) / 2), leftMargin 5.
@@ -3619,6 +3645,7 @@ HistoryView::HistoryView(ViewerConnection &connection, QWidget *parent)
                 updateInfoPanel();
             });
     connect(&m_connection, &ViewerConnection::keyEventsReceived, this, &HistoryView::onKeyEvents);
+    connect(&m_connection, &ViewerConnection::keyEventsFailed, this, &HistoryView::onKeyEventsFailed);
     connect(&m_connection, &ViewerConnection::historyError, this, &HistoryView::onHistoryError);
     connect(&m_connection, &ViewerConnection::historySessionStatesReceived, this,
             [this](quint32 streamId, const QString &day, const QList<QPair<qint64, qint64>> &online,
@@ -3786,8 +3813,17 @@ void HistoryView::openForInterval(quint32 deviceKey, const QDateTime &begin, con
 
 void HistoryView::setDeviceIdentity(quint32 deviceKey, const SessionIdentity &identity)
 {
+    const bool viewWasOff = m_identities.contains(deviceKey) && !m_identities.value(deviceKey).keyloggerView;
     m_identities.insert(deviceKey, identity);
     if (deviceKey == m_currentDeviceKey) {
+        m_keystream->setViewDisabled(!identity.keyloggerView);
+        // Keys shown again: the period's keyboardEvents are asked for anew
+        // (the earlier answer was the refusal).
+        if (viewWasOff && identity.keyloggerView && !m_rangeKey.isEmpty() && m_periodAnchor != 0) {
+            m_keyEventsSettled = false;
+            m_keyEventsTag = QStringLiteral("history-keylogger-%1").arg(++m_keyEventsGeneration);
+            m_connection.requestKeyEvents(m_periodAnchor, periodStartMs(), periodStopMs(), m_keyEventsTag);
+        }
         m_timeline->setSessionLabel(m_identities.value(deviceKey).displayText(),
                                     !m_deviceMonitorStreams.value(deviceKey).isEmpty());
     }
@@ -4271,6 +4307,8 @@ void HistoryView::loadPeriod()
     m_webVisits.clear();
     m_appSegments.clear();
     m_keyEvents.clear();
+    m_keyLegacy.clear();
+    m_keyEventsSettled = false;
     m_infoPanel->setItems({}, {});
 
     const qint64 start = periodStartMs();
@@ -4907,7 +4945,9 @@ void HistoryView::onKeylogTableClicked()
     progress->setMinimumDuration(0);
     progress->setAttribute(Qt::WA_DeleteOnClose);
     connect(progress, &QProgressDialog::canceled, this, [this] {
+        // onCancel: state 0 -- whatever still comes for it is ignored.
         m_textExport.active = false;
+        m_textExport.tag.clear();
         if (m_textExport.progress) {
             m_textExport.progress->close();
         }
@@ -4919,7 +4959,7 @@ void HistoryView::onKeylogTableClicked()
     m_connection.requestKeyEvents(m_textExport.streamId, periodStartMs(), periodStopMs(), m_textExport.tag);
 }
 
-void HistoryView::finishTextExport(const QList<KeyEvent> &events)
+void HistoryView::finishTextExport(const KeyEventsReply &reply)
 {
     m_textExport.active = false;
     if (m_textExport.progress) {
@@ -4927,19 +4967,48 @@ void HistoryView::finishTextExport(const QList<KeyEvent> &events)
         m_textExport.progress = nullptr;
         progress->close();
     }
-    // KeyloggerExporter's Result: sites and programs both shown, no keyword,
-    // the dialog's cutSystemKeys; the last record ends at the period's end.
+    // KeyloggerExporter's Result: showSites, showExecutables, showBinForSites
+    // = HistoryTab.showBinForSite (off only for History by a web page),
+    // appFilter = appFilterName, no keyword, the dialog's cutSystemKeys.
     Keylogger::ResultOptions options;
     options.cutSystemKeys = m_textExport.cutSystemKeys;
     options.showSites = true;
     options.showExecutables = true;
-    const QList<KeyloggerRow> rows = Keylogger::buildResult(events, periodStopMs(), options);
+    options.showBinForSites = !(m_appFilter.isSet() && m_appFilter.isWebPage);
+    options.appFilter = m_appFilter.name;
+    const QList<KeyloggerRow> rows = Keylogger::buildResult(reply.events, reply.legacy, options);
+    // trySave: S_loadedComplete and S_loadedPartial both write.
     const QString result = m_textExport.xlsx ? Keylogger::exportToXlsx(rows, m_textExport.path)
                                              : Keylogger::exportToCsv(rows, m_textExport.path);
     if (result != QStringLiteral("success")) {
         // KeyloggerExporter.qml: MessageBox "Keylogger export failed".
         QMessageBox::warning(this, QStringLiteral("Keylogger export failed"), result);
+    } else if (!reply.complete) {
+        QMessageBox::warning(this, QStringLiteral("Keylogger export incomplete"),
+                             reply.partialReason.isEmpty()
+                                 ? QStringLiteral("Only part of the period's keystrokes could be loaded; the file "
+                                                  "holds what was.")
+                                 : QStringLiteral("Only part of the period's keystrokes could be loaded (%1); the "
+                                                  "file holds what was.")
+                                       .arg(reply.partialReason));
     }
+}
+
+void HistoryView::failTextExport(const QString &message)
+{
+    if (!m_textExport.active) {
+        return;
+    }
+    m_textExport.active = false;
+    m_textExport.tag.clear();
+    if (m_textExport.progress) {
+        QPointer<QDialog> progress = m_textExport.progress;
+        m_textExport.progress = nullptr;
+        progress->close();
+    }
+    // KeyloggerExporter state 5: the error MessageBox.
+    QMessageBox::warning(this, QStringLiteral("Keylogger export failed"),
+                         message.isEmpty() ? QStringLiteral("The keystrokes could not be loaded.") : message);
 }
 
 void HistoryView::onExportVideoClicked()
@@ -5298,6 +5367,10 @@ void HistoryView::onConnectionStatus(bool connected)
         return;
     }
     m_connectionLost = true;
+    // The export's Selector will not be answered either.
+    if (m_textExport.active) {
+        failTextExport(QStringLiteral("The connection to the host was lost."));
+    }
     // Nothing sent before the drop will be answered: the request slots are
     // freed (the download in flight is asked for again after the reconnect),
     // while the player keeps its moment, its play state, the cache and the
@@ -5354,6 +5427,12 @@ void HistoryView::resumeAfterReconnect()
         m_resumePlaying = false;
         if (!m_statesLoaded) {
             m_connection.requestSessionStates(m_periodAnchor, periodStartMs(), periodStopMs());
+        }
+        // historyModel.keyboardEvents never came: a new request (the old
+        // tag is dropped, so a late answer cannot overwrite it).
+        if (!m_keyEventsSettled) {
+            m_keyEventsTag = QStringLiteral("history-keylogger-%1").arg(++m_keyEventsGeneration);
+            m_connection.requestKeyEvents(m_periodAnchor, periodStartMs(), periodStopMs(), m_keyEventsTag);
         }
         for (quint32 screen : historyStreams()) {
             if (!m_videoSegments.contains(screen)) {
@@ -5943,16 +6022,18 @@ void HistoryView::onCategoriesReceived(quint32 streamId, const QHash<QString, QS
     updateInfoPanel();
 }
 
-void HistoryView::onKeyEvents(quint32 streamId, const QString &tag, const QList<KeyEvent> &events, bool)
+void HistoryView::onKeyEvents(quint32 streamId, const QString &tag, const KeyEventsReply &reply)
 {
     if (m_textExport.active && streamId == m_textExport.streamId && tag == m_textExport.tag) {
-        finishTextExport(events);
+        finishTextExport(reply);
         return;
     }
-    if (tag != m_keyEventsTag) {
+    if (m_keyEventsTag.isEmpty() || tag != m_keyEventsTag) {
         return; // another Selector's (the Tracker's, or an older period's)
     }
-    m_keyEvents = events;
+    m_keyEventsSettled = true;
+    m_keyEvents = reply.events;
+    m_keyLegacy = reply.legacy;
     const qint64 moment = m_timeline->timestampForMarker(m_timeline->currentMarker());
     updateKeystream(moment);
 }
@@ -5962,12 +6043,26 @@ void HistoryView::updateKeystream(qint64 timestampMs)
     // History.qml's two Keystreams over historyModel.keyboardEvents: the
     // events up to the moment (v.moment <= moment) in white, the ones after
     // it in gray -- each its own Translator (the QML path: nothing cut).
-    QList<KeyEvent> past;
-    QList<KeyEvent> future;
-    for (const KeyEvent &event : std::as_const(m_keyEvents)) {
-        (timestampMs >= 0 && event.moment <= timestampMs ? past : future).append(event);
+    // The earlier keylogger's chunks lead, as their saved text at their
+    // save moment.
+    m_keystream->setViewDisabled(!m_identities.value(m_currentDeviceKey).keyloggerView);
+    const QPair<QString, QString> text = Keylogger::splitKeystream(m_keyEvents, m_keyLegacy, timestampMs);
+    m_keystream->setText(text.first, text.second);
+}
+
+void HistoryView::onKeyEventsFailed(quint32 streamId, const QString &tag, const QString &message)
+{
+    if (m_textExport.active && streamId == m_textExport.streamId && tag == m_textExport.tag) {
+        failTextExport(message);
+        return;
     }
-    m_keystream->setText(Keylogger::translate(past, false, false, false), Keylogger::translate(future, false, false, false));
+    if (!m_keyEventsTag.isEmpty() && tag == m_keyEventsTag) {
+        // historyModel.keyboardEvents stays empty; the bar says nothing.
+        m_keyEventsSettled = true;
+        m_keyEvents.clear();
+        m_keyLegacy.clear();
+        updateKeystream(m_timeline->timestampForMarker(m_timeline->currentMarker()));
+    }
 }
 
 void HistoryView::onHistoryError(quint32 streamId, const QString &message)

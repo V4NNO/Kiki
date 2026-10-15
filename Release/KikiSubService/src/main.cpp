@@ -56,6 +56,8 @@ int main(int argc, char *argv[])
     parser.addOption({QStringLiteral("fps"), QStringLiteral("Cadre pe secunda (1-30)."),
                       QStringLiteral("fps"), QStringLiteral("8")});
     parser.addOption({QStringLiteral("smoke-test"), QStringLiteral("Porneste si iese imediat.")});
+    parser.addOption({QStringLiteral("no-keylogger"),
+                      QStringLiteral("Nu inregistra tastele (activitatea se numara in continuare).")});
     parser.process(application);
 
     if (parser.isSet(QStringLiteral("smoke-test"))) {
@@ -235,6 +237,7 @@ int main(int argc, char *argv[])
     capture.start(IdleFps);
     activityProbe.start();
     windowCapture.start();
+    keylogger.setCaptureKeys(!parser.isSet(QStringLiteral("no-keylogger")));
     if (!keylogger.start()) {
         printLine(QStringLiteral(
             "Keylogger-ul nu a putut fi instalat (SetWindowsHookEx a esuat); continui fara el."));

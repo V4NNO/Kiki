@@ -27,6 +27,9 @@ class SessionManager final : public QObject
 public:
     SessionManager(AgentServer *server, QString subServicePath, QObject *parent = nullptr);
     ~SessionManager() override;
+    // dcKeyloggerEnabled: off -> the sub-services are started without key
+    // capture (--no-keylogger) and any keys still sent are dropped.
+    void setKeyloggerCapture(bool capture) { m_keyloggerCapture = capture; }
 
     // Kicks off the first enumeration and starts the periodic rescan.
     // Returns false with *error set if the very first enumeration fails
@@ -90,4 +93,5 @@ private:
     // sub-service as soon as it's discovered so a session that starts up
     // after viewers are already connected doesn't sit at idle FPS.
     int m_viewerCount = 0;
+    bool m_keyloggerCapture = true;
 };

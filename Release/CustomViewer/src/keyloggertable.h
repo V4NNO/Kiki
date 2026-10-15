@@ -7,17 +7,21 @@
 #include <QString>
 #include <QTextLayout>
 
-// One row of the keylogger table (Keylogger.Result.content): the local day,
-// the pressing period, the program or site typed into, its window title and
-// the translated keystream.
+// One row of the keylogger table (Keylogger.Result.content, FUN_1402daab0's
+// map): the local day, the pressing period, the program or site typed into
+// (application {type, name}), its window title and the translated
+// keystream -- as translated, not trimmed.
 struct KeyloggerRow {
     QDate date;
     qint64 fromMs = 0;
     qint64 toMs = 0;
     QString application;
-    bool isSite = false; // Result.AT_Site: the cell is a link
+    bool isSite = false; // Result.AT_Site (application.type 2): the cell is a link
     QString title;
     QString keystream;
+    // A chunk of the earlier keylogger (LegacyKeyChunk): its text and times
+    // are what was saved then, not individual events.
+    bool estimated = false;
 };
 
 // trackerQuadratorActiveCell/keylogger/Table.qml: a fixed header and a
@@ -27,7 +31,12 @@ struct KeyloggerRow {
 // in #cccccc (the header in white), each cell on cell/bg.png (1px borders).
 // Date and period are plain text, application and title elided with their
 // full text as a tooltip (a site is a link, underlined on hover, opened on
-// click), the keystream wraps anywhere and can be selected (Ctrl+C copies).
+// click), the keystream is a read-only TextEdit per row (WrapAnywhere,
+// selectByMouse, selectByKeyboard): the mouse, Shift + click and Shift +
+// arrows / Home / End select, the plain keys move the (unpainted -- a
+// read-only TextEdit draws no cursor) cursor, Ctrl+C copies, Ctrl+A selects
+// the cell. Fonts.rr_small_b and the Date / Pressing period widths follow
+// Fonts.scale.
 class KeyloggerTable final : public QAbstractScrollArea
 {
     Q_OBJECT
@@ -49,6 +58,7 @@ protected:
     void keyPressEvent(QKeyEvent *event) override;
     void leaveEvent(QEvent *event) override;
     bool viewportEvent(QEvent *event) override;
+    void focusOutEvent(QFocusEvent *event) override;
 
 private:
     struct LaidOutRow {
@@ -65,16 +75,22 @@ private:
     QTextLayout *keystreamLayout(int index);
     int keystreamCursorAt(int index, const QPoint &pos);
     void copySelection();
+    // The TextEdit's keyboard navigation in the focused keystream.
+    bool moveCursor(QKeyEvent *event);
+    void ensureCursorVisible();
 
     QList<KeyloggerRow> m_rows;
     QList<LaidOutRow> m_layout;
     QHash<int, QTextLayout *> m_layouts; // keystream layouts, by row
     int m_contentHeight = 0;
-    // Selection inside one keystream cell (TextEdit selectByMouse).
+    // The focused keystream cell (TextEdit): its cursor and the
+    // selection's anchor.
     int m_selectRow = -1;
     int m_selectAnchor = -1;
     int m_selectCursor = -1;
     bool m_selecting = false;
+    // Fonts.scale the layout was made for.
+    double m_layoutScale = 0;
     // A hovered link (site) cell.
     int m_hoverLinkRow = -1;
 };

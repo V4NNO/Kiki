@@ -47,6 +47,8 @@ public:
 
     // Fonts.scale (the Settings font scale) for every tile's text.
     static void setFontScale(double scale);
+    // Fonts.scale (the Settings font scale) as last set.
+    static double fontScale();
 
     quint32 sessionKey() const { return m_sessionKey; }
     void setDisplayName(const QString &displayName);

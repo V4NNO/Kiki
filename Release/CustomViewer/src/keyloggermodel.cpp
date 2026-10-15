@@ -187,7 +187,50 @@ QString translate(const QList<KeyEvent> &events, bool cutSystemKeys, bool emulat
     return state.output;
 }
 
-QList<KeyloggerRow> buildResult(const QList<KeyEvent> &events, qint64 intervalEndMs, const ResultOptions &options)
+QPair<QString, QString> splitKeystream(const QList<KeyEvent> &events, const QList<LegacyKeyChunk> &legacy,
+                                       qint64 moment)
+{
+    // History.qml: v.moment <= moment in white, the rest in gray. A chunk
+    // of the earlier keylogger is only known to be typed by its save moment.
+    QString pastLegacy;
+    QString futureLegacy;
+    for (const LegacyKeyChunk &chunk : legacy) {
+        (moment >= 0 && chunk.endMs <= moment ? pastLegacy : futureLegacy) += chunk.text;
+    }
+    QList<KeyEvent> past;
+    QList<KeyEvent> future;
+    for (const KeyEvent &event : events) {
+        (moment >= 0 && event.moment <= moment ? past : future).append(event);
+    }
+    return {pastLegacy + translate(past, false, false, false), futureLegacy + translate(future, false, false, false)};
+}
+
+namespace {
+// The ApplicationType lambdas FUN_1402d9490 picks from its flags:
+// FUN_1402d5910 (showBinForSites), FUN_1402d5ce0 (sites and programs),
+// FUN_1402d5ae0 (sites), FUN_1402d5be0 (programs), FUN_1402d5a70 (none).
+// Type 0: the event is not part of the result.
+QPair<int, QString> classify(const KeyEvent &event, const ResultOptions &options)
+{
+    const bool page = !event.site.isEmpty();
+    if (options.showBinForSites) {
+        return page ? qMakePair(2, event.application + QLatin1Char('/') + event.site) : qMakePair(1, event.application);
+    }
+    if (options.showSites && options.showExecutables) {
+        return page ? qMakePair(2, event.site) : qMakePair(1, event.application);
+    }
+    if (options.showSites) {
+        return page ? qMakePair(2, event.site) : qMakePair(0, QString());
+    }
+    if (options.showExecutables) {
+        return page ? qMakePair(0, QString()) : qMakePair(1, event.application);
+    }
+    return qMakePair(0, QString());
+}
+} // namespace
+
+QList<KeyloggerRow> buildResult(const QList<KeyEvent> &events, const QList<LegacyKeyChunk> &legacy,
+                                const ResultOptions &options)
 {
     // FUN_1402da600: the filter split at whitespace.
     QStringList keywords = options.keywordFilter.split(QRegularExpression(QStringLiteral("\\s")));
@@ -207,115 +250,150 @@ QList<KeyloggerRow> buildResult(const QList<KeyEvent> &events, qint64 intervalEn
         }
         return false;
     };
-
-    struct Group {
-        bool isSite = false;
-        QString application; // the site or the program
-        QString program;
-        QString title;
-        QDate date;
-        qint64 from = 0;
-        qint64 to = 0;
-        QList<KeyEvent> events;
-        QString raw; // the translated characters of presses / repeats
+    // The record's filter: appFilter against the application part (the
+    // program under showBinForSites), then a keyword in it, the title or
+    // the typed text.
+    const auto accepted = [&](const QString &application, const QString &title, const QString &raw) {
+        return (options.appFilter.isEmpty() || options.appFilter == application)
+               && (matches(application) || matches(title) || matches(raw));
     };
+
     QList<KeyloggerRow> rows;
-    const auto emitGroup = [&](const Group &group) {
-        if (group.events.isEmpty()) {
-            return;
-        }
-        if (!options.appFilter.isEmpty() && options.appFilter != group.program) {
-            return;
-        }
-        if (!(matches(group.application) || matches(group.title) || matches(group.raw))) {
-            return;
-        }
-        // FUN_1402daab0: translated (native path) and trimmed; nothing left,
-        // no row.
-        const QString keystream =
-            translate(group.events, options.cutSystemKeys, options.cutSystemKeys, true).trimmed();
-        if (keystream.isEmpty()) {
-            return;
-        }
-        rows.append({localDate(group.from), group.from, group.to, group.application, group.isSite, group.title,
-                     keystream});
-    };
 
-    bool open = false;
-    Group group;
-    for (const KeyEvent &event : events) {
-        // The ApplicationType lambdas built from showSites / showExecutables:
-        // a page's site when sites are shown and there is one, else the
-        // program when programs are shown; neither -- not in the result.
-        bool isSite = false;
-        QString application;
-        if (options.showSites && !event.site.isEmpty()) {
-            isSite = true;
-            application = event.site;
-        } else if (options.showExecutables) {
-            application = event.application;
-        } else {
+    // The earlier keylogger's chunks: records of their own, in front (they
+    // all precede the first recorded event). Programs only -- no site was
+    // kept with them.
+    for (const LegacyKeyChunk &chunk : legacy) {
+        if (!options.showBinForSites && !options.showExecutables) {
+            break;
+        }
+        const QString title = chunk.title.isEmpty() ? QStringLiteral("No title") : chunk.title;
+        if (!accepted(chunk.application, title, chunk.text) || chunk.text.trimmed().isEmpty()) {
             continue;
         }
-        const QString title = event.title.isEmpty() ? QStringLiteral("No title") : event.title;
-        const QDate day = localDate(event.moment);
-        const bool dayChanged = open && day != group.date;
-        if (!open || isSite != group.isSite || application != group.application || title != group.title
-            || dayChanged) {
-            qint64 from = event.moment;
-            if (open) {
-                if (dayChanged) {
-                    // Split at local midnight.
-                    group.to = QDateTime(group.date, QTime(23, 59, 59, 999)).toMSecsSinceEpoch();
-                    from = QDateTime(day, QTime(0, 0, 0, 0)).toMSecsSinceEpoch();
-                } else {
-                    group.to = event.moment;
-                }
-                emitGroup(group);
+        const qint64 from = chunk.beginKnown ? chunk.beginMs : chunk.endMs;
+        KeyloggerRow row;
+        row.date = localDate(from);
+        row.fromMs = from;
+        row.toMs = chunk.endMs;
+        row.application = chunk.application;
+        row.title = title;
+        row.keystream = chunk.text;
+        row.estimated = true;
+        rows.append(row);
+    }
+
+    struct Group {
+        int type = 0;         // ApplicationType of the record (0: none open)
+        QString application;  // local_320: the program, the site, or under
+                              // showBinForSites the program part
+        QString site;         // local_2f0: the site part (showBinForSites)
+        QString title;        // local_308
+        QDate date;           // local_2e0
+        qint64 from = 0;      // local_2f8
+        QList<KeyEvent> events;
+        QString raw;          // local_2e8: the text of presses / repeats
+    };
+    const auto emitGroup = [&](const Group &group, qint64 to) {
+        if (group.type == 0 || group.events.isEmpty()) {
+            return;
+        }
+        if (!accepted(group.application, group.title, group.raw)) {
+            return;
+        }
+        // FUN_1402daab0: the native Translator over the record's events; a
+        // blank result is no row, anything else is kept exactly as it is.
+        const QString keystream = translate(group.events, options.cutSystemKeys, options.cutSystemKeys, true);
+        if (keystream.trimmed().isEmpty()) {
+            return;
+        }
+        KeyloggerRow row;
+        row.date = group.date;
+        row.fromMs = group.from;
+        row.toMs = to;
+        row.application = group.site.isEmpty() ? group.application : group.site;
+        row.isSite = group.type == 2;
+        row.title = group.title;
+        row.keystream = keystream;
+        rows.append(row);
+    };
+
+    Group group;
+    for (const KeyEvent &event : events) {
+        const QPair<int, QString> kind = classify(event, options);
+        QString application = kind.second;
+        QString site;
+        if (options.showBinForSites) {
+            const int slash = application.indexOf(QLatin1Char('/'));
+            if (slash >= 0) {
+                site = application.mid(slash + 1);
+                application = application.left(slash);
             }
-            group = Group();
-            group.isSite = isSite;
-            group.application = application;
-            group.program = event.application;
-            group.title = title;
-            group.date = day;
-            group.from = from;
-            open = true;
+        }
+        if (kind.first == 0) {
+            continue;
+        }
+        const bool dayChanged = group.type != 0 && group.date != localDate(event.moment);
+        const QString title = event.title.isEmpty() ? QStringLiteral("No title") : event.title;
+        if (group.type == 0 || group.type != kind.first || group.application != application || group.title != title
+            || group.site != site || dayChanged) {
+            // The record so far ends where this one begins -- across
+            // midnight at 23:59:59.999 (set on this event's day, as the
+            // original does; only the time of day is ever shown).
+            qint64 to = event.moment;
+            if (dayChanged) {
+                to = QDateTime(localDate(event.moment), QTime(23, 59, 59, 999)).toMSecsSinceEpoch();
+            }
+            emitGroup(group, to);
+            Group next;
+            next.type = kind.first;
+            next.application = application;
+            next.site = site;
+            next.title = title;
+            next.from = event.moment;
+            if (dayChanged) {
+                next.from = QDateTime(localDate(event.moment), QTime(0, 0, 0, 0)).toMSecsSinceEpoch();
+            }
+            next.date = localDate(next.from);
+            group = next;
         }
         group.events.append(event);
-        if (event.type == KeyEvent::Press || event.type == KeyEvent::Repeat) {
+        if (!event.translated.isEmpty() && (event.type == KeyEvent::Press || event.type == KeyEvent::Repeat)) {
             group.raw += event.translated;
         }
     }
-    if (open) {
-        group.to = qMax(group.from, intervalEndMs);
-        emitGroup(group);
+    // The last record ends at the dataset's last event (FUN_1402e4570).
+    if (!events.isEmpty()) {
+        emitGroup(group, events.last().moment);
     }
     return rows;
 }
 
-ChartData buildChart(const QList<KeyEvent> &events, qint64 intervalEndMs, int lengthSec, int granulaSec)
+ChartData buildChart(const QList<KeyEvent> &events, int lengthSec, int granulaSec)
 {
     ChartData chart;
-    if (granulaSec <= 0 || lengthSec <= 0) {
+    chart.granulaMs = qint64(granulaSec) * 1000;
+    if (events.isEmpty() || lengthSec < 1 || granulaSec < 1) {
         return chart;
     }
-    const qint64 step = qint64(granulaSec) * 1000;
-    const qint64 span = qint64(lengthSec) * 1000;
-    chart.granulaMs = step;
-    // Buckets aligned to multiples of the step since the epoch.
-    const qint64 windowStart = qint64(std::floor(double(intervalEndMs - span) / step)) * step;
-    const int count = int(std::ceil(double(intervalEndMs - windowStart) / step));
+    const int step = granulaSec * 1000;
+    const int length = lengthSec * 1000;
+    const qint64 end = events.last().moment;
+    qint64 start = end - length;
+    const qint64 remainder = start % step;
+    start -= remainder;
+    const int count = int(std::ceil(float(length + int(remainder)) / float(step)));
     if (count <= 0) {
         return chart;
     }
     QList<double> held(count, 0.0);
-    QMap<int, qint64> pressed; // key code -> its press
+    QMap<int, qint64> pressed; // key code -> its last press
     for (const KeyEvent &event : events) {
+        if (event.moment < start) {
+            continue;
+        }
         if (event.type == KeyEvent::Press) {
-            if (!pressed.contains(event.code)) {
-                pressed.insert(event.code, event.moment);
-            }
+            pressed[event.code] = event.moment;
             continue;
         }
         if (event.type != KeyEvent::Release) {
@@ -328,27 +406,25 @@ ChartData buildChart(const QList<KeyEvent> &events, qint64 intervalEndMs, int le
         const qint64 down = it.value();
         pressed.erase(it);
         const qint64 up = event.moment;
-        if (up <= down || up <= windowStart) {
-            continue;
-        }
-        // The held interval, split over every bucket it overlaps.
-        for (int k = qMax(0, int((down - windowStart) / step)); k < count; ++k) {
-            const qint64 bucketStart = windowStart + k * step;
+        const int first = int(std::floor(float(down - start) / float(step)));
+        const int last = int(std::floor(float(up - start) / float(step)));
+        for (int k = first; k <= last; ++k) {
+            const qint64 bucketStart = start + qint64(k) * step;
             const qint64 bucketEnd = bucketStart + step;
-            if (bucketStart >= up) {
-                break;
+            const qint64 from = down <= bucketStart ? bucketStart : down;
+            const qint64 to = up <= bucketEnd ? up : bucketEnd;
+            // The original indexes its QVector unchecked here (an assert);
+            // a span reaching past the last bucket is dropped instead.
+            if (k < 0 || k >= count) {
+                continue;
             }
-            const qint64 overlap = qMin(up, bucketEnd) - qMax(down, bucketStart);
-            if (overlap > 0) {
-                held[k] += double(overlap);
-            }
+            held[k] += double(to - from);
         }
     }
+    const double scale = 1.0 / double(step);
     for (int k = 0; k < count; ++k) {
-        // The held share of the bucket (the original's fixed scale factor
-        // cancels out: the bars are drawn relative to maxV).
-        const double value = held.at(k) / double(step);
-        chart.content.append({windowStart + k * step, value});
+        const double value = held.at(k) * scale;
+        chart.content.append({start + qint64(k) * step, value});
         chart.maxV = qMax(chart.maxV, value);
     }
     return chart;
@@ -553,21 +629,22 @@ bool writeXlsx(const QString &path, const QList<QStringList> &rows, QString *err
 
 
 // The five columns, the period's times in timeFormat; records whose
-// keystream is empty are skipped.
+// keystream is blank are skipped.
 QList<QStringList> exportRows(const QList<KeyloggerRow> &rows, const QString &timeFormat)
 {
     QList<QStringList> out;
     out.append({QStringLiteral("Date"), QStringLiteral("Pressing period"), QStringLiteral("Application"),
                 QStringLiteral("Title"), QStringLiteral("Keystrokes")});
     for (const KeyloggerRow &row : rows) {
-        const QString keystream = row.keystream.trimmed();
-        if (keystream.isEmpty()) {
+        // FUN_1402d79d0: trimmed() only decides whether the record is
+        // written; the keystream goes out as translated.
+        if (row.keystream.trimmed().isEmpty()) {
             continue;
         }
         out.append({row.date.toString(QStringLiteral("dd.MM.yyyy")),
                     QDateTime::fromMSecsSinceEpoch(row.fromMs).toString(timeFormat) + QStringLiteral(" - ")
                         + QDateTime::fromMSecsSinceEpoch(row.toMs).toString(timeFormat),
-                    row.application, row.title, keystream});
+                    row.application, row.title, row.keystream});
     }
     return out;
 }

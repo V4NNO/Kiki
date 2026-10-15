@@ -363,10 +363,14 @@ void ViewerConnection::processJsonMessage(const ViewerProtocol::Header &header,
                                    session.value(QStringLiteral("username")).toString(),
                                    session.value(QStringLiteral("state")).toString(),
                                    monitor.value(QStringLiteral("isWindow")).toBool());
-            emit sessionIdentified(header.streamId,
-                                   SessionIdentity{session.value(QStringLiteral("domain")).toString(),
-                                                   session.value(QStringLiteral("username")).toString(),
-                                                   session.value(QStringLiteral("computer")).toString()});
+            SessionIdentity identity;
+            identity.userDomain = session.value(QStringLiteral("domain")).toString();
+            identity.userName = session.value(QStringLiteral("username")).toString();
+            identity.computerName = session.value(QStringLiteral("computer")).toString();
+            // Hosts that do not say capture and show keys.
+            identity.keyloggerCapture = session.value(QStringLiteral("keyloggerCapture")).toBool(true);
+            identity.keyloggerView = session.value(QStringLiteral("keyloggerView")).toBool(true);
+            emit sessionIdentified(header.streamId, identity);
         }
         return;
     }
@@ -564,7 +568,8 @@ QJsonObject rangeQuery(const QString &action, qint64 startMs, qint64 stopMs)
 QList<KeyEvent> ViewerConnection::parseKeyEvents(const QJsonObject &object)
 {
     // {"strings":[...], "events":[[moment, type, code, text, app, title,
-    // site], ...]} -- the last three index strings.
+    // site, name], ...]} -- app, title, site and name index strings (name
+    // is absent from hosts that did not keep it).
     QStringList strings;
     for (const QJsonValue &value : object.value(QStringLiteral("strings")).toArray()) {
         strings.append(value.toString());
@@ -589,9 +594,42 @@ QList<KeyEvent> ViewerConnection::parseKeyEvents(const QJsonObject &object)
         event.application = string(row.at(4));
         event.title = string(row.at(5));
         event.site = string(row.at(6));
+        if (row.size() > 7) {
+            event.name = string(row.at(7));
+        }
         events.append(event);
     }
     return events;
+}
+
+QList<LegacyKeyChunk> ViewerConnection::parseLegacyKeyChunks(const QJsonObject &object)
+{
+    // "legacy":[[beginMs or null, endMs, text, app, title], ...] -- the
+    // earlier keylogger's chunks, as they were saved.
+    QStringList strings;
+    for (const QJsonValue &value : object.value(QStringLiteral("strings")).toArray()) {
+        strings.append(value.toString());
+    }
+    const auto string = [&strings](const QJsonValue &value) {
+        const int index = value.toInt(-1);
+        return index >= 0 && index < strings.size() ? strings.at(index) : QString();
+    };
+    QList<LegacyKeyChunk> chunks;
+    for (const QJsonValue &value : object.value(QStringLiteral("legacy")).toArray()) {
+        const QJsonArray row = value.toArray();
+        if (row.size() < 5) {
+            continue;
+        }
+        LegacyKeyChunk chunk;
+        chunk.beginKnown = !row.at(0).isNull();
+        chunk.endMs = static_cast<qint64>(row.at(1).toDouble());
+        chunk.beginMs = chunk.beginKnown ? static_cast<qint64>(row.at(0).toDouble()) : chunk.endMs;
+        chunk.text = row.at(2).toString();
+        chunk.application = string(row.at(3));
+        chunk.title = string(row.at(4));
+        chunks.append(chunk);
+    }
+    return chunks;
 }
 
 void ViewerConnection::requestKeyEvents(quint32 streamId, qint64 startMs, qint64 stopMs, const QString &tag)
@@ -697,8 +735,12 @@ void ViewerConnection::processHistoryQuery(const ViewerProtocol::Header &header,
         return;
     }
     if (action == QStringLiteral("listKeyEvents")) {
-        emit keyEventsReceived(header.streamId, object.value(QStringLiteral("tag")).toString(),
-                               parseKeyEvents(object), object.value(QStringLiteral("complete")).toBool(true));
+        KeyEventsReply reply;
+        reply.events = parseKeyEvents(object);
+        reply.legacy = parseLegacyKeyChunks(object);
+        reply.complete = object.value(QStringLiteral("complete")).toBool(true);
+        reply.partialReason = object.value(QStringLiteral("partialReason")).toString();
+        emit keyEventsReceived(header.streamId, object.value(QStringLiteral("tag")).toString(), reply);
         return;
     }
     if (action == QStringLiteral("listDays")) {

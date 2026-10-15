@@ -1,5 +1,7 @@
 #include "keyloggertable.h"
 
+#include "devicetilewidget.h"
+
 #include <QApplication>
 #include <QClipboard>
 #include <QDateTime>
@@ -10,6 +12,7 @@
 #include <QMouseEvent>
 #include <QPainter>
 #include <QScrollBar>
+
 #include <QTextOption>
 #include <QToolTip>
 #include <QUrl>
@@ -21,14 +24,19 @@ constexpr int kCellPadding = 5;
 const QColor kBodyColor(0xcc, 0xcc, 0xcc);
 const QColor kDecoration(0x43, 0x44, 0x4c);
 
-// Fonts.rr_small_b as the running original draws it (regular, 8pt).
+// Fonts.rr_small_b as the running original draws it (regular), 8pt *
+// Fonts.scale.
 QFont cellFont(bool underline = false)
 {
     QFont font(QStringLiteral("Roboto"));
-    font.setPointSize(8);
+    font.setPointSizeF(8 * DeviceTileWidget::fontScale());
     font.setUnderline(underline);
     return font;
 }
+
+// The earlier keylogger's chunks: what the row's times and text are.
+const char *const kEstimatedTip = "Saved by the earlier keylogger: the text and times are those of the saved "
+                                  "chunk, not of individual key presses.";
 
 // cell/bg.png as a BorderImage with 1px borders, tiled.
 void drawCellBackground(QPainter &painter, const QRect &rect)
@@ -104,11 +112,14 @@ void KeyloggerTable::setRows(const QList<KeyloggerRow> &rows)
 
 QList<int> KeyloggerTable::columnWidths() const
 {
-    // Table.qml columnsWidths: 75 * scale, 120 * scale, 120, 180, the rest
-    // (width - those - vscrollImplicitWidth - 1).
+    // Table.qml columnsWidths: 75 * Fonts.scale, 120 * Fonts.scale, 120,
+    // 180, the rest (width - those - vscrollImplicitWidth - 1).
+    const double scale = DeviceTileWidget::fontScale();
+    const int date = qRound(75 * scale);
+    const int time = qRound(120 * scale);
     const int scrollWidth = verticalScrollBar()->isVisible() ? verticalScrollBar()->width() : 0;
-    const int last = qMax(40, width() - 75 - 120 - 120 - 180 - scrollWidth - 1 - 1);
-    return {75, 120, 120, 180, last};
+    const int last = qMax(40, width() - date - time - 120 - 180 - scrollWidth - 1 - 1);
+    return {date, time, 120, 180, last};
 }
 
 int KeyloggerTable::headerHeight() const
@@ -121,6 +132,7 @@ void KeyloggerTable::relayout()
     qDeleteAll(m_layouts);
     m_layouts.clear();
     m_layout.clear();
+    m_layoutScale = DeviceTileWidget::fontScale();
     const QList<int> widths = columnWidths();
     const QFontMetrics metrics(cellFont());
     const int lineHeight = metrics.height();
@@ -239,6 +251,10 @@ int KeyloggerTable::keystreamCursorAt(int index, const QPoint &pos)
 
 void KeyloggerTable::paintEvent(QPaintEvent *)
 {
+    // Settings changed Fonts.scale since the last layout.
+    if (!qFuzzyCompare(m_layoutScale, DeviceTileWidget::fontScale())) {
+        relayout();
+    }
     QPainter painter(viewport());
     const QList<int> widths = columnWidths();
     const QFont font = cellFont();
@@ -329,21 +345,25 @@ void KeyloggerTable::mousePressEvent(QMouseEvent *event)
     if (event->button() != Qt::LeftButton) {
         return;
     }
+    // Only a keystream cell takes the focus: a click elsewhere leaves the
+    // focused one (and its selection) as it is.
     const int row = rowAt(event->pos().y());
     if (row < 0) {
-        m_selectRow = -1;
-        viewport()->update();
         return;
     }
     if (cellRect(row, 4).contains(event->pos())) {
-        m_selectRow = row;
-        m_selectAnchor = m_selectCursor = keystreamCursorAt(row, event->pos());
+        const int at = keystreamCursorAt(row, event->pos());
+        // Shift + click extends the focused cell's selection.
+        if (row == m_selectRow && (event->modifiers() & Qt::ShiftModifier)) {
+            m_selectCursor = at;
+        } else {
+            m_selectRow = row;
+            m_selectAnchor = m_selectCursor = at;
+        }
         m_selecting = true;
         viewport()->update();
         return;
     }
-    m_selectRow = -1;
-    viewport()->update();
 }
 
 void KeyloggerTable::mouseMoveEvent(QMouseEvent *event)
@@ -421,7 +441,139 @@ void KeyloggerTable::keyPressEvent(QKeyEvent *event)
         viewport()->update();
         return;
     }
+    if (m_selectRow >= 0 && m_selectRow < m_rows.size() && moveCursor(event)) {
+        return;
+    }
     QAbstractScrollArea::keyPressEvent(event);
+}
+
+bool KeyloggerTable::moveCursor(QKeyEvent *event)
+{
+    // QQuickTextControl's cursorMoveKeyEvent for a read-only TextEdit with
+    // selectByKeyboard: the QKeySequence moves, Select* extending.
+    struct Move {
+        QKeySequence::StandardKey key;
+        bool select;
+        int op; // 0 char left, 1 char right, 2 word left, 3 word right, 4 line start, 5 line end,
+                // 6 up, 7 down, 8 document start, 9 document end
+    };
+    static const Move kMoves[] = {
+        {QKeySequence::MoveToPreviousChar, false, 0}, {QKeySequence::SelectPreviousChar, true, 0},
+        {QKeySequence::MoveToNextChar, false, 1}, {QKeySequence::SelectNextChar, true, 1},
+        {QKeySequence::MoveToPreviousWord, false, 2}, {QKeySequence::SelectPreviousWord, true, 2},
+        {QKeySequence::MoveToNextWord, false, 3}, {QKeySequence::SelectNextWord, true, 3},
+        {QKeySequence::MoveToStartOfLine, false, 4}, {QKeySequence::SelectStartOfLine, true, 4},
+        {QKeySequence::MoveToEndOfLine, false, 5}, {QKeySequence::SelectEndOfLine, true, 5},
+        {QKeySequence::MoveToPreviousLine, false, 6}, {QKeySequence::SelectPreviousLine, true, 6},
+        {QKeySequence::MoveToNextLine, false, 7}, {QKeySequence::SelectNextLine, true, 7},
+        {QKeySequence::MoveToStartOfDocument, false, 8}, {QKeySequence::SelectStartOfDocument, true, 8},
+        {QKeySequence::MoveToEndOfDocument, false, 9}, {QKeySequence::SelectEndOfDocument, true, 9},
+    };
+    const Move *move = nullptr;
+    for (const Move &candidate : kMoves) {
+        if (event->matches(candidate.key)) {
+            move = &candidate;
+            break;
+        }
+    }
+    if (!move) {
+        return false;
+    }
+    const QString &text = m_rows.at(m_selectRow).keystream;
+    QTextLayout *layout = keystreamLayout(m_selectRow);
+    const int length = int(text.size());
+    int cursor = qBound(0, m_selectCursor, length);
+    const auto lineOf = [layout](int position) {
+        const QTextLine line = layout->lineForTextPosition(position);
+        return line.isValid() ? line : layout->lineAt(qMax(0, layout->lineCount() - 1));
+    };
+    switch (move->op) {
+    case 0:
+        cursor = layout->previousCursorPosition(cursor);
+        break;
+    case 1:
+        cursor = layout->nextCursorPosition(cursor);
+        break;
+    case 2:
+        cursor = layout->previousCursorPosition(cursor, QTextLayout::SkipWords);
+        break;
+    case 3:
+        cursor = layout->nextCursorPosition(cursor, QTextLayout::SkipWords);
+        break;
+    case 4:
+        cursor = lineOf(cursor).textStart();
+        break;
+    case 5: {
+        // QTextCursor::EndOfLine: after the line's last character -- on a
+        // wrapped line before the space it broke at.
+        const QTextLine line = lineOf(cursor);
+        cursor = qMin(length, line.textStart() + line.textLength());
+        if (line.lineNumber() < layout->lineCount() - 1 && line.textLength() > 0
+            && text.at(line.textStart() + line.textLength() - 1).isSpace()) {
+            --cursor;
+        }
+        break;
+    }
+    case 6:
+    case 7: {
+        const QTextLine line = lineOf(cursor);
+        const int target = line.lineNumber() + (move->op == 6 ? -1 : 1);
+        if (target < 0) {
+            cursor = 0;
+        } else if (target >= layout->lineCount()) {
+            cursor = length;
+        } else {
+            const qreal x = line.cursorToX(cursor);
+            cursor = layout->lineAt(target).xToCursor(x);
+        }
+        break;
+    }
+    case 8:
+        cursor = 0;
+        break;
+    case 9:
+        cursor = length;
+        break;
+    default:
+        break;
+    }
+    m_selectCursor = qBound(0, cursor, length);
+    if (!move->select) {
+        m_selectAnchor = m_selectCursor;
+    }
+    ensureCursorVisible();
+    viewport()->update();
+    return true;
+}
+
+void KeyloggerTable::ensureCursorVisible()
+{
+    // The ListView follows the focused delegate's cursor.
+    if (m_selectRow < 0) {
+        return;
+    }
+    QTextLayout *layout = keystreamLayout(m_selectRow);
+    const QTextLine line = layout->lineForTextPosition(qBound(0, m_selectCursor, int(m_rows.at(m_selectRow).keystream.size())));
+    const QRect cell = cellRect(m_selectRow, 4);
+    const int top = cell.top() + kCellPadding + (line.isValid() ? int(line.y()) : 0);
+    const int bottom = top + (line.isValid() ? int(std::ceil(line.height())) : QFontMetrics(cellFont()).height());
+    const int bodyTop = headerHeight() + 1;
+    if (top < bodyTop) {
+        verticalScrollBar()->setValue(verticalScrollBar()->value() - (bodyTop - top));
+    } else if (bottom > viewport()->height()) {
+        verticalScrollBar()->setValue(verticalScrollBar()->value() + (bottom - viewport()->height()));
+    }
+}
+
+void KeyloggerTable::focusOutEvent(QFocusEvent *event)
+{
+    QAbstractScrollArea::focusOutEvent(event);
+    // persistentSelection: false -- the selection goes with the focus (the
+    // cursor stays where it was; a context menu keeps it).
+    if (event->reason() != Qt::PopupFocusReason && m_selectRow >= 0) {
+        m_selectAnchor = m_selectCursor;
+        viewport()->update();
+    }
 }
 
 void KeyloggerTable::copySelection()
@@ -450,6 +602,13 @@ bool KeyloggerTable::viewportEvent(QEvent *event)
         // (Application and Title).
         auto *help = static_cast<QHelpEvent *>(event);
         const int row = rowAt(help->pos().y());
+        if (row >= 0 && m_rows.at(row).estimated) {
+            const QRect when = cellRect(row, 0).united(cellRect(row, 1));
+            if (when.contains(help->pos())) {
+                QToolTip::showText(help->globalPos(), QString::fromLatin1(kEstimatedTip), viewport());
+                return true;
+            }
+        }
         if (row >= 0) {
             for (int c = 2; c <= 3; ++c) {
                 const QRect inner = cellRect(row, c).adjusted(kCellPadding, kCellPadding, -kCellPadding, -kCellPadding);

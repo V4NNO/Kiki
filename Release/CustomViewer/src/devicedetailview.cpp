@@ -243,6 +243,18 @@ public:
         m_bg = QPixmap(QStringLiteral(":/activeCell/keylogger_bg.png"));
     }
 
+    // Windows.qml: the Keystream shows only with v2oKeyloggerEnabled &&
+    // dcKeyloggerEnabled; otherwise a centered Row (spacing 10) of
+    // windows/warning.png and the reason, in white.
+    void setWarning(const QString &warning)
+    {
+        if (warning == m_warning) {
+            return;
+        }
+        m_warning = warning;
+        update();
+    }
+
 protected:
     void paintEvent(QPaintEvent *event) override
     {
@@ -260,11 +272,24 @@ protected:
             painter.drawPixmap(QRect(0, h - kBorder, width(), kBorder), m_bg,
                                QRect(0, sh - kBorder, sw, kBorder));
         }
+        if (!m_warning.isEmpty()) {
+            static const QPixmap warning(QStringLiteral(":/keylogger/warning.png"));
+            QPainter painter(this);
+            const QFontMetrics metrics(QWidget::font());
+            const int rowWidth = warning.width() + 10 + metrics.horizontalAdvance(m_warning);
+            int x = (width() - rowWidth) / 2;
+            painter.drawPixmap(x, (height() - warning.height()) / 2, warning);
+            x += warning.width() + 10;
+            painter.setPen(Qt::white);
+            painter.drawText(QRect(x, 0, width() - x, height()), Qt::AlignLeft | Qt::AlignVCenter, m_warning);
+            return;
+        }
         QLabel::paintEvent(event);
     }
 
 private:
     QPixmap m_bg;
+    QString m_warning;
 };
 
 // windows/Video.qml: a ScrollView whose Column (spacing 10) is the scroll
@@ -464,6 +489,7 @@ DeviceDetailView::DeviceDetailView(ViewerConnection &connection, QWidget *parent
 
     // trackerQuadratorActiveCell/Keylogger.qml.
     m_keyloggerPage = new KeyloggerPage(m_connection, m_leftStack);
+    m_keyloggerPage->setWarningHost(this);
     connect(m_keyloggerPage, &KeyloggerPage::goToHistory, this,
             [this](quint32, const QDateTime &begin, const QDateTime &end, qint64 timeStepMs) {
                 emit historyIntervalRequested(m_sessionKey, begin, end, timeStepMs);
@@ -1231,6 +1257,10 @@ void DeviceDetailView::onCategorizationRequested(const QString &resource, bool w
 void DeviceDetailView::setSessionIdentity(const SessionIdentity &identity)
 {
     m_identity = identity;
+    static_cast<KeylogTicker *>(m_keylogTicker)
+        ->setWarning(!identity.keyloggerView      ? QStringLiteral("viewer keylogger disabled")
+                     : !identity.keyloggerCapture ? QStringLiteral("Keylogger does not capture")
+                                                  : QString());
     if (m_sessionKey != 0) {
         m_keyloggerPage->setSession(m_sessionKey, m_primaryStreamId, m_displayName, identity);
     }

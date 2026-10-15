@@ -330,6 +330,9 @@ class KeystreamBar final : public QWidget
 public:
     explicit KeystreamBar(QWidget *parent = nullptr);
     void setText(const QString &past, const QString &future);
+    // !employee.v2oKeyloggerEnabled: instead of the two Keystreams, the
+    // warning.png + "viewer keylogger disabled" row, centered.
+    void setViewDisabled(bool disabled);
 
 protected:
     void paintEvent(QPaintEvent *event) override;
@@ -344,7 +347,16 @@ private:
 
     QString m_past;
     QString m_future;
+    bool m_viewDisabled = false;
     QScrollBar *m_scrollBar = nullptr;
+};
+
+// HistoryTab's historyPanelState.appFilter ({name, isWebPage}): History by
+// one application. Empty: the whole session (isHistoryByAppFilter false).
+struct HistoryAppFilter {
+    QString name;
+    bool isWebPage = false;
+    bool isSet() const { return !name.isEmpty(); }
 };
 
 // history/SliderBar.qml: the 4px scrub bar drawn from the original
@@ -697,7 +709,8 @@ private slots:
     void onEmployeeCategoriesReceived(quint32 streamId, const QHash<QString, QString> &categories);
     void onCategoriesReceived(quint32 streamId, const QHash<QString, QString> &categories);
     // historyModel.keyboardEvents (or the Text export's Selector).
-    void onKeyEvents(quint32 streamId, const QString &tag, const QList<KeyEvent> &events, bool complete);
+    void onKeyEvents(quint32 streamId, const QString &tag, const KeyEventsReply &reply);
+    void onKeyEventsFailed(quint32 streamId, const QString &tag, const QString &message);
     void onHistoryError(quint32 streamId, const QString &message);
 
     void onTimelineMoved(int marker);
@@ -1029,7 +1042,15 @@ private:
     QList<HistoryAppSegment> m_webVisits;
     QList<HistoryAppSegment> m_appSegments;
     QList<KeyEvent> m_keyEvents;
+    QList<LegacyKeyChunk> m_keyLegacy;
     QString m_keyEventsTag;
+    // The period's keyboardEvents arrived (or failed for good); otherwise a
+    // reconnect asks again.
+    bool m_keyEventsSettled = false;
+    // historyPanelState.appFilter -- nothing in this viewer opens History by
+    // application yet (sessionInfo/WebPagesAndPrograms.openHistoryByFilter
+    // is not built), so it stays empty; the Text export already honours it.
+    HistoryAppFilter m_appFilter;
     quint64 m_keyEventsGeneration = 0;
     bool m_activated = false;
     bool m_activateWhenReady = false;
@@ -1080,5 +1101,8 @@ private:
         QPointer<QDialog> progress;
     };
     TextExportState m_textExport;
-    void finishTextExport(const QList<KeyEvent> &events);
+    void finishTextExport(const KeyEventsReply &reply);
+    // The export's Selector failed: the progress box goes, the error box
+    // ("Keylogger export failed") says why.
+    void failTextExport(const QString &message);
 };

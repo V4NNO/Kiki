@@ -168,12 +168,15 @@ bool SessionManager::launchSubService(quint32 sessionId, const QString &username
     const QString pipeName = generatePipeName(sessionId);
     const QString secret = generateSecret();
 
-    const QString commandLine = QStringLiteral(
+    QString commandLine = QStringLiteral(
                                      "\"%1\" --pipe-name=%2 --pipe-secret=%3 --session-id=%4 "
                                      "--session-username=\"%5\"")
                                      .arg(m_subServicePath, pipeName, secret)
                                      .arg(sessionId)
                                      .arg(username);
+    if (!m_keyloggerCapture) {
+        commandLine += QStringLiteral(" --no-keylogger");
+    }
     // CreateProcess(AsUser)W is documented to potentially write into
     // lpCommandLine, so this must be a private, mutable buffer -- never a
     // pointer into QString's (possibly shared) internal storage.
@@ -453,7 +456,7 @@ void SessionManager::onKeystrokeReceived(quint32 sessionId, const QString &windo
 void SessionManager::onKeyEventsReceived(quint32 sessionId, const QJsonArray &events)
 {
     auto it = m_sessions.constFind(sessionId);
-    if (it == m_sessions.constEnd() || events.isEmpty()) {
+    if (it == m_sessions.constEnd() || events.isEmpty() || !m_keyloggerCapture) {
         return;
     }
     // The page's site, not its url (app.urlToSite).

@@ -147,6 +147,11 @@ void DeviceTileWidget::setFontScale(double scale)
     g_fontScale = scale;
 }
 
+double DeviceTileWidget::fontScale()
+{
+    return g_fontScale;
+}
+
 void BigStatusIcon::setKind(const QString &kind)
 {
     if (m_kind == kind) {

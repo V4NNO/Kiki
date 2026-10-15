@@ -45,10 +45,14 @@ public:
     // The latest foreground observation's window and url: an event typed
     // into that window carries the url (the site is derived from it).
     void setForegroundUrl(quintptr window, const QString &url);
+    // dcKeyloggerEnabled: off -> no key is recorded (the hooks still count
+    // input for the activity bar).
+    void setCaptureKeys(bool capture) { m_captureKeys = capture; }
 
 signals:
-    // A batch of events: [{"t":ms,"k":type,"c":code,"x":text,"a":program,
-    // "w":title,"u":url}, ...]; type 1 press, 2 auto-repeat, 3 release.
+    // A batch of events: [{"t":ms,"k":type,"c":code,"n":name,"x":text,
+    // "a":program,"w":title,"u":url}, ...]; type 1 press, 2 auto-repeat,
+    // 3 release.
     void eventsFlushed(const QJsonArray &events);
 
 private slots:
@@ -69,6 +73,7 @@ private:
     QJsonArray m_pending;
     QSet<quint32> m_down; // keys held, to tell an auto-repeat from a press
     quintptr m_urlWindow = 0;
+    bool m_captureKeys = true;
     QString m_url;
     std::atomic<int> m_activityCount{0};
 

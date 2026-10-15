@@ -53,6 +53,10 @@ struct SessionIdentity {
     QString userDomain;
     QString userName;
     QString computerName;
+    // employee.dcKeyloggerEnabled: the host captures this session's keys.
+    bool keyloggerCapture = true;
+    // employee.v2oKeyloggerEnabled: viewers may see them.
+    bool keyloggerView = true;
     bool isValid() const { return !userName.isEmpty(); }
     // KeyloggerExport.qml / VideoSaverSelector: domain\user@computer.
     QString exportMarker() const { return userDomain + QLatin1Char('\\') + userName + QLatin1Char('@') + computerName; }
@@ -60,7 +64,8 @@ struct SessionIdentity {
     QString displayText() const { return userDomain + QLatin1Char('/') + userName + QLatin1Char('@') + computerName; }
     bool operator==(const SessionIdentity &other) const
     {
-        return userDomain == other.userDomain && userName == other.userName && computerName == other.computerName;
+        return userDomain == other.userDomain && userName == other.userName && computerName == other.computerName
+               && keyloggerCapture == other.keyloggerCapture && keyloggerView == other.keyloggerView;
     }
 };
 
@@ -195,7 +200,7 @@ signals:
     void sessionIdentified(quint32 streamId, const SessionIdentity &identity);
     // requestKeyEvents' answer (complete: nothing more to come for it) or
     // its failure.
-    void keyEventsReceived(quint32 streamId, const QString &tag, const QList<KeyEvent> &events, bool complete);
+    void keyEventsReceived(quint32 streamId, const QString &tag, const KeyEventsReply &reply);
     void keyEventsFailed(quint32 streamId, const QString &tag, const QString &message);
     // MessageType::KeyEvents: what the session streamId belongs to just
     // typed (Session.keyboardEvents).
@@ -302,6 +307,7 @@ private:
     void processHistoryFrame(const ViewerProtocol::Header &header, const QByteArray &payload);
     void processHistorySegment(const ViewerProtocol::Header &header, const QByteArray &payload);
     static QList<KeyEvent> parseKeyEvents(const QJsonObject &object);
+    static QList<LegacyKeyChunk> parseLegacyKeyChunks(const QJsonObject &object);
     void sendHistoryQuery(quint32 streamId, const QJsonObject &object);
     void failProtocol(const QString &message);
     bool isSafePlainTextTarget() const;

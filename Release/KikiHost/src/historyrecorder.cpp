@@ -470,6 +470,9 @@ bool HistoryRecorder::start(QString *error)
         "  site TEXT NOT NULL"
         ")"));
     query.exec(QStringLiteral("CREATE INDEX IF NOT EXISTS idx_key_events_user_time ON key_events(username, moment_ms)"));
+    // The key's name as captured (older rows: '' -- the viewer's evdev
+    // table names them).
+    query.exec(QStringLiteral("ALTER TABLE key_events ADD COLUMN name TEXT NOT NULL DEFAULT ''"));
 
     // The keylogger chunk's first key and program (older rows: NULL).
     query.exec(QStringLiteral("ALTER TABLE keystrokes ADD COLUMN begin_ms INTEGER"));
@@ -1098,8 +1101,8 @@ void HistoryRecorder::recordKeyEvents(const QString &username, quint32 sessionId
     m_database.transaction();
     QSqlQuery insert(m_database);
     insert.prepare(QStringLiteral(
-        "INSERT INTO key_events (username, session_id, moment_ms, type, code, text, application, title, site) "
-        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)"));
+        "INSERT INTO key_events (username, session_id, moment_ms, type, code, text, application, title, site, name) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"));
     // A missing / empty field is a null QString, which binds as SQL NULL:
     // store "" instead (modifiers and releases carry no text).
     const auto text = [](const QJsonObject &event, const QString &key) {
@@ -1117,6 +1120,7 @@ void HistoryRecorder::recordKeyEvents(const QString &username, quint32 sessionId
         insert.addBindValue(text(event, QStringLiteral("a")));
         insert.addBindValue(text(event, QStringLiteral("w")));
         insert.addBindValue(text(event, QStringLiteral("s")));
+        insert.addBindValue(text(event, QStringLiteral("n")));
         if (!insert.exec()) {
             emit logMessage(QStringLiteral("Nu am putut scrie evenimentele tastaturii: %1").arg(insert.lastError().text()));
             break;
@@ -1125,11 +1129,17 @@ void HistoryRecorder::recordKeyEvents(const QString &username, quint32 sessionId
     m_database.commit();
 }
 
-QJsonArray HistoryRecorder::listKeyEvents(const QString &username, qint64 startMs, qint64 stopMs) const
+HistoryRecorder::KeyEventsResult HistoryRecorder::listKeyEvents(const QString &username, qint64 startMs,
+                                                               qint64 stopMs) const
 {
-    QJsonArray events;
-    if (!m_database.isOpen() || username.isEmpty()) {
-        return events;
+    KeyEventsResult result;
+    if (!m_database.isOpen()) {
+        result.error = QStringLiteral("The history database is not open.");
+        return result;
+    }
+    if (username.isEmpty()) {
+        result.error = QStringLiteral("The employee of this stream is not known to the host.");
+        return result;
     }
     // Where recording by events began for this user: older text chunks
     // stand in only before it, so nothing is doubled.
@@ -1138,7 +1148,11 @@ QJsonArray HistoryRecorder::listKeyEvents(const QString &username, qint64 startM
         QSqlQuery first(m_database);
         first.prepare(QStringLiteral("SELECT MIN(moment_ms) FROM key_events WHERE username = ?"));
         first.addBindValue(username);
-        if (first.exec() && first.next() && !first.value(0).isNull()) {
+        if (!first.exec()) {
+            result.error = QStringLiteral("Reading the keystrokes failed: %1").arg(first.lastError().text());
+            return result;
+        }
+        if (first.next() && !first.value(0).isNull()) {
             eventsSince = first.value(0).toLongLong();
         }
     }
@@ -1154,43 +1168,60 @@ QJsonArray HistoryRecorder::listKeyEvents(const QString &username, qint64 startM
         if (chunks.exec()) {
             while (chunks.next()) {
                 const qint64 end = chunks.value(0).toLongLong();
-                const qint64 begin = chunks.value(1).isNull() ? end : qMin(end, chunks.value(1).toLongLong());
-                const QString text = chunks.value(3).toString();
-                const int count = int(text.size());
-                for (int i = 0; i < count; ++i) {
-                    // The characters spread over the chunk, one press each
-                    // (code 0: the key is not known).
-                    const qint64 moment = count > 1 ? begin + (end - begin) * i / (count - 1) : end;
-                    events.append(QJsonObject{{QStringLiteral("t"), static_cast<double>(moment)},
-                                              {QStringLiteral("k"), 1},
-                                              {QStringLiteral("c"), 0},
-                                              {QStringLiteral("x"), QString(text.at(i))},
-                                              {QStringLiteral("a"), chunks.value(4).toString()},
-                                              {QStringLiteral("w"), chunks.value(2).toString()},
-                                              {QStringLiteral("s"), QString()}});
-                }
+                // The chunk as saved: its first key's moment only when it
+                // was recorded (later chunks), never one made up.
+                const QJsonValue begin = chunks.value(1).isNull()
+                                             ? QJsonValue(QJsonValue::Null)
+                                             : QJsonValue(static_cast<double>(qMin(end, chunks.value(1).toLongLong())));
+                result.legacy.append(QJsonObject{{QStringLiteral("b"), begin},
+                                                 {QStringLiteral("e"), static_cast<double>(end)},
+                                                 {QStringLiteral("x"), chunks.value(3).toString()},
+                                                 {QStringLiteral("a"), chunks.value(4).toString()},
+                                                 {QStringLiteral("w"), chunks.value(2).toString()}});
             }
+        } else {
+            result.complete = false;
+            result.partialReason =
+                QStringLiteral("the older keystroke records could not be read (%1)").arg(chunks.lastError().text());
         }
     }
     QSqlQuery query(m_database);
     query.prepare(QStringLiteral(
-        "SELECT moment_ms, type, code, text, application, title, site FROM key_events "
-        "WHERE username = ? AND moment_ms >= ? AND moment_ms < ? ORDER BY moment_ms ASC, id ASC"));
+        "SELECT moment_ms, type, code, text, application, title, site, name FROM key_events "
+        "WHERE username = ? AND moment_ms >= ? AND moment_ms < ? ORDER BY moment_ms ASC, id ASC LIMIT ?"));
     query.addBindValue(username);
     query.addBindValue(startMs);
     query.addBindValue(stopMs);
-    if (query.exec()) {
-        while (query.next()) {
-            events.append(QJsonObject{{QStringLiteral("t"), static_cast<double>(query.value(0).toLongLong())},
-                                      {QStringLiteral("k"), query.value(1).toInt()},
-                                      {QStringLiteral("c"), query.value(2).toInt()},
-                                      {QStringLiteral("x"), query.value(3).toString()},
-                                      {QStringLiteral("a"), query.value(4).toString()},
-                                      {QStringLiteral("w"), query.value(5).toString()},
-                                      {QStringLiteral("s"), query.value(6).toString()}});
-        }
+    query.addBindValue(kMaxKeyEventsPerAnswer + 1);
+    if (!query.exec()) {
+        result.events = QJsonArray();
+        result.legacy = QJsonArray();
+        result.error = QStringLiteral("Reading the keystrokes failed: %1").arg(query.lastError().text());
+        return result;
     }
-    return events;
+    int count = 0;
+    while (query.next()) {
+        if (++count > kMaxKeyEventsPerAnswer) {
+            // More than one answer carries: the first part, said to be one.
+            result.complete = false;
+            result.partialReason = QStringLiteral("the period holds more than %1 key events; the first %1 were sent")
+                                       .arg(kMaxKeyEventsPerAnswer);
+            break;
+        }
+        result.events.append(QJsonObject{{QStringLiteral("t"), static_cast<double>(query.value(0).toLongLong())},
+                                         {QStringLiteral("k"), query.value(1).toInt()},
+                                         {QStringLiteral("c"), query.value(2).toInt()},
+                                         {QStringLiteral("x"), query.value(3).toString()},
+                                         {QStringLiteral("a"), query.value(4).toString()},
+                                         {QStringLiteral("w"), query.value(5).toString()},
+                                         {QStringLiteral("s"), query.value(6).toString()},
+                                         {QStringLiteral("n"), query.value(7).toString()}});
+    }
+    if (query.lastError().isValid() && query.lastError().type() != QSqlError::NoError) {
+        result.complete = false;
+        result.partialReason = QStringLiteral("reading stopped early (%1)").arg(query.lastError().text());
+    }
+    return result;
 }
 
 void HistoryRecorder::setCategory(const QString &application, const QString &category)

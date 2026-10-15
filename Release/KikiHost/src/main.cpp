@@ -43,6 +43,10 @@ struct HostSettings {
     // 1 fps so the viewer's 1s Time step shows distinct frames (VP8 keeps it
     // cheap). 0 keeps the built-in default.
     double historyFps = 1.0;
+    // The original's per-employee dcKeyloggerEnabled / v2oKeyloggerEnabled:
+    // capture the sessions' keys at all; let viewers see them.
+    bool keyloggerCapture = true;
+    bool keyloggerView = true;
 };
 
 QString quoteArg(const QString &value)
@@ -68,6 +72,8 @@ int runHostBody(const HostSettings &settings, int argc, char **argv)
     AgentSettings agentSettings;
     agentSettings.token = settings.token;
     agentSettings.agentName = QStringLiteral("Kiki Host");
+    agentSettings.keyloggerCapture = settings.keyloggerCapture;
+    agentSettings.keyloggerView = settings.keyloggerView;
 
     AgentServer::TlsConfig tls;
     tls.enabled = settings.tls;
@@ -100,6 +106,7 @@ int runHostBody(const HostSettings &settings, int argc, char **argv)
     }
 
     SessionManager sessionManager(&server, settings.subServicePath);
+    sessionManager.setKeyloggerCapture(settings.keyloggerCapture);
     QObject::connect(&sessionManager, &SessionManager::logMessage, &application,
                      [](const QString &message) { printLine(message); });
     if (!settings.historyPath.isEmpty() && historyRecorder.isValid()) {
@@ -155,6 +162,10 @@ int main(int argc, char *argv[])
                           QStringLiteral("Cadre/secunda pastrate in istoric (ca video_history_fps "
                                          "din original; implicit 1)."),
                           QStringLiteral("fps"), QStringLiteral("1")});
+        parser.addOption({QStringLiteral("no-keylogger-capture"),
+                          QStringLiteral("Nu inregistra tastele sesiunilor (dcKeyloggerEnabled oprit).")});
+        parser.addOption({QStringLiteral("no-keylogger-view"),
+                          QStringLiteral("Nu arata tastele viewer-elor (v2oKeyloggerEnabled oprit).")});
         parser.addOption({QStringLiteral("install"),
                           QStringLiteral("Instaleaza serviciul Windows (necesita Administrator; "
                                          "combina cu --token/--port/--tls etc., salvate permanent).")});
@@ -172,6 +183,8 @@ int main(int argc, char *argv[])
         settings.keyPath = parser.value(QStringLiteral("key"));
         settings.subServicePath = parser.value(QStringLiteral("subservice-path"));
         settings.historyPath = parser.value(QStringLiteral("history-path"));
+        settings.keyloggerCapture = !parser.isSet(QStringLiteral("no-keylogger-capture"));
+        settings.keyloggerView = !parser.isSet(QStringLiteral("no-keylogger-view"));
         {
             bool fpsOk = false;
             const double fps = parser.value(QStringLiteral("history-fps")).toDouble(&fpsOk);
@@ -213,6 +226,12 @@ int main(int argc, char *argv[])
             if (!settings.historyPath.isEmpty()) {
                 binPath += QStringLiteral(" --history-path=%1").arg(quoteArg(settings.historyPath));
                 binPath += QStringLiteral(" --history-fps=%1").arg(settings.historyFps);
+            }
+            if (!settings.keyloggerCapture) {
+                binPath += QStringLiteral(" --no-keylogger-capture");
+            }
+            if (!settings.keyloggerView) {
+                binPath += QStringLiteral(" --no-keylogger-view");
             }
             QString error;
             if (!ServiceHost::installService(binPath, &error)) {

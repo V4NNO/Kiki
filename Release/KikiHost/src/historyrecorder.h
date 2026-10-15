@@ -187,12 +187,24 @@ public:
 
     void recordKeystroke(quint32 sessionId, const QString &windowTitle, const QString &text,
                          qint64 beginMs = 0, const QString &application = QString());
-    // Keyboard events ({"t","k","c","x","a","w","s"} objects) of the user.
+    // Keyboard events ({"t","k","c","x","n","a","w","s"} objects) of the user.
     void recordKeyEvents(const QString &username, quint32 sessionId, const QJsonArray &events);
     // The user's events in [startMs, stopMs), oldest first, in the same
-    // object form. Older history, recorded as text chunks before events
-    // were kept, comes back as one press per character.
-    QJsonArray listKeyEvents(const QString &username, qint64 startMs, qint64 stopMs) const;
+    // object form, and -- before the first recorded event -- the text
+    // chunks the earlier keylogger saved, as they are ({"b": first key or
+    // null, "e": saved, "x", "a", "w"}): no per-key events are made up for
+    // them. complete is false when only part could be read (partialReason
+    // says why); error is set when nothing could.
+    struct KeyEventsResult {
+        QJsonArray events;
+        QJsonArray legacy;
+        bool complete = true;
+        QString partialReason;
+        QString error;
+    };
+    // At most this many events go in one answer (the rest: partial).
+    static constexpr int kMaxKeyEventsPerAnswer = 400000;
+    KeyEventsResult listKeyEvents(const QString &username, qint64 startMs, qint64 stopMs) const;
 
     void setCategory(const QString &application, const QString &category);
     // One employee's own rule for an application, overriding the global
