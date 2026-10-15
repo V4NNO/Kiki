@@ -275,6 +275,9 @@ void AgentConnection::handleClientHello(const QByteArray &payload)
     // A viewer that will send SelectStreams gets no live frame before it
     // says which streams it wants.
     m_selectionActive = capabilities.value(QStringLiteral("selectStreams")).toBool();
+    // Older viewers reject an unknown message type: live keyboard events go
+    // only to one that says it takes them.
+    m_keyEventsCapable = capabilities.value(QStringLiteral("keyEvents")).toBool();
     sendJson(ViewerProtocol::MessageType::AuthResult, 0, QJsonObject{{QStringLiteral("accepted"), true}});
     m_heartbeatTimer.start();
     emit logMessage(QStringLiteral("Viewer autentificat: %1").arg(peerLabel()));
@@ -299,8 +302,49 @@ void AgentConnection::sendAgentHellos()
                              QJsonObject{{QStringLiteral("id"),
                                           static_cast<qint64>(monitor.sessionId)},
                                          {QStringLiteral("username"), monitor.sessionUsername},
+                                         {QStringLiteral("domain"), monitor.sessionDomain},
+                                         {QStringLiteral("computer"), monitor.computerName},
                                          {QStringLiteral("state"), monitor.sessionState}}}});
     }
+}
+
+namespace {
+// Events as {"strings":[...], "events":[[moment, type, code, text, app,
+// title, site], ...]}: the program, title and site repeat from one event to
+// the next, so they travel once, as indexes.
+QJsonObject compactKeyEvents(const QJsonArray &events)
+{
+    QHash<QString, int> index;
+    QJsonArray strings;
+    const auto ref = [&index, &strings](const QString &value) {
+        auto it = index.constFind(value);
+        if (it != index.constEnd()) {
+            return it.value();
+        }
+        const int at = int(strings.size());
+        strings.append(value);
+        index.insert(value, at);
+        return at;
+    };
+    QJsonArray rows;
+    for (const QJsonValue &value : events) {
+        const QJsonObject event = value.toObject();
+        rows.append(QJsonArray{event.value(QStringLiteral("t")).toDouble(), event.value(QStringLiteral("k")).toInt(),
+                               event.value(QStringLiteral("c")).toInt(), event.value(QStringLiteral("x")).toString(),
+                               ref(event.value(QStringLiteral("a")).toString()),
+                               ref(event.value(QStringLiteral("w")).toString()),
+                               ref(event.value(QStringLiteral("s")).toString())});
+    }
+    return QJsonObject{{QStringLiteral("strings"), strings}, {QStringLiteral("events"), rows}};
+}
+} // namespace
+
+void AgentConnection::pushKeyEvents(quint32 streamId, const QJsonArray &events)
+{
+    if (!m_authenticated || !m_keyEventsCapable || events.isEmpty()) {
+        return;
+    }
+    sendJson(ViewerProtocol::MessageType::KeyEvents, streamId, compactKeyEvents(events));
 }
 
 void AgentConnection::pushFrame(quint32 streamId, const QImage &image)
@@ -483,7 +527,8 @@ bool isDeferrableHistoryAction(const QString &action)
         || action == QStringLiteral("listRunningApplications")
         || action == QStringLiteral("listWebVisits")
         || action == QStringLiteral("listWebPages")
-        || action == QStringLiteral("listKeystrokes");
+        || action == QStringLiteral("listKeystrokes")
+        || action == QStringLiteral("listKeyEvents");
 }
 
 // A viewer that keeps changing its mind faster than the host can answer must
@@ -512,6 +557,7 @@ void AgentConnection::handleHistoryQuery(const ViewerProtocol::Header &header, c
         sendJson(ViewerProtocol::MessageType::HistoryQuery, monitorStreamId,
                 QJsonObject{{QStringLiteral("action"), action},
                             {QStringLiteral("requestId"), request.value(QStringLiteral("requestId"))},
+                            {QStringLiteral("tag"), request.value(QStringLiteral("tag"))},
                             {QStringLiteral("error"), QStringLiteral("Istoricul nu este activat pe host.")}});
         return;
     }
@@ -737,6 +783,16 @@ void AgentConnection::runHistoryQuery(quint32 monitorStreamId, const QJsonObject
                 QJsonObject{{QStringLiteral("action"), action},
                             {QStringLiteral("application"), application},
                             {QStringLiteral("category"), category}});
+    } else if (action == QStringLiteral("listKeyEvents")) {
+        // SelectKeyboardEvents for [startMs, stopMs) of the employee this
+        // stream belongs to; the tag (the Selector's cookie) comes back.
+        QJsonObject reply = compactKeyEvents(m_historyRecorder->listKeyEvents(
+            m_historyRecorder->usernameForStream(monitorStreamId), rangeStart, rangeStop));
+        reply.insert(QStringLiteral("action"), action);
+        reply.insert(QStringLiteral("day"), day);
+        reply.insert(QStringLiteral("tag"), request.value(QStringLiteral("tag")));
+        reply.insert(QStringLiteral("complete"), true);
+        sendJson(ViewerProtocol::MessageType::HistoryQuery, monitorStreamId, reply);
     } else if (action == QStringLiteral("listKeystrokes")) {
         quint32 sessionId = 0;
         for (const MonitorInfo &monitor : std::as_const(m_monitors)) {

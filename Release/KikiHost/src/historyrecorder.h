@@ -1,5 +1,6 @@
 #pragma once
 
+#include <QJsonArray>
 #include <QByteArray>
 #include <QHash>
 #include <QImage>
@@ -186,6 +187,12 @@ public:
 
     void recordKeystroke(quint32 sessionId, const QString &windowTitle, const QString &text,
                          qint64 beginMs = 0, const QString &application = QString());
+    // Keyboard events ({"t","k","c","x","a","w","s"} objects) of the user.
+    void recordKeyEvents(const QString &username, quint32 sessionId, const QJsonArray &events);
+    // The user's events in [startMs, stopMs), oldest first, in the same
+    // object form. Older history, recorded as text chunks before events
+    // were kept, comes back as one press per character.
+    QJsonArray listKeyEvents(const QString &username, qint64 startMs, qint64 stopMs) const;
 
     void setCategory(const QString &application, const QString &category);
     // One employee's own rule for an application, overriding the global

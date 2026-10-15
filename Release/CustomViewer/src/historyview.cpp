@@ -1,6 +1,7 @@
 #include "historyview.h"
 #include "devicetilewidget.h"
 #include "multiswitch.h"
+#include "savedialog.h"
 
 #include <QCheckBox>
 #include <QComboBox>
@@ -220,223 +221,7 @@ void drawVerticalSeparator(QPainter &painter, qreal x, qreal y, qreal height)
     painter.fillRect(QRectF(x + 1, y, 1, height), kSeparatorLight);
 }
 
-// The keylogger table's / export's records (keylogger/Table.qml: Date,
-// Pressing period, Application, Title, Keystrokes), built from what was
-// recorded rather than guessed from time gaps: every keylogger chunk
-// carries its program, its window and its first and last key, and the
-// chunks of one record are the consecutive ones typed into the same
-// program and window during the same foreground run of that program (the
-// recorded app segments). A chunk recorded before the program was kept
-// takes the program of the app segment it was typed in.
-struct KeylogRow {
-    qint64 fromMs = 0;
-    qint64 toMs = 0;
-    QString application;
-    QString windowTitle;
-    QString text;
-};
 
-QList<KeylogRow> groupKeystrokeEntries(const QList<HistoryKeystrokeEntry> &entries,
-                                       const QList<HistoryAppSegment> &programs)
-{
-    QList<HistoryAppSegment> runs = programs;
-    std::sort(runs.begin(), runs.end(),
-              [](const HistoryAppSegment &a, const HistoryAppSegment &b) { return a.startMs < b.startMs; });
-    const auto runAt = [&runs](qint64 timestampMs) {
-        const auto after = std::upper_bound(runs.cbegin(), runs.cend(), timestampMs,
-                                            [](qint64 value, const HistoryAppSegment &run) { return value < run.startMs; });
-        if (after == runs.cbegin()) {
-            return -1;
-        }
-        const int index = int(after - runs.cbegin()) - 1;
-        return timestampMs < runs.at(index).endMs ? index : -1;
-    };
-    QList<KeylogRow> rows;
-    int lastRun = -2;
-    for (const HistoryKeystrokeEntry &entry : entries) {
-        const qint64 beginMs = entry.beginMs > 0 ? qMin(entry.beginMs, entry.timestampMs) : entry.timestampMs;
-        const int run = runAt(beginMs);
-        const QString application =
-            !entry.application.isEmpty() ? entry.application : (run >= 0 ? runs.at(run).application : QString());
-        if (!rows.isEmpty() && rows.last().application == application && rows.last().windowTitle == entry.windowTitle
-            && run == lastRun) {
-            rows.last().toMs = entry.timestampMs;
-            rows.last().text += entry.text;
-        } else {
-            rows.append({beginMs, entry.timestampMs, application, entry.windowTitle, entry.text});
-        }
-        lastRun = run;
-    }
-    return rows;
-}
-
-// --- Minimal .xlsx writer (KeyloggerExporter.qml's XLSX option) ---
-// A .xlsx is a ZIP of OOXML parts; Qt has no public zip-writing API, so
-// this hand-rolls just enough of the ZIP format (stored/uncompressed
-// entries only -- no need for real compression for a small keylog export)
-// plus the handful of XML parts Excel actually requires to open a
-// single-sheet workbook (inline strings, no shared-strings table/styles).
-
-quint32 crc32Of(const QByteArray &data)
-{
-    static const auto table = [] {
-        std::array<quint32, 256> t{};
-        for (quint32 i = 0; i < 256; ++i) {
-            quint32 c = i;
-            for (int k = 0; k < 8; ++k) {
-                c = (c & 1) ? (0xEDB88320u ^ (c >> 1)) : (c >> 1);
-            }
-            t[i] = c;
-        }
-        return t;
-    }();
-    quint32 crc = 0xFFFFFFFFu;
-    for (unsigned char byte : data) {
-        crc = table[(crc ^ byte) & 0xFF] ^ (crc >> 8);
-    }
-    return crc ^ 0xFFFFFFFFu;
-}
-
-void appendLE16(QByteArray &out, quint16 value) { out.append(char(value & 0xFF)); out.append(char((value >> 8) & 0xFF)); }
-void appendLE32(QByteArray &out, quint32 value)
-{
-    out.append(char(value & 0xFF));
-    out.append(char((value >> 8) & 0xFF));
-    out.append(char((value >> 16) & 0xFF));
-    out.append(char((value >> 24) & 0xFF));
-}
-
-// Appends one stored (uncompressed) entry's local header + data, and
-// returns the central-directory record to append later (its "relative
-// offset of local header" needs the offset the entry was written at).
-QByteArray zipCentralRecordFor(const QByteArray &nameUtf8, quint32 crc, quint32 size, quint32 offset)
-{
-    QByteArray record;
-    appendLE32(record, 0x02014b50);
-    appendLE16(record, 20); // version made by
-    appendLE16(record, 20); // version needed
-    appendLE16(record, 0);  // flags
-    appendLE16(record, 0);  // compression: stored
-    appendLE16(record, 0);  // mod time
-    appendLE16(record, 0x21); // mod date (a valid, arbitrary date)
-    appendLE32(record, crc);
-    appendLE32(record, size); // compressed size == uncompressed size (stored)
-    appendLE32(record, size);
-    appendLE16(record, quint16(nameUtf8.size()));
-    appendLE16(record, 0); // extra length
-    appendLE16(record, 0); // comment length
-    appendLE16(record, 0); // disk number start
-    appendLE16(record, 0); // internal attrs
-    appendLE32(record, 0); // external attrs
-    appendLE32(record, offset);
-    record.append(nameUtf8);
-    return record;
-}
-
-void zipAppendEntry(QByteArray &zip, QList<QByteArray> &centralRecords, const QByteArray &name,
-                    const QByteArray &data)
-{
-    const quint32 offset = quint32(zip.size());
-    const quint32 crc = crc32Of(data);
-    appendLE32(zip, 0x04034b50);
-    appendLE16(zip, 20); // version needed
-    appendLE16(zip, 0);  // flags
-    appendLE16(zip, 0);  // compression: stored
-    appendLE16(zip, 0);  // mod time
-    appendLE16(zip, 0x21); // mod date
-    appendLE32(zip, crc);
-    appendLE32(zip, quint32(data.size()));
-    appendLE32(zip, quint32(data.size()));
-    appendLE16(zip, quint16(name.size()));
-    appendLE16(zip, 0); // extra length
-    zip.append(name);
-    zip.append(data);
-    centralRecords.append(zipCentralRecordFor(name, crc, quint32(data.size()), offset));
-}
-
-QString xlsxColumnLetter(int zeroBasedColumn)
-{
-    QString letters;
-    int n = zeroBasedColumn;
-    do {
-        letters.prepend(QChar('A' + (n % 26)));
-        n = n / 26 - 1;
-    } while (n >= 0);
-    return letters;
-}
-
-bool writeMinimalXlsx(const QString &path, const QList<QStringList> &rows)
-{
-    QString sheetXml = QStringLiteral(
-        "<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"yes\"?>"
-        "<worksheet xmlns=\"http://schemas.openxmlformats.org/spreadsheetml/2006/main\"><sheetData>");
-    for (int r = 0; r < rows.size(); ++r) {
-        sheetXml += QStringLiteral("<row r=\"%1\">").arg(r + 1);
-        const QStringList &row = rows.at(r);
-        for (int c = 0; c < row.size(); ++c) {
-            sheetXml += QStringLiteral("<c r=\"%1%2\" t=\"inlineStr\"><is><t xml:space=\"preserve\">%3</t></is></c>")
-                            .arg(xlsxColumnLetter(c))
-                            .arg(r + 1)
-                            .arg(row.at(c).toHtmlEscaped());
-        }
-        sheetXml += QStringLiteral("</row>");
-    }
-    sheetXml += QStringLiteral("</sheetData></worksheet>");
-
-    static const QByteArray kContentTypes =
-        "<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"yes\"?>"
-        "<Types xmlns=\"http://schemas.openxmlformats.org/package/2006/content-types\">"
-        "<Default Extension=\"rels\" ContentType=\"application/vnd.openxmlformats-package.relationships+xml\"/>"
-        "<Default Extension=\"xml\" ContentType=\"application/xml\"/>"
-        "<Override PartName=\"/xl/workbook.xml\" ContentType=\"application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml\"/>"
-        "<Override PartName=\"/xl/worksheets/sheet1.xml\" ContentType=\"application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml\"/>"
-        "</Types>";
-    static const QByteArray kRootRels =
-        "<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"yes\"?>"
-        "<Relationships xmlns=\"http://schemas.openxmlformats.org/package/2006/relationships\">"
-        "<Relationship Id=\"rId1\" Type=\"http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument\" Target=\"xl/workbook.xml\"/>"
-        "</Relationships>";
-    static const QByteArray kWorkbook =
-        "<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"yes\"?>"
-        "<workbook xmlns=\"http://schemas.openxmlformats.org/spreadsheetml/2006/main\" "
-        "xmlns:r=\"http://schemas.openxmlformats.org/officeDocument/2006/relationships\">"
-        "<sheets><sheet name=\"Keylogger\" sheetId=\"1\" r:id=\"rId1\"/></sheets></workbook>";
-    static const QByteArray kWorkbookRels =
-        "<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"yes\"?>"
-        "<Relationships xmlns=\"http://schemas.openxmlformats.org/package/2006/relationships\">"
-        "<Relationship Id=\"rId1\" Type=\"http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet\" Target=\"worksheets/sheet1.xml\"/>"
-        "</Relationships>";
-
-    QByteArray zip;
-    QList<QByteArray> centralRecords;
-    zipAppendEntry(zip, centralRecords, "[Content_Types].xml", kContentTypes);
-    zipAppendEntry(zip, centralRecords, "_rels/.rels", kRootRels);
-    zipAppendEntry(zip, centralRecords, "xl/workbook.xml", kWorkbook);
-    zipAppendEntry(zip, centralRecords, "xl/_rels/workbook.xml.rels", kWorkbookRels);
-    zipAppendEntry(zip, centralRecords, "xl/worksheets/sheet1.xml", sheetXml.toUtf8());
-
-    const quint32 centralStart = quint32(zip.size());
-    for (const QByteArray &record : std::as_const(centralRecords)) {
-        zip.append(record);
-    }
-    const quint32 centralSize = quint32(zip.size()) - centralStart;
-
-    appendLE32(zip, 0x06054b50);
-    appendLE16(zip, 0); // disk number
-    appendLE16(zip, 0); // disk with central dir
-    appendLE16(zip, quint16(centralRecords.size()));
-    appendLE16(zip, quint16(centralRecords.size()));
-    appendLE32(zip, centralSize);
-    appendLE32(zip, centralStart);
-    appendLE16(zip, 0); // comment length
-
-    QFile file(path);
-    if (!file.open(QIODevice::WriteOnly)) {
-        return false;
-    }
-    file.write(zip);
-    return true;
-}
 
 }
 
@@ -3486,31 +3271,6 @@ HistoryView::HistoryView(ViewerConnection &connection, QWidget *parent)
     m_toggleAppsButton->setGraphicsEffect(appButtonOpacity);
     connect(m_toggleAppsButton, &QPushButton::clicked, this, &HistoryView::onToggleRunningApps);
 
-    // Real Kickidler keylogger table columns (keylogger/Table.qml):
-    // Date/Pressing period/Application/Title/Keystrokes. The Application
-    // column is a placeholder (always "--") until HistoryKeystrokeEntry
-    // actually carries an application field -- see the KeylogRow/
-    // groupKeystrokeEntries comment above; it needs a KikiHost change,
-    // not just a client-side one, so it's deferred. Lives in a popup dialog
-    // (see onKeylogTableClicked), not as a mode of the main page.
-    m_textLog = new QTableWidget(0, 5, this);
-    m_textLog->setHorizontalHeaderLabels(
-        {QStringLiteral("Date"), QStringLiteral("Pressing period"), QStringLiteral("Application"),
-         QStringLiteral("Title"), QStringLiteral("Keystrokes")});
-    m_textLog->setEditTriggers(QAbstractItemView::NoEditTriggers);
-    m_textLog->setSelectionBehavior(QAbstractItemView::SelectRows);
-    m_textLog->setSelectionMode(QAbstractItemView::SingleSelection);
-    m_textLog->verticalHeader()->setVisible(false);
-    m_textLog->horizontalHeader()->setStretchLastSection(true);
-    m_textLog->setColumnWidth(0, 90);
-    m_textLog->setColumnWidth(1, 150);
-    m_textLog->setColumnWidth(2, 110);
-    m_textLog->setColumnWidth(3, 180);
-    // Not in any layout until onKeylogTableClicked reparents it into a
-    // dialog -- without this, Qt shows it anyway, unpositioned, at (0,0)
-    // over everything else (this was the "garbled Date/boxes in the
-    // top-left corner" bug).
-    m_textLog->hide();
 
     // History.qml's sliderAndMeta: a fixed 125px block, leftMargin 12, with
     // column1 (Change period / Video+speed / Text, spacing 10 after a 5px
@@ -3858,8 +3618,7 @@ HistoryView::HistoryView(ViewerConnection &connection, QWidget *parent)
                 m_scopes.departments = departments;
                 updateInfoPanel();
             });
-    connect(&m_connection, &ViewerConnection::historyKeystrokesReceived, this,
-            &HistoryView::onKeystrokesReceived);
+    connect(&m_connection, &ViewerConnection::keyEventsReceived, this, &HistoryView::onKeyEvents);
     connect(&m_connection, &ViewerConnection::historyError, this, &HistoryView::onHistoryError);
     connect(&m_connection, &ViewerConnection::historySessionStatesReceived, this,
             [this](quint32 streamId, const QString &day, const QList<QPair<qint64, qint64>> &online,
@@ -4010,6 +3769,28 @@ void HistoryView::openForDevice(quint32 deviceKey, const QString &day)
     }
     // historyPanel.addTab(0, ...): a jump opens its tab first in the row.
     addHistoryTab({deviceKey, period, m_timeStepMs}, 0);
+}
+
+void HistoryView::openForInterval(quint32 deviceKey, const QDateTime &begin, const QDateTime &end,
+                                  qint64 timeStepMs)
+{
+    HistoryPeriod period;
+    period.type = QStringLiteral("custom");
+    period.customBegin = begin;
+    period.customEnd = end;
+    period.recentBegin = begin;
+    period.recentEnd = end;
+    m_activated = true;
+    addHistoryTab({deviceKey, period, timeStepMs > 0 ? timeStepMs : m_timeStepMs}, 0);
+}
+
+void HistoryView::setDeviceIdentity(quint32 deviceKey, const SessionIdentity &identity)
+{
+    m_identities.insert(deviceKey, identity);
+    if (deviceKey == m_currentDeviceKey) {
+        m_timeline->setSessionLabel(m_identities.value(deviceKey).displayText(),
+                                    !m_deviceMonitorStreams.value(deviceKey).isEmpty());
+    }
 }
 
 void HistoryView::jumpTo(quint32 deviceKey, const HistoryPeriod &period)
@@ -4426,7 +4207,10 @@ void HistoryView::switchDevice(quint32 deviceKey)
     setPlaying(false);
     m_currentDeviceKey = deviceKey;
     m_videoHeader->setName(m_deviceNames.value(deviceKey, QStringLiteral("Employee %1").arg(deviceKey)));
-    m_timeline->setSessionLabel(sessionMarker(), !m_deviceMonitorStreams.value(deviceKey).isEmpty());
+    // SliderBar's knob tooltip: Session.getDisplayText() (domain/user@computer).
+    m_timeline->setSessionLabel(m_identities.contains(deviceKey) ? m_identities.value(deviceKey).displayText()
+                                                                 : m_deviceNames.value(deviceKey),
+                                !m_deviceMonitorStreams.value(deviceKey).isEmpty());
     rebuildMonitorStrip();
     m_scopes = CategoryScopes();
     m_chartsModel->clear();
@@ -4486,9 +4270,8 @@ void HistoryView::loadPeriod()
     m_keystream->setText(QString(), QString());
     m_webVisits.clear();
     m_appSegments.clear();
-    m_keystrokeEntries.clear();
+    m_keyEvents.clear();
     m_infoPanel->setItems({}, {});
-    m_textLog->setRowCount(0);
 
     const qint64 start = periodStartMs();
     const qint64 stop = periodStopMs();
@@ -4529,7 +4312,9 @@ void HistoryView::loadPeriod()
     m_connection.requestSessionStates(streamId, start, stop);
     m_connection.requestHistoryAppSegments(streamId, start, stop);
     m_connection.requestWebVisits(streamId, start, stop);
-    m_connection.requestKeystrokes(streamId, start, stop);
+    // historyModel.keyboardEvents: this period's keyboard events.
+    m_keyEventsTag = QStringLiteral("history-keylogger-%1").arg(++m_keyEventsGeneration);
+    m_connection.requestKeyEvents(streamId, start, stop, m_keyEventsTag);
     m_chartsModel->setQuery(streamId, start, stop, chartStep);
 }
 
@@ -4671,7 +4456,6 @@ void HistoryView::applyMarker(int marker)
     // chart marker all move now -- the UI never waits on the host.
     const QDateTime moment = QDateTime::fromMSecsSinceEpoch(timestampMs);
     m_videoHeader->setMoment(QStringLiteral("( %1 )").arg(headerMomentText(moment)));
-    updateTextLogHighlight(timestampMs);
     updateKeystream(timestampMs);
     updateHistoryStatusIcon(timestampMs);
     m_timeline->setCurrentMarker(marker);
@@ -4810,15 +4594,15 @@ void HistoryView::onToggleViolationPanel()
     m_chartAnimation->start();
 }
 
-void HistoryView::onChartInterval(qint64 beginMs, qint64 endMs)
+bool runGoToHistoryDialog(QWidget *parent, const QString &title, qint64 beginMs, qint64 endMs, qint64 currentStepMs,
+                          qint64 *stepMs)
 {
-    // History.qml onWantGoToHistory -> GoToHistoryDialog titled "Change
-    // period": the selected range (read-only) and a Time step for it; OK
-    // opens a new History tab for that custom period, first in the row.
+    // trackerQuadratorActiveCell/filters/GoToHistoryDialog.qml: the
+    // selected range (read-only) and a Time step for it.
     const QDateTime begin = QDateTime::fromMSecsSinceEpoch(beginMs);
     const QDateTime end = QDateTime::fromMSecsSinceEpoch(endMs);
-    QDialog dialog(this);
-    dialog.setWindowTitle(QStringLiteral("Change period"));
+    QDialog dialog(parent);
+    dialog.setWindowTitle(title);
     dialog.setModal(true);
     auto *layout = new QVBoxLayout(&dialog);
     layout->addWidget(new QLabel(QStringLiteral("Time range: "), &dialog));
@@ -4854,8 +4638,8 @@ void HistoryView::onChartInterval(qint64 beginMs, qint64 endMs)
             continue;
         }
         steps->addItem(timeStepText(value), value);
-        if (qAbs(value - m_timeStepMs) < bestDistance) {
-            bestDistance = qAbs(value - m_timeStepMs);
+        if (qAbs(value - currentStepMs) < bestDistance) {
+            bestDistance = qAbs(value - currentStepMs);
             bestIndex = steps->count() - 1;
         }
     }
@@ -4866,19 +4650,32 @@ void HistoryView::onChartInterval(qint64 beginMs, qint64 endMs)
     stepRow->addStretch(1);
     layout->addLayout(stepRow);
     auto *buttons = new QDialogButtonBox(QDialogButtonBox::Ok | QDialogButtonBox::Cancel, &dialog);
-    connect(buttons, &QDialogButtonBox::accepted, &dialog, &QDialog::accept);
-    connect(buttons, &QDialogButtonBox::rejected, &dialog, &QDialog::reject);
+    QObject::connect(buttons, &QDialogButtonBox::accepted, &dialog, &QDialog::accept);
+    QObject::connect(buttons, &QDialogButtonBox::rejected, &dialog, &QDialog::reject);
     layout->addWidget(buttons);
-    if (dialog.exec() != QDialog::Accepted || m_currentDeviceKey == 0) {
+    if (dialog.exec() != QDialog::Accepted) {
+        return false;
+    }
+    *stepMs = steps->currentIndex() >= 0 ? steps->currentData().toLongLong() : currentStepMs;
+    return true;
+}
+
+void HistoryView::onChartInterval(qint64 beginMs, qint64 endMs)
+{
+    // History.qml onWantGoToHistory -> GoToHistoryDialog titled "Change
+    // period"; OK opens a new History tab for that custom period, first in
+    // the row.
+    qint64 step = m_timeStepMs;
+    if (!runGoToHistoryDialog(this, QStringLiteral("Change period"), beginMs, endMs, m_timeStepMs, &step)
+        || m_currentDeviceKey == 0) {
         return;
     }
     HistoryPeriod period = m_period;
     period.type = QStringLiteral("custom");
-    period.customBegin = begin;
-    period.customEnd = end;
-    period.recentBegin = begin;
-    period.recentEnd = end;
-    const qint64 step = steps->currentIndex() >= 0 ? steps->currentData().toLongLong() : m_timeStepMs;
+    period.customBegin = QDateTime::fromMSecsSinceEpoch(beginMs);
+    period.customEnd = QDateTime::fromMSecsSinceEpoch(endMs);
+    period.recentBegin = period.customBegin;
+    period.recentEnd = period.customEnd;
     addHistoryTab({m_currentDeviceKey, period, step}, 0);
 }
 
@@ -5005,133 +4802,6 @@ void HistoryView::onSpeedChanged(int index)
 }
 
 namespace {
-// SaveDialog.qml fixFileName: lower-case on Windows, and every character a
-// file name cannot (or should not) carry replaced by '_'.
-QString fixFileName(QString name)
-{
-#ifdef Q_OS_WIN
-    name = name.toLower();
-#endif
-    static const QString kBad = QStringLiteral("/\\:*?\"'<>|+%!@~&`#{}$=");
-    for (QChar &c : name) {
-        if (kBad.contains(c)) {
-            c = QLatin1Char('_');
-        }
-    }
-    return name;
-}
-
-// utils/DatetimePrinter.dateToStr for the English UI.
-QString dateToStr(const QDateTime &moment)
-{
-    return QLocale(QLocale::English, QLocale::UnitedStates).toString(moment, QStringLiteral("MM.dd.yyyy hh.mm ap"));
-}
-
-// Layers/SaveDialog.qml: the extra content (session, format, ...), the
-// directory (remembered per recentDirCookie) and the file name; Ok checks
-// the path, cleans the name, adds the extension and asks before
-// overwriting (Yes / No = name_1, name_2... / Cancel).
-class HistorySaveDialog final : public QDialog
-{
-public:
-    HistorySaveDialog(const QString &title, const QString &extension, const QString &recentDirCookie,
-                      const QString &initialName, QWidget *parent)
-        : QDialog(parent)
-        , m_extension(extension)
-        , m_cookie(recentDirCookie)
-    {
-        setWindowTitle(title);
-        setModal(true);
-        auto *layout = new QVBoxLayout(this);
-        m_form = new QFormLayout;
-        layout->addLayout(m_form);
-        const QString recent = QSettings().value(QStringLiteral("saveDialog/") + m_cookie).toString();
-        m_dirEdit = new QLineEdit(recent.isEmpty() || !QFileInfo(recent).isDir()
-                                      ? QStandardPaths::writableLocation(QStandardPaths::DocumentsLocation)
-                                      : recent,
-                                  this);
-        m_dirEdit->setReadOnly(true);
-        auto *browse = new QPushButton(QStringLiteral("..."), this);
-        browse->setFixedWidth(32);
-        connect(browse, &QPushButton::clicked, this, [this] {
-            const QString dir = QFileDialog::getExistingDirectory(this, QStringLiteral("Directories Tree:"),
-                                                                  m_dirEdit->text());
-            if (!dir.isEmpty()) {
-                m_dirEdit->setText(QDir::toNativeSeparators(dir));
-            }
-        });
-        auto *dirRow = new QHBoxLayout;
-        dirRow->addWidget(m_dirEdit, 1);
-        dirRow->addWidget(browse);
-        m_form->addRow(QStringLiteral("Current dir:"), dirRow);
-        m_fileEdit = new QLineEdit(initialName, this);
-        m_fileEdit->setMinimumWidth(360);
-        m_form->addRow(QStringLiteral("File:"), m_fileEdit);
-        auto *buttons = new QDialogButtonBox(this);
-        buttons->addButton(QStringLiteral("Cancel"), QDialogButtonBox::RejectRole);
-        buttons->addButton(QStringLiteral("Ok"), QDialogButtonBox::AcceptRole);
-        connect(buttons, &QDialogButtonBox::accepted, this, &HistorySaveDialog::tryAccept);
-        connect(buttons, &QDialogButtonBox::rejected, this, &QDialog::reject);
-        layout->addWidget(buttons);
-    }
-
-    // The extra content goes above the directory and the file name.
-    void addRow(const QString &label, QWidget *field) { m_form->insertRow(m_extraRows++, label, field); }
-    void addRow(const QString &label, const QString &value) { addRow(label, new QLabel(value, this)); }
-    void addWidget(QWidget *widget) { m_form->insertRow(m_extraRows++, widget); }
-    void setExtension(const QString &extension) { m_extension = extension; }
-    QString path() const { return m_path; }
-
-private:
-    void tryAccept()
-    {
-        const QString directory = m_dirEdit->text().trimmed();
-        if (directory.isEmpty() || !QFileInfo(directory).isDir()) {
-            QMessageBox::warning(this, QStringLiteral("Warning"), QStringLiteral("Path ok file name is not set"));
-            return;
-        }
-        QString file = m_fileEdit->text().trimmed();
-        if (file.isEmpty()) {
-            file = QStringLiteral("No name");
-        }
-        file = fixFileName(file);
-        if (!file.endsWith(m_extension)) {
-            file += QLatin1Char('.') + m_extension;
-        }
-        QString path = QDir(directory).filePath(file);
-        if (QFileInfo::exists(path)) {
-            QMessageBox box(QMessageBox::Question, QStringLiteral("Rewrite confirmation"),
-                            QStringLiteral("File \"%1\" already exists. Press Yes to rewrite, No to save with different name.")
-                                .arg(file),
-                            QMessageBox::Yes | QMessageBox::No | QMessageBox::Cancel, this);
-            const int answer = box.exec();
-            if (answer == QMessageBox::Cancel) {
-                return;
-            }
-            if (answer == QMessageBox::No) {
-                const QString base = file.left(file.size() - m_extension.size() - 1);
-                for (int n = 1;; ++n) {
-                    path = QDir(directory).filePath(QStringLiteral("%1_%2.%3").arg(base).arg(n).arg(m_extension));
-                    if (!QFileInfo::exists(path)) {
-                        break;
-                    }
-                }
-            }
-        }
-        QSettings().setValue(QStringLiteral("saveDialog/") + m_cookie, directory);
-        m_path = path;
-        accept();
-    }
-
-    QFormLayout *m_form = nullptr;
-    int m_extraRows = 0;
-    QLineEdit *m_dirEdit = nullptr;
-    QLineEdit *m_fileEdit = nullptr;
-    QString m_extension;
-    QString m_cookie;
-    QString m_path;
-};
-
 // ProgressBar { kind: "big" } in VideoSaverProgress: 250 wide, 0..100.
 class SaverProgressBar final : public QWidget
 {
@@ -5185,6 +4855,11 @@ QString cutSystemKeys(const QString &text)
 
 QString HistoryView::sessionMarker() const
 {
+    // KeyloggerExport.qml / VideoSaverSelector: domain\user@computer.
+    const SessionIdentity identity = m_identities.value(m_currentDeviceKey);
+    if (identity.isValid()) {
+        return identity.exportMarker();
+    }
     return m_deviceNames.value(m_currentDeviceKey, QStringLiteral("Employee %1").arg(m_currentDeviceKey));
 }
 
@@ -5197,18 +4872,20 @@ void HistoryView::onKeylogTableClicked()
         return;
     }
     const QString employee = m_deviceNames.value(m_currentDeviceKey).trimmed();
-    const QString initial = QStringLiteral("%1_%2_%3").arg(employee, dateToStr(m_period.begin()),
-                                                           dateToStr(m_period.end()));
+    const QString stem = QStringLiteral("%1_%2_%3").arg(employee, dateToStr(m_period.begin()),
+                                                        dateToStr(m_period.end()));
     // utils/KeyloggerExport.qml.
-    HistorySaveDialog dialog(QStringLiteral("Save keystrokes"), QStringLiteral("csv"),
-                             QStringLiteral("keyloggerExport"), initial, this);
+    SaveDialog dialog(QStringLiteral("Save keystrokes"), QStringLiteral("csv"),
+                             QStringLiteral("keyloggerExport"), stem + QStringLiteral(".csv"), this);
     dialog.addRow(QStringLiteral("Session:"), sessionMarker());
     auto *format = new MultiSwitch(&dialog);
     format->addTab(QStringLiteral("csv"));
     format->addTab(QStringLiteral("xlsx"));
     format->setCurrentIndex(0);
-    connect(format, &MultiSwitch::currentChanged, &dialog, [&dialog](int index) {
-        dialog.setExtension(index == 1 ? QStringLiteral("xlsx") : QStringLiteral("csv"));
+    connect(format, &MultiSwitch::currentChanged, &dialog, [&dialog, stem](int index) {
+        const QString extension = index == 1 ? QStringLiteral("xlsx") : QStringLiteral("csv");
+        dialog.setExtension(extension);
+        dialog.setInitialName(stem + QLatin1Char('.') + extension);
     });
     dialog.addRow(QStringLiteral("File format:"), format);
     auto *withoutSystemKeys = new QCheckBox(QStringLiteral("without system buttons"), &dialog);
@@ -5237,10 +4914,12 @@ void HistoryView::onKeylogTableClicked()
     });
     m_textExport.progress = progress;
     progress->show();
-    m_connection.requestKeystrokes(m_textExport.streamId, periodStartMs(), periodStopMs());
+    // KeyloggerExporter's Selector for the session over the period.
+    m_textExport.tag = QStringLiteral("history-export-%1").arg(++m_keyEventsGeneration);
+    m_connection.requestKeyEvents(m_textExport.streamId, periodStartMs(), periodStopMs(), m_textExport.tag);
 }
 
-void HistoryView::finishTextExport(const QList<HistoryKeystrokeEntry> &entries)
+void HistoryView::finishTextExport(const QList<KeyEvent> &events)
 {
     m_textExport.active = false;
     if (m_textExport.progress) {
@@ -5248,45 +4927,18 @@ void HistoryView::finishTextExport(const QList<HistoryKeystrokeEntry> &entries)
         m_textExport.progress = nullptr;
         progress->close();
     }
-    // Result.content: one row per recorded record -- the program, the
-    // window, from its first key to its last.
-    QList<QStringList> rows;
-    rows.append({QStringLiteral("Date"), QStringLiteral("Pressing period"), QStringLiteral("Application"),
-                 QStringLiteral("Title"), QStringLiteral("Keystrokes")});
-    for (const KeylogRow &row : groupKeystrokeEntries(entries, m_appSegments)) {
-        const QDateTime from = QDateTime::fromMSecsSinceEpoch(row.fromMs);
-        const QDateTime to = QDateTime::fromMSecsSinceEpoch(row.toMs);
-        const QString text = m_textExport.cutSystemKeys ? cutSystemKeys(row.text) : row.text;
-        if (text.isEmpty()) {
-            continue;
-        }
-        rows.append({from.toString(QStringLiteral("dd.MM.yyyy")),
-                     QStringLiteral("%1 - %2").arg(from.toString(QStringLiteral("HH:mm:ss")),
-                                                   to.toString(QStringLiteral("HH:mm:ss"))),
-                     row.application, row.windowTitle, text});
-    }
-    bool ok = false;
-    if (m_textExport.xlsx) {
-        ok = writeMinimalXlsx(m_textExport.path, rows);
-    } else {
-        QFile file(m_textExport.path);
-        if (file.open(QIODevice::WriteOnly | QIODevice::Text | QIODevice::Truncate)) {
-            QTextStream out(&file);
-            for (const QStringList &row : std::as_const(rows)) {
-                QStringList escaped;
-                for (QString field : row) {
-                    field.replace(QLatin1Char('"'), QStringLiteral("\"\""));
-                    escaped << QStringLiteral("\"%1\"").arg(field);
-                }
-                out << escaped.join(QLatin1Char(',')) << "\n";
-            }
-            out.flush();
-            ok = out.status() == QTextStream::Ok;
-        }
-    }
-    if (!ok) {
-        QMessageBox::warning(this, QStringLiteral("Keylogger export failed"),
-                             QStringLiteral("Unable to save file %1. Choose another directory.").arg(m_textExport.path));
+    // KeyloggerExporter's Result: sites and programs both shown, no keyword,
+    // the dialog's cutSystemKeys; the last record ends at the period's end.
+    Keylogger::ResultOptions options;
+    options.cutSystemKeys = m_textExport.cutSystemKeys;
+    options.showSites = true;
+    options.showExecutables = true;
+    const QList<KeyloggerRow> rows = Keylogger::buildResult(events, periodStopMs(), options);
+    const QString result = m_textExport.xlsx ? Keylogger::exportToXlsx(rows, m_textExport.path)
+                                             : Keylogger::exportToCsv(rows, m_textExport.path);
+    if (result != QStringLiteral("success")) {
+        // KeyloggerExporter.qml: MessageBox "Keylogger export failed".
+        QMessageBox::warning(this, QStringLiteral("Keylogger export failed"), result);
     }
 }
 
@@ -5304,7 +4956,7 @@ void HistoryView::onExportVideoClicked()
     const QString employee = m_deviceNames.value(m_currentDeviceKey).trimmed();
     const QString initial = QStringLiteral("%1_%2 - %3").arg(employee, dateToStr(m_period.begin()),
                                                              dateToStr(m_period.end()));
-    HistorySaveDialog dialog(QStringLiteral("Video saver"), QStringLiteral("webm"), QStringLiteral("videoSave"),
+    SaveDialog dialog(QStringLiteral("Video saver"), QStringLiteral("webm"), QStringLiteral("videoSave"),
                              initial, this);
     dialog.addRow(QStringLiteral("Session: "), sessionMarker());
     dialog.addRow(QStringLiteral("Time acceleration factor: "), m_speedCombo->currentText());
@@ -6291,80 +5943,31 @@ void HistoryView::onCategoriesReceived(quint32 streamId, const QHash<QString, QS
     updateInfoPanel();
 }
 
-void HistoryView::onKeystrokesReceived(quint32 streamId, const QString &day,
-                                       const QList<HistoryKeystrokeEntry> &entries)
+void HistoryView::onKeyEvents(quint32 streamId, const QString &tag, const QList<KeyEvent> &events, bool)
 {
-    if (m_textExport.active && streamId == m_textExport.streamId && day == m_textExport.rangeKey) {
-        finishTextExport(entries);
-    }
-    if (streamId != currentStreamId() || day != m_rangeKey) {
+    if (m_textExport.active && streamId == m_textExport.streamId && tag == m_textExport.tag) {
+        finishTextExport(events);
         return;
     }
-    m_keystrokeEntries = entries;
-    const QList<KeylogRow> rows = groupKeystrokeEntries(entries, m_appSegments);
-
-    m_textLog->setRowCount(rows.size());
-    // Newest first, same as the real keylogger table (ListView.BottomToTop).
-    for (int i = 0; i < rows.size(); ++i) {
-        const KeylogRow &row = rows.at(rows.size() - 1 - i);
-        const QString date =
-            QDateTime::fromMSecsSinceEpoch(row.fromMs).toString(QStringLiteral("dd.MM.yyyy"));
-        const QString period = QStringLiteral("%1 - %2")
-                                   .arg(QDateTime::fromMSecsSinceEpoch(row.fromMs)
-                                            .toString(QStringLiteral("HH:mm:ss")),
-                                        QDateTime::fromMSecsSinceEpoch(row.toMs)
-                                            .toString(QStringLiteral("HH:mm:ss")));
-        m_textLog->setItem(i, 0, new QTableWidgetItem(date));
-        m_textLog->setItem(i, 1, new QTableWidgetItem(period));
-        m_textLog->setItem(i, 2, new QTableWidgetItem(row.application));
-        m_textLog->setItem(i, 3, new QTableWidgetItem(row.windowTitle));
-        m_textLog->setItem(i, 4, new QTableWidgetItem(row.text));
+    if (tag != m_keyEventsTag) {
+        return; // another Selector's (the Tracker's, or an older period's)
     }
+    m_keyEvents = events;
     const qint64 moment = m_timeline->timestampForMarker(m_timeline->currentMarker());
-    if (moment >= 0) {
-        updateKeystream(moment);
-    }
+    updateKeystream(moment);
 }
 
 void HistoryView::updateKeystream(qint64 timestampMs)
 {
-    // History.qml's two Keystreams: events up to historyModel.moment in
-    // white, the ones after it in gray.
-    QString past;
-    QString future;
-    for (const HistoryKeystrokeEntry &entry : std::as_const(m_keystrokeEntries)) {
-        (entry.timestampMs <= timestampMs ? past : future) += entry.text;
+    // History.qml's two Keystreams over historyModel.keyboardEvents: the
+    // events up to the moment (v.moment <= moment) in white, the ones after
+    // it in gray -- each its own Translator (the QML path: nothing cut).
+    QList<KeyEvent> past;
+    QList<KeyEvent> future;
+    for (const KeyEvent &event : std::as_const(m_keyEvents)) {
+        (timestampMs >= 0 && event.moment <= timestampMs ? past : future).append(event);
     }
-    m_keystream->setText(past, future);
-}
-
-void HistoryView::updateTextLogHighlight(qint64 timestampMs)
-{
-    if (!m_textLog->isVisible()) {
-        return;
-    }
-    // Select+scroll to the table row (newest-first, see onKeystrokesReceived)
-    // whose period contains -- or is nearest to -- the current timeline
-    // position.
-    const QList<KeylogRow> rows = groupKeystrokeEntries(m_keystrokeEntries, m_appSegments);
-    if (rows.isEmpty()) {
-        return;
-    }
-    int nearestRow = 0;
-    qint64 closestDelta = std::numeric_limits<qint64>::max();
-    for (int i = 0; i < rows.size(); ++i) {
-        const KeylogRow &row = rows.at(i);
-        const qint64 delta = timestampMs < row.fromMs ? row.fromMs - timestampMs
-            : timestampMs > row.toMs                  ? timestampMs - row.toMs
-                                                        : 0;
-        if (delta < closestDelta) {
-            closestDelta = delta;
-            nearestRow = i;
-        }
-    }
-    const int tableRow = rows.size() - 1 - nearestRow; // rows are newest-first in the table
-    m_textLog->selectRow(tableRow);
-    m_textLog->scrollToItem(m_textLog->item(tableRow, 0));
+    m_keystream->setText(Keylogger::translate(past, false, false, false), Keylogger::translate(future, false, false, false));
 }
 
 void HistoryView::onHistoryError(quint32 streamId, const QString &message)

@@ -2,6 +2,7 @@
 
 #include "categoryrules.h"
 #include "frameprotocol.h"
+#include "keyevent.h"
 
 #include <QHash>
 #include <QImage>
@@ -46,6 +47,23 @@ struct HistoryVideoSegmentInfo {
 // program, from its first key (beginMs) to when it was flushed
 // (timestampMs). Chunks recorded before the host kept beginMs/application
 // carry 0 / an empty application.
+// A session's marker (Session.userDomain / userName / computerName), as
+// SessionPicker and the keylogger exports print it.
+struct SessionIdentity {
+    QString userDomain;
+    QString userName;
+    QString computerName;
+    bool isValid() const { return !userName.isEmpty(); }
+    // KeyloggerExport.qml / VideoSaverSelector: domain\user@computer.
+    QString exportMarker() const { return userDomain + QLatin1Char('\\') + userName + QLatin1Char('@') + computerName; }
+    // SessionPicker / Session.getDisplayText(): domain/user@computer.
+    QString displayText() const { return userDomain + QLatin1Char('/') + userName + QLatin1Char('@') + computerName; }
+    bool operator==(const SessionIdentity &other) const
+    {
+        return userDomain == other.userDomain && userName == other.userName && computerName == other.computerName;
+    }
+};
+
 struct HistoryKeystrokeEntry {
     qint64 timestampMs = 0;
     QString windowTitle;
@@ -144,6 +162,11 @@ public:
     // The employee's screens that recorded anything in the period -- what
     // History shows, whether or not they are connected now.
     void requestHistoryScreens(quint32 streamId, qint64 startMs, qint64 stopMs);
+    // Keylogger.Selector (SelectKeyboardEvents): the keyboard events of the
+    // employee streamId belongs to in [startMs, stopMs); tag (the Selector's
+    // cookie) comes back with the reply, so an answer for another Selector
+    // (History's, or an older interval) is never taken for this one.
+    void requestKeyEvents(quint32 streamId, qint64 startMs, qint64 stopMs, const QString &tag);
     // The employee's online / lock / screensaver ranges in the period
     // (History's StatusIcon: noData / lock / saver).
     void requestSessionStates(quint32 streamId, qint64 startMs, qint64 stopMs);
@@ -168,6 +191,15 @@ signals:
     void monitorDiscovered(quint32 streamId, const QString &name, const QSize &size,
                            quint32 sessionId, const QString &sessionUsername,
                            const QString &sessionState, bool isWindow);
+    // The same announcement's full session marker.
+    void sessionIdentified(quint32 streamId, const SessionIdentity &identity);
+    // requestKeyEvents' answer (complete: nothing more to come for it) or
+    // its failure.
+    void keyEventsReceived(quint32 streamId, const QString &tag, const QList<KeyEvent> &events, bool complete);
+    void keyEventsFailed(quint32 streamId, const QString &tag, const QString &message);
+    // MessageType::KeyEvents: what the session streamId belongs to just
+    // typed (Session.keyboardEvents).
+    void liveKeyEvents(quint32 streamId, const QList<KeyEvent> &events);
     void frameReady(quint32 streamId, const QImage &image, quint64 sequence,
                     qint64 latencyMs);
     // activeMonitorStreamId: the monitor stream this device's foreground
@@ -269,6 +301,7 @@ private:
     void processHistoryQuery(const ViewerProtocol::Header &header, const QByteArray &payload);
     void processHistoryFrame(const ViewerProtocol::Header &header, const QByteArray &payload);
     void processHistorySegment(const ViewerProtocol::Header &header, const QByteArray &payload);
+    static QList<KeyEvent> parseKeyEvents(const QJsonObject &object);
     void sendHistoryQuery(quint32 streamId, const QJsonObject &object);
     void failProtocol(const QString &message);
     bool isSafePlainTextTarget() const;

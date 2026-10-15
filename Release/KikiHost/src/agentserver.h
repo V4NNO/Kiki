@@ -2,6 +2,7 @@
 
 #include "agentconnection.h"
 
+#include <QJsonArray>
 #include <QList>
 #include <QSslCertificate>
 #include <QSslKey>
@@ -40,6 +41,8 @@ public:
                            quint32 activeMonitorStreamId, bool saver, const QString &url = QString());
     void broadcastMonitorList(const QList<MonitorInfo> &monitors);
     void broadcastStreamClosed(quint32 streamId);
+    // Live keyboard events of the session streamId belongs to.
+    void broadcastKeyEvents(quint32 streamId, const QJsonArray &events);
 
     // Applied to every connection adopted from here on; existing
     // connections at the time of the call are updated too.

@@ -654,6 +654,34 @@ MainWindow::MainWindow(int windowIndex, QWidget *parent)
             this, &MainWindow::updateFrame);
     connect(&m_connection, &ViewerConnection::metadataChanged,
             this, &MainWindow::updateMetadata);
+    connect(&m_connection, &ViewerConnection::sessionIdentified, this,
+            [this](quint32 streamId, const SessionIdentity &identity) {
+                const quint32 deviceKey = m_streamDeviceKey.value(streamId, 0);
+                if (deviceKey == 0 || !identity.isValid()) {
+                    return;
+                }
+                m_deviceIdentity.insert(deviceKey, identity);
+                m_historyView->setDeviceIdentity(deviceKey, identity);
+                if (m_openDeviceKey == deviceKey) {
+                    m_deviceDetailView->setSessionIdentity(identity);
+                }
+            });
+    connect(&m_connection, &ViewerConnection::liveKeyEvents, this,
+            [this](quint32 streamId, const QList<KeyEvent> &events) {
+                const quint32 deviceKey = m_streamDeviceKey.value(streamId, 0);
+                if (deviceKey == 0) {
+                    return;
+                }
+                constexpr int kKeyEventsKept = 2000;
+                QList<KeyEvent> &kept = m_deviceKeyEvents[deviceKey];
+                kept += events;
+                if (kept.size() > kKeyEventsKept) {
+                    kept.remove(0, kept.size() - kKeyEventsKept);
+                }
+                if (m_openDeviceKey == deviceKey) {
+                    m_deviceDetailView->setLiveKeyEvents(kept);
+                }
+            });
     connect(&m_connection, &ViewerConnection::activeUrlChanged, this, [this](quint32 streamId, const QString &url) {
         const quint32 deviceKey = m_streamDeviceKey.value(streamId, 0);
         if (deviceKey != 0 && m_devicePrimaryStream.value(deviceKey) == streamId
@@ -1906,8 +1934,10 @@ void MainWindow::openDeviceDetail(quint32 sessionKey)
         m_deviceActivity.value(sessionKey).second.startsWith(QStringLiteral("Locked ")),
         m_deviceSaver.value(sessionKey));
     m_deviceDetailView->setSessionState(m_deviceSessionState.value(sessionKey));
+    m_deviceDetailView->setSessionIdentity(m_deviceIdentity.value(sessionKey));
     m_deviceDetailView->showDevice(sessionKey, deviceDisplayName(sessionKey), primaryStream, monitors,
                                    windowPreviews);
+    m_deviceDetailView->setLiveKeyEvents(m_deviceKeyEvents.value(sessionKey));
     m_contentStack->setCurrentWidget(m_deviceDetailView);
     m_deviceDetailView->activate();
     m_subbar->show();
@@ -2401,6 +2431,12 @@ void MainWindow::buildInterface()
             [this](quint32 sessionKey) {
                 showHistoryPage();
                 m_historyView->openForDevice(sessionKey);
+            });
+    // windowContent.jmp("history", {employeeId, type: "custom", ...}).
+    connect(m_deviceDetailView, &DeviceDetailView::historyIntervalRequested, this,
+            [this](quint32 sessionKey, const QDateTime &begin, const QDateTime &end, qint64 timeStepMs) {
+                showHistoryPage();
+                m_historyView->openForInterval(sessionKey, begin, end, timeStepMs);
             });
     connect(m_deviceDetailView, &DeviceDetailView::renameRequested, this,
             [this](quint32 sessionKey, const QString &currentName) {

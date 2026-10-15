@@ -2,6 +2,7 @@
 
 #include "historysegmentstore.h"
 #include "historyvideoexport.h"
+#include "keyloggermodel.h"
 #include "viewerconnection.h"
 
 #include <QIcon>
@@ -226,6 +227,12 @@ private:
 // Opens the CategorizationPanel for a resource of an employee and pushes
 // what changed (applicationsIndex.pushActions): one rule per edited scope.
 // The scopes are updated in place; true when anything changed.
+// GoToHistoryDialog: the interval (read-only) and a Time step for it
+// (TimeStepComboBox, the closest to currentStepMs selected); false on
+// Cancel.
+bool runGoToHistoryDialog(QWidget *parent, const QString &title, qint64 beginMs, qint64 endMs, qint64 currentStepMs,
+                          qint64 *stepMs);
+
 bool runCategorizationDialog(QWidget *parent, ViewerConnection &connection, quint32 streamId,
                              const QString &resource, bool webPage, const QString &employeeName,
                              CategoryScopes &scopes);
@@ -659,6 +666,11 @@ public:
     // to this device and shows the given day ("yyyyMMdd", defaults to
     // today) as a recent Day period.
     void openForDevice(quint32 deviceKey, const QString &day = QString());
+    // windowContent.jmp("history", {type: "custom", customBegin, customEnd,
+    // timeStep}): a new tab for that interval, first in the row.
+    void openForInterval(quint32 deviceKey, const QDateTime &begin, const QDateTime &end, qint64 timeStepMs);
+    // The session marker of an employee (export labels, slider tooltip).
+    void setDeviceIdentity(quint32 deviceKey, const SessionIdentity &identity);
     // A History video is being saved (gBackgroundWorkers.windowsWithSaver
     // InProgress): closing the window asks first.
     bool isVideoSaving() const { return m_videoSaver && m_videoSaver->busy(); }
@@ -684,8 +696,8 @@ private slots:
     void onCategorizationRequested(const QString &resource, bool webPage);
     void onEmployeeCategoriesReceived(quint32 streamId, const QHash<QString, QString> &categories);
     void onCategoriesReceived(quint32 streamId, const QHash<QString, QString> &categories);
-    void onKeystrokesReceived(quint32 streamId, const QString &day,
-                              const QList<HistoryKeystrokeEntry> &entries);
+    // historyModel.keyboardEvents (or the Text export's Selector).
+    void onKeyEvents(quint32 streamId, const QString &tag, const QList<KeyEvent> &events, bool complete);
     void onHistoryError(quint32 streamId, const QString &message);
 
     void onTimelineMoved(int marker);
@@ -842,7 +854,6 @@ private:
     void loadPeriod();
     qint64 periodStartMs() const { return m_period.begin().toMSecsSinceEpoch(); }
     qint64 periodStopMs() const { return m_period.end().toMSecsSinceEpoch(); }
-    void updateTextLogHighlight(qint64 timestampMs);
     void updateKeystream(qint64 timestampMs);
     void updateInfoPanel();
     // The organization's, the departments' and this employee's rules
@@ -925,7 +936,6 @@ private:
     QWidget *m_controlBlock = nullptr;
     bool m_panelFull = false;
     bool m_chartOpen = false;
-    QTableWidget *m_textLog = nullptr;
 
     // History.qml exportTextButton ("Text"): the KeyloggerExporter flow --
     // the period's keystrokes of the session saved as csv / xlsx.
@@ -1018,7 +1028,9 @@ private:
     QList<qint64> m_timestamps;
     QList<HistoryAppSegment> m_webVisits;
     QList<HistoryAppSegment> m_appSegments;
-    QList<HistoryKeystrokeEntry> m_keystrokeEntries;
+    QList<KeyEvent> m_keyEvents;
+    QString m_keyEventsTag;
+    quint64 m_keyEventsGeneration = 0;
     bool m_activated = false;
     bool m_activateWhenReady = false;
 
@@ -1037,6 +1049,7 @@ private:
     // The session marker the export dialogs show (Session:). The original
     // prints domain\user@computer; the host only reports the user.
     QString sessionMarker() const;
+    QHash<quint32, SessionIdentity> m_identities;
 
     // History.qml videoSaverDialogHolder: the PlayerVideoSaver of this page,
     // its VideoSaverProgress box, and the period it exports (its cache tag).
@@ -1062,9 +1075,10 @@ private:
         bool xlsx = false;
         bool cutSystemKeys = false;
         QString rangeKey;
+        QString tag; // the export Selector's cookie
         quint32 streamId = 0;
         QPointer<QDialog> progress;
     };
     TextExportState m_textExport;
-    void finishTextExport(const QList<HistoryKeystrokeEntry> &entries);
+    void finishTextExport(const QList<KeyEvent> &events);
 };

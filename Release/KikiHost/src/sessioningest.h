@@ -5,6 +5,7 @@
 #include <QHash>
 #include <QImage>
 #include <QLocalSocket>
+#include <QJsonArray>
 #include <QObject>
 #include <QString>
 #include <QTimer>
@@ -52,6 +53,8 @@ signals:
                          double idleSeconds, bool screensaver);
     void keystrokeReceived(quint32 sessionId, const QString &windowTitle, const QString &text,
                            qint64 beginMs, const QString &application);
+    // A batch of keyboard events from the sub-service's keylogger.
+    void keyEventsReceived(quint32 sessionId, const QJsonArray &events);
     // See MessageType::StreamClosed -- the authoritative "this window
     // stream is gone" signal, forwarded as-is with the local streamId
     // (SessionManager resolves it to the global one, same as everywhere

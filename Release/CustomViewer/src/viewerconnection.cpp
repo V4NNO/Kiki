@@ -241,6 +241,8 @@ void ViewerConnection::sendClientHello()
              {QStringLiteral("deltaFrames"), true},
              // Live streams only as asked for by SelectStreams.
              {QStringLiteral("selectStreams"), true},
+             // MessageType::KeyEvents is understood.
+             {QStringLiteral("keyEvents"), true},
              {QStringLiteral("audio"), false},
              {QStringLiteral("remoteControl"), false},
              {QStringLiteral("clipboard"), false},
@@ -296,6 +298,13 @@ void ViewerConnection::processMessage(const ViewerProtocol::Header &header,
     case MessageType::HistoryFrame:
         processHistoryFrame(header, payload);
         break;
+    case MessageType::KeyEvents: {
+        const QJsonDocument document = QJsonDocument::fromJson(payload);
+        if (document.isObject()) {
+            emit liveKeyEvents(header.streamId, parseKeyEvents(document.object()));
+        }
+        break;
+    }
     case MessageType::Heartbeat:
         break;
     case MessageType::StreamClosed:
@@ -354,6 +363,10 @@ void ViewerConnection::processJsonMessage(const ViewerProtocol::Header &header,
                                    session.value(QStringLiteral("username")).toString(),
                                    session.value(QStringLiteral("state")).toString(),
                                    monitor.value(QStringLiteral("isWindow")).toBool());
+            emit sessionIdentified(header.streamId,
+                                   SessionIdentity{session.value(QStringLiteral("domain")).toString(),
+                                                   session.value(QStringLiteral("username")).toString(),
+                                                   session.value(QStringLiteral("computer")).toString()});
         }
         return;
     }
@@ -548,6 +561,46 @@ QJsonObject rangeQuery(const QString &action, qint64 startMs, qint64 stopMs)
 }
 } // namespace
 
+QList<KeyEvent> ViewerConnection::parseKeyEvents(const QJsonObject &object)
+{
+    // {"strings":[...], "events":[[moment, type, code, text, app, title,
+    // site], ...]} -- the last three index strings.
+    QStringList strings;
+    for (const QJsonValue &value : object.value(QStringLiteral("strings")).toArray()) {
+        strings.append(value.toString());
+    }
+    const auto string = [&strings](const QJsonValue &value) {
+        const int index = value.toInt(-1);
+        return index >= 0 && index < strings.size() ? strings.at(index) : QString();
+    };
+    QList<KeyEvent> events;
+    const QJsonArray rows = object.value(QStringLiteral("events")).toArray();
+    events.reserve(rows.size());
+    for (const QJsonValue &value : rows) {
+        const QJsonArray row = value.toArray();
+        if (row.size() < 7) {
+            continue;
+        }
+        KeyEvent event;
+        event.moment = static_cast<qint64>(row.at(0).toDouble());
+        event.type = row.at(1).toInt();
+        event.code = row.at(2).toInt();
+        event.translated = row.at(3).toString();
+        event.application = string(row.at(4));
+        event.title = string(row.at(5));
+        event.site = string(row.at(6));
+        events.append(event);
+    }
+    return events;
+}
+
+void ViewerConnection::requestKeyEvents(quint32 streamId, qint64 startMs, qint64 stopMs, const QString &tag)
+{
+    QJsonObject request = rangeQuery(QStringLiteral("listKeyEvents"), startMs, stopMs);
+    request.insert(QStringLiteral("tag"), tag);
+    sendHistoryQuery(streamId, request);
+}
+
 void ViewerConnection::requestHistoryFrames(quint32 streamId, qint64 startMs, qint64 stopMs)
 {
     sendHistoryQuery(streamId, rangeQuery(QStringLiteral("listFrames"), startMs, stopMs));
@@ -635,9 +688,17 @@ void ViewerConnection::processHistoryQuery(const ViewerProtocol::Header &header,
             emit historyFrameMissing(
                 header.streamId,
                 static_cast<quint64>(object.value(QStringLiteral("requestId")).toDouble()));
+        } else if (action == QStringLiteral("listKeyEvents")) {
+            emit keyEventsFailed(header.streamId, object.value(QStringLiteral("tag")).toString(),
+                                 object.value(QStringLiteral("error")).toString());
         } else {
             emit historyError(header.streamId, object.value(QStringLiteral("error")).toString());
         }
+        return;
+    }
+    if (action == QStringLiteral("listKeyEvents")) {
+        emit keyEventsReceived(header.streamId, object.value(QStringLiteral("tag")).toString(),
+                               parseKeyEvents(object), object.value(QStringLiteral("complete")).toBool(true));
         return;
     }
     if (action == QStringLiteral("listDays")) {

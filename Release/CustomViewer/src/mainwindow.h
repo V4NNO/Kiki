@@ -425,6 +425,11 @@ protected:
     // stream's metadata; locked comes from the idle text).
     QHash<quint32, bool> m_deviceSaver; // key: deviceKey
     QHash<quint32, QString> m_deviceUrl; // key: deviceKey -- the active browser page
+    // Session marker (domain / user / computer) per deviceKey.
+    QHash<quint32, SessionIdentity> m_deviceIdentity;
+    // Session.keyboardEvents per deviceKey: what arrived live (the most
+    // recent kKeyEventsKept), for the keystream under Monitors / Programs.
+    QHash<quint32, QList<KeyEvent>> m_deviceKeyEvents;
     // Session.noData, live: an online session whose grabber has pushed no
     // metadata (it pushes every 2 s) for longer than the host's no-data gap
     // (HistoryRecorder kOnlineGapMs, 35 s -- online_session_nodata).

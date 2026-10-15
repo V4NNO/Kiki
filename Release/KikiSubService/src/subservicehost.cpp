@@ -255,17 +255,12 @@ void SubServiceHost::pushMetadata(quint32 streamId, const QString &application,
                         {QStringLiteral("screensaver"), screensaver}});
 }
 
-void SubServiceHost::pushKeystroke(const QString &windowTitle, const QString &text, qint64 beginMs,
-                                   const QString &application)
+void SubServiceHost::pushKeyEvents(const QJsonArray &events)
 {
-    if (!m_socket) {
+    if (!m_socket || events.isEmpty()) {
         return;
     }
-    sendJson(ViewerProtocol::MessageType::Keystroke, 0,
-            QJsonObject{{QStringLiteral("windowTitle"), windowTitle},
-                        {QStringLiteral("text"), text},
-                        {QStringLiteral("beginMs"), static_cast<double>(beginMs)},
-                        {QStringLiteral("application"), application}});
+    sendJson(ViewerProtocol::MessageType::Keystroke, 0, QJsonObject{{QStringLiteral("events"), events}});
 }
 
 void SubServiceHost::sendJson(ViewerProtocol::MessageType type, quint32 streamId,

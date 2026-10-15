@@ -462,55 +462,13 @@ DeviceDetailView::DeviceDetailView(ViewerConnection &connection, QWidget *parent
     m_leftStack->addWidget(programsPage);
     m_programsPage = programsPage;
 
-    // keylogger/Toolbar.qml + keylogger/Table.qml equivalent. The real
-    // toolbar also has Web pages/Programs/Both scope buttons and an
-    // export -- both already exist as-is in HistoryView (this page is the
-    // *live, today-only* keylogger, History's is the full historical one),
-    // so they're not duplicated here.
-    auto *keyloggerPage = new QWidget(m_leftStack);
-    m_keyloggerPage = keyloggerPage;
-    auto *keyloggerLayout = new QVBoxLayout(keyloggerPage);
-    keyloggerLayout->setContentsMargins(10, 10, 10, 10);
-    keyloggerLayout->setSpacing(6);
-
-    auto *keyloggerToolbar = new QWidget(keyloggerPage);
-    auto *keyloggerToolbarLayout = new QHBoxLayout(keyloggerToolbar);
-    keyloggerToolbarLayout->setContentsMargins(0, 0, 0, 0);
-    m_keyloggerSearch = new QLineEdit(keyloggerToolbar);
-    m_keyloggerSearch->setPlaceholderText(QStringLiteral("Cauta in fereastra sau text..."));
-    connect(m_keyloggerSearch, &QLineEdit::textChanged, this, &DeviceDetailView::filterKeyloggerTable);
-    keyloggerToolbarLayout->addWidget(m_keyloggerSearch, 1);
-    auto *hideSystemKeysCheck = new QCheckBox(QStringLiteral("Hide system keys"), keyloggerToolbar);
-    // Inert: KikiHost's keylogger doesn't tag which characters are
-    // control/system keys vs. printable text (see keylogger.cpp) -- there's
-    // nothing to filter by yet, so this stays visible but has no effect
-    // until that tagging exists.
-    hideSystemKeysCheck->setEnabled(false);
-    hideSystemKeysCheck->setToolTip(
-        QStringLiteral("Grabber-ul nu marcheaza inca ce taste sunt \"de sistem\"."));
-    keyloggerToolbarLayout->addWidget(hideSystemKeysCheck);
-    keyloggerLayout->addWidget(keyloggerToolbar);
-
-    m_keyloggerTable = new QTableWidget(0, 4, keyloggerPage);
-    m_keyloggerTable->setHorizontalHeaderLabels(
-        {QStringLiteral("Date"), QStringLiteral("Pressing period"), QStringLiteral("Window"),
-         QStringLiteral("Keystrokes")});
-    m_keyloggerTable->horizontalHeader()->setStretchLastSection(true);
-    m_keyloggerTable->verticalHeader()->hide();
-    m_keyloggerTable->setEditTriggers(QAbstractItemView::NoEditTriggers);
-    m_keyloggerTable->setSelectionBehavior(QAbstractItemView::SelectRows);
-    // keylogger/Table.qml: no fill -- the table sits on the page's grayHatching
-    // background, with #43444c decoration lines and a transparent header;
-    // cell text is light gray, the header white.
-    m_keyloggerTable->setShowGrid(true);
-    m_keyloggerTable->setStyleSheet(QStringLiteral(
-        "QTableWidget { background: transparent; gridline-color: #43444c; color: #cccccc; }"
-        "QTableWidget::item { background: transparent; }"
-        "QHeaderView::section { background: transparent; color: white; border: none;"
-        " border-bottom: 1px solid #43444c; padding: 4px; }"
-        "QTableCornerButton::section { background: transparent; }"));
-    keyloggerLayout->addWidget(m_keyloggerTable, 1);
-    m_leftStack->addWidget(keyloggerPage);
+    // trackerQuadratorActiveCell/Keylogger.qml.
+    m_keyloggerPage = new KeyloggerPage(m_connection, m_leftStack);
+    connect(m_keyloggerPage, &KeyloggerPage::goToHistory, this,
+            [this](quint32, const QDateTime &begin, const QDateTime &end, qint64 timeStepMs) {
+                emit historyIntervalRequested(m_sessionKey, begin, end, timeStepMs);
+            });
+    m_leftStack->addWidget(m_keyloggerPage);
 
     // Violations: the Activity/Efficiency Chart (Filters.qml in this org-less
     // build).
@@ -555,6 +513,8 @@ DeviceDetailView::DeviceDetailView(ViewerConnection &connection, QWidget *parent
     m_keylogTicker->setFixedHeight(25);
     m_keylogTicker->setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Fixed);
     m_keylogTicker->setAlignment(Qt::AlignRight | Qt::AlignVCenter);
+    // textFormat: Text.PlainText -- "<CTRL + C>" is text, not a tag.
+    m_keylogTicker->setTextFormat(Qt::PlainText);
     m_keylogTicker->setContentsMargins(10, 0, 10, 0);
     m_keylogTicker->setFont(roboto(9, false));
     m_keylogTicker->setStyleSheet(QStringLiteral("color: white;"));
@@ -651,24 +611,7 @@ DeviceDetailView::DeviceDetailView(ViewerConnection &connection, QWidget *parent
                 m_scopes.employee = categories;
                 updateInfoPanel();
             });
-    connect(&m_connection, &ViewerConnection::historyKeystrokesReceived, this,
-            [this](quint32 streamId, const QString &day, const QList<HistoryKeystrokeEntry> &entries) {
-                Q_UNUSED(day)
-                if (streamId != m_primaryStreamId) {
-                    return;
-                }
-                m_keystrokeEntries = entries;
-                m_keystrokesLoaded = true;
-                rebuildKeyloggerTable();
-                // utils/Keystream.qml's two distinct messages: "disabled"
-                // isn't a state KikiHost reports (there's no per-device
-                // keylogger on/off flag in the protocol -- it's always on),
-                // so the only real distinction left is "no data yet" vs.
-                // "server confirmed nothing today".
-                m_keylogTicker->setText(
-                    entries.isEmpty() ? QStringLiteral("Keylogger nu a inregistrat nimic azi.")
-                                      : entries.last().text.left(200));
-            });
+
 
     m_refreshTimer = new QTimer(this);
     m_refreshTimer->setInterval(30000);
@@ -686,6 +629,8 @@ void DeviceDetailView::switchSubTab(int index)
     } else if (index == 3) {
         page = m_keyloggerPage;
     }
+    // The Keylogger's Selector only lives while its tab is shown.
+    m_keyloggerPage->setActive(page == m_keyloggerPage);
     m_leftStack->setCurrentWidget(page);
     const bool videoTab = page == m_programsPage || page == m_monitorsPage;
     // SessionInfo (Web pages/Programs) belongs to Windows.qml (Programs/
@@ -1000,10 +945,9 @@ void DeviceDetailView::showDevice(quint32 sessionKey, const QString &displayName
     refreshWindowPreviews(windowPreviews);
 
     m_statusUser->hide();
-    m_keystrokeEntries.clear();
-    m_keystrokesLoaded = false;
-    rebuildKeyloggerTable();
-    m_keylogTicker->setText(QStringLiteral("Se incarca..."));
+    m_displayName = displayName;
+    m_keylogTicker->clear();
+    m_keyloggerPage->setSession(sessionKey, primaryStreamId, displayName, m_identity);
     m_lastPrograms.clear();
     m_lastWebPages.clear();
     m_scopes = CategoryScopes();
@@ -1241,7 +1185,6 @@ void DeviceDetailView::refreshStats()
     const QString today = QDate::currentDate().toString(QStringLiteral("yyyyMMdd"));
     m_connection.requestRunningApplications(m_primaryStreamId, today);
     m_connection.requestWebPages(m_primaryStreamId, today);
-    m_connection.requestKeystrokes(m_primaryStreamId, today);
     m_connection.requestCategories(m_primaryStreamId);
 }
 
@@ -1285,78 +1228,19 @@ void DeviceDetailView::onCategorizationRequested(const QString &resource, bool w
     updateInfoPanel();
 }
 
-void DeviceDetailView::rebuildKeyloggerTable()
+void DeviceDetailView::setSessionIdentity(const SessionIdentity &identity)
 {
-    // Groups consecutive keystrokes in the same window into one row (same
-    // "Pressing period" grouping HistoryView's keylogger export table
-    // uses), a >2 minute gap starts a new row even for the same window.
-    m_keyloggerTable->setRowCount(0);
-    if (!m_keystrokesLoaded) {
-        m_keyloggerTable->setRowCount(1);
-        auto *loading = new QTableWidgetItem(QStringLiteral("Se incarca..."));
-        loading->setFlags(loading->flags() & ~Qt::ItemIsEditable);
-        m_keyloggerTable->setItem(0, 0, loading);
-        m_keyloggerTable->setSpan(0, 0, 1, 4);
-        return;
+    m_identity = identity;
+    if (m_sessionKey != 0) {
+        m_keyloggerPage->setSession(m_sessionKey, m_primaryStreamId, m_displayName, identity);
     }
-    if (m_keystrokeEntries.isEmpty()) {
-        m_keyloggerTable->setRowCount(1);
-        auto *empty = new QTableWidgetItem(QStringLiteral("Keylogger nu a inregistrat nimic azi."));
-        empty->setFlags(empty->flags() & ~Qt::ItemIsEditable);
-        m_keyloggerTable->setItem(0, 0, empty);
-        m_keyloggerTable->setSpan(0, 0, 1, 4);
-        return;
-    }
-
-    constexpr qint64 kGroupGapMs = 2 * 60 * 1000;
-    struct Group { qint64 startMs; qint64 endMs; QString windowTitle; QString text; };
-    QList<Group> groups;
-    for (const HistoryKeystrokeEntry &entry : std::as_const(m_keystrokeEntries)) {
-        if (!groups.isEmpty() && groups.last().windowTitle == entry.windowTitle
-            && entry.timestampMs - groups.last().endMs <= kGroupGapMs) {
-            groups.last().endMs = entry.timestampMs;
-            groups.last().text += entry.text;
-        } else {
-            groups.append({entry.timestampMs, entry.timestampMs, entry.windowTitle, entry.text});
-        }
-    }
-
-    m_keyloggerTable->setRowCount(groups.size());
-    for (int row = 0; row < groups.size(); ++row) {
-        const Group &group = groups.at(row);
-        const QDateTime start = QDateTime::fromMSecsSinceEpoch(group.startMs);
-        const QDateTime end = QDateTime::fromMSecsSinceEpoch(group.endMs);
-        auto *dateItem = new QTableWidgetItem(start.toString(QStringLiteral("dd.MM.yyyy")));
-        auto *periodItem = new QTableWidgetItem(QStringLiteral("%1 - %2").arg(
-            start.toString(QStringLiteral("HH:mm:ss")), end.toString(QStringLiteral("HH:mm:ss"))));
-        auto *windowItem = new QTableWidgetItem(group.windowTitle);
-        auto *textItem = new QTableWidgetItem(group.text);
-        for (QTableWidgetItem *item : {dateItem, periodItem, windowItem, textItem}) {
-            item->setFlags(item->flags() & ~Qt::ItemIsEditable);
-        }
-        m_keyloggerTable->setItem(row, 0, dateItem);
-        m_keyloggerTable->setItem(row, 1, periodItem);
-        m_keyloggerTable->setItem(row, 2, windowItem);
-        m_keyloggerTable->setItem(row, 3, textItem);
-    }
-    filterKeyloggerTable();
 }
 
-void DeviceDetailView::filterKeyloggerTable()
+void DeviceDetailView::setLiveKeyEvents(const QList<KeyEvent> &events)
 {
-    const QString needle = m_keyloggerSearch ? m_keyloggerSearch->text().trimmed() : QString();
-    for (int row = 0; row < m_keyloggerTable->rowCount(); ++row) {
-        if (needle.isEmpty()) {
-            m_keyloggerTable->setRowHidden(row, false);
-            continue;
-        }
-        const QTableWidgetItem *windowItem = m_keyloggerTable->item(row, 2);
-        const QTableWidgetItem *textItem = m_keyloggerTable->item(row, 3);
-        const bool matches =
-            (windowItem && windowItem->text().contains(needle, Qt::CaseInsensitive))
-            || (textItem && textItem->text().contains(needle, Qt::CaseInsensitive));
-        m_keyloggerTable->setRowHidden(row, !matches);
-    }
+    // Keystream.qml: Translator { input: keyboardEvents } -- the QML path,
+    // nothing cut, each event's own key name.
+    m_keylogTicker->setText(Keylogger::translate(events, false, false, false));
 }
 
 bool DeviceDetailView::eventFilter(QObject *watched, QEvent *event)

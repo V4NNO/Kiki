@@ -8,7 +8,11 @@
 namespace {
 QPixmap acAsset(const QString &path)
 {
-    return path.isEmpty() ? QPixmap() : QPixmap(QStringLiteral(":/activeCell/") + path);
+    if (path.isEmpty()) {
+        return QPixmap();
+    }
+    // A full resource path is taken as is (the keylogger toolbar's icons).
+    return QPixmap(path.startsWith(QStringLiteral(":/")) ? path : QStringLiteral(":/activeCell/") + path);
 }
 
 // A horizontal 3-slice of a BorderImage: fixed-width left/right caps, the
@@ -51,6 +55,15 @@ MultiSwitch::MultiSwitch(QWidget *parent)
 void MultiSwitch::addTab(const QString &text, const QString &onIcon, const QString &offIcon, bool selectable)
 {
     m_tabs.append({text, acAsset(onIcon), acAsset(offIcon), selectable});
+    updateGeometry();
+    update();
+}
+
+void MultiSwitch::clear()
+{
+    m_tabs.clear();
+    m_current = 0;
+    m_hover = -1;
     updateGeometry();
     update();
 }

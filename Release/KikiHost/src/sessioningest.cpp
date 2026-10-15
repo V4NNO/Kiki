@@ -202,6 +202,10 @@ void SessionIngest::processMessage(const ViewerProtocol::Header &header, const Q
         const QJsonDocument document = QJsonDocument::fromJson(payload, &parseError);
         if (parseError.error == QJsonParseError::NoError && document.isObject()) {
             const QJsonObject object = document.object();
+            if (object.contains(QStringLiteral("events"))) {
+                emit keyEventsReceived(m_sessionId, object.value(QStringLiteral("events")).toArray());
+                break;
+            }
             emit keystrokeReceived(m_sessionId, object.value(QStringLiteral("windowTitle")).toString(),
                                    object.value(QStringLiteral("text")).toString(),
                                    static_cast<qint64>(object.value(QStringLiteral("beginMs")).toDouble()),

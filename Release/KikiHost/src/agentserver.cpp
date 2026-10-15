@@ -183,6 +183,15 @@ void AgentServer::broadcastMetadata(quint32 streamId, const QString &application
     }
 }
 
+void AgentServer::broadcastKeyEvents(quint32 streamId, const QJsonArray &events)
+{
+    for (AgentConnection *connection : std::as_const(m_connections)) {
+        if (connection->isAuthenticated()) {
+            connection->pushKeyEvents(streamId, events);
+        }
+    }
+}
+
 void AgentServer::broadcastStreamClosed(quint32 streamId)
 {
     m_latestFrames.remove(streamId);

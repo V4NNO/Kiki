@@ -4,6 +4,7 @@
 #include <QSet>
 #include <QWidget>
 
+#include "keyloggerpage.h"
 #include "viewerconnection.h" // HistoryActivitySample / HistoryAppSegment
 
 #include <QList>
@@ -95,6 +96,11 @@ public:
     // Updates just the header caption -- used after a rename (see
     // renameRequested()) without re-running the full showDevice() reset.
     void setDisplayName(const QString &displayName);
+    // The selected session's marker (userDomain / userName / computerName).
+    void setSessionIdentity(const SessionIdentity &identity);
+    // Session.keyboardEvents: what the session has typed live -- the
+    // keystream under Monitors / Programs.
+    void setLiveKeyEvents(const QList<KeyEvent> &events);
 
 signals:
     void backRequested();
@@ -102,6 +108,9 @@ signals:
     // for this device, today. MainWindow wires this to showHistoryPage() +
     // HistoryView::openForDevice().
     void goToHistoryRequested(quint32 sessionKey);
+    // The Keylogger chart's GoToHistoryDialog: History for that interval.
+    void historyIntervalRequested(quint32 sessionKey, const QDateTime &begin, const QDateTime &end,
+                                  qint64 timeStepMs);
     // CategorizationButton's employee-rename equivalent (dblclick on the
     // caption in the real app). There's no persistent "employee" entity on
     // the backend -- sessionUsername is just whatever Windows reports for
@@ -129,8 +138,6 @@ private:
     // and CategorizationPanel History uses.
     void updateInfoPanel();
     void onCategorizationRequested(const QString &resource, bool webPage);
-    void rebuildKeyloggerTable();
-    void filterKeyloggerTable();
     void updateVideoGeometry();
     QString cellStatusKind() const;
     bool showsVideo() const;
@@ -213,29 +220,14 @@ private:
     void saveViolationsState() const;
     QList<MonitorWidget *> m_currentWindowPreviews;
 
-    // keylogger/Table.qml equivalent: Date/Pressing period/Window/Keystrokes
-    // columns (no separate Application column -- HistoryKeystrokeEntry
-    // doesn't carry one, see the same gap noted in HistoryView), grouped
-    // into contiguous typing sessions the same way HistoryView's keylogger
-    // export table does. keylogger/Toolbar.qml equivalent: a search box
-    // (real filtering, matches window title/text) and a "hide system keys"
-    // checkbox (inert -- we don't tag which characters are "system" keys,
-    // see comment at its construction).
-    QTableWidget *m_keyloggerTable = nullptr;
-    QLineEdit *m_keyloggerSearch = nullptr;
-    QList<HistoryKeystrokeEntry> m_keystrokeEntries;
-    // Compact live keylog line under the video on Monitors/Programs --
-    // matches the real viewer's Windows.qml, which has this same ticker
-    // (`keylogger` BorderImage) under both those tabs, separate from the
-    // full log on the Keylogger tab. Hidden while the Keylogger tab itself
-    // is open (see switchSubTab).
+    // trackerQuadratorActiveCell/Keylogger.qml: the Keylogger tab.
+    KeyloggerPage *m_keyloggerPage = nullptr;
+    // Windows.qml's keylogger BorderImage under Monitors / Programs: a
+    // Keystream (Translator over Session.keyboardEvents), PlainText, no
+    // wrap, clipped, right-aligned.
     QLabel *m_keylogTicker = nullptr;
-    QWidget *m_keyloggerPage = nullptr;
-    // Distinguishes "haven't heard back from the server yet" (show a
-    // loading message) from "server confirmed there's nothing today" (show
-    // the real empty message) -- matches keylogger/Chart.qml's spinner vs.
-    // actual-empty distinction, reset on every device switch.
-    bool m_keystrokesLoaded = false;
+    SessionIdentity m_identity;
+    QString m_displayName;
 
     // Windows.qml: SessionInfo is width/3 - 85 wide, right of the video.
     // The StatusUser box sits above it, so both share this right column.

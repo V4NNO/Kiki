@@ -7,6 +7,7 @@
 #include <QElapsedTimer>
 #include <QHash>
 #include <QImage>
+#include <QJsonArray>
 #include <QJsonObject>
 #include <QList>
 #include <QObject>
@@ -53,6 +54,8 @@ public:
     // (which, for a WindowListCapture window stream, never happens on its
     // own once it's backgrounded -- see SessionManager::onStreamClosed).
     void pushStreamClosed(quint32 streamId);
+    // MessageType::KeyEvents: the events in the compact wire form.
+    void pushKeyEvents(quint32 streamId, const QJsonArray &events);
     void sendGoodbyeAndClose();
 
     // Optional; when unset, HistoryQuery requests just get an error JSON
@@ -166,6 +169,8 @@ private:
     // True once the viewer sent SelectStreams: from then on only selected
     // streams are sent, each at its own rate.
     bool m_selectionActive = false;
+    // The viewer understands MessageType::KeyEvents (live keyboard events).
+    bool m_keyEventsCapable = false;
     QElapsedTimer m_pacingClock;
     QTimer m_pacingTimer;
     QList<MonitorInfo> m_monitors;

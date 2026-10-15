@@ -31,6 +31,16 @@ qt_add_executable(KikiViewer WIN32
     src/historyview.h
     src/historysegmentstore.cpp
     src/historysegmentstore.h
+    src/savedialog.cpp
+    src/savedialog.h
+    src/keyloggertable.cpp
+    src/keyloggertable.h
+    src/keyloggerchart.cpp
+    src/keyloggerchart.h
+    src/keyloggermodel.cpp
+    src/keyloggermodel.h
+    src/keyloggerpage.cpp
+    src/keyloggerpage.h
     src/historyvideoexport.cpp
     src/historyvideoexport.h
     src/webmwriter.cpp

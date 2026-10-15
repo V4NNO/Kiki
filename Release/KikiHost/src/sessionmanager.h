@@ -6,6 +6,7 @@
 #include "sessioningest.h"
 
 #include <QHash>
+#include <QJsonArray>
 #include <QObject>
 #include <QTimer>
 
@@ -52,6 +53,7 @@ private slots:
                            double idleSeconds, bool screensaver);
     void onKeystrokeReceived(quint32 sessionId, const QString &windowTitle, const QString &text,
                              qint64 beginMs, const QString &application);
+    void onKeyEventsReceived(quint32 sessionId, const QJsonArray &events);
     // See MessageType::StreamClosed / SessionIngest::streamClosed.
     void onStreamClosed(quint32 sessionId, quint32 localStreamId);
     void onIngestDisconnected(quint32 sessionId);
@@ -60,6 +62,7 @@ private slots:
 private:
     struct SessionEntry {
         QString username;
+        QString domain; // WTSDomainName
         QString state;
         bool ownProcessFallback = false;
 #ifdef Q_OS_WIN

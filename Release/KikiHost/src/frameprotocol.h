@@ -64,7 +64,14 @@ enum class MessageType : quint16 {
     // stream left out (or fps <= 0) is not sent at all. Until a viewer
     // sends its first one, every stream is pushed as it changes (old
     // viewers keep working).
-    SelectStreams = 15
+    SelectStreams = 15,
+    // Host -> viewer, unsolicited: the keyboard events a session just
+    // produced (node::protocol::keylogger::KeyboardEvents), on one of that
+    // session's monitor streams -- the live keystream under Monitors /
+    // Programs (Session.keyboardEvents). JSON {"strings":[...],
+    // "events":[[moment, type, code, text, app, title, site], ...]} with the
+    // last three as indexes into strings.
+    KeyEvents = 16
 };
 
 // The payload of a MessageType::HistorySegment message.

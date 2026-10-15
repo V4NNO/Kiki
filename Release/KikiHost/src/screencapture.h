@@ -18,6 +18,9 @@ struct MonitorInfo {
     quint32 sessionId = 0;
     QString sessionUsername;
     QString sessionState;
+    // The session marker's other two parts (userDomain / computerName).
+    QString sessionDomain;
+    QString computerName;
     // True for a KikiSubService's ActiveWindowCapture live preview
     // stream (see SubServiceHost::kActiveWindowStreamId) -- not a real
     // monitor: excluded from history recording and from "this device's

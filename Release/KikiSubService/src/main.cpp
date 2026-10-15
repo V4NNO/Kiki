@@ -177,10 +177,11 @@ int main(int argc, char *argv[])
     diagTimer.start();
     QObject::connect(&activityProbe, &ActivityProbe::activityChanged, &application,
                      [currentForeground, currentIdleText, currentIdleSeconds, currentScreensaver,
-                      pushCurrentMetadata](const ForegroundObservation &foreground,
+                      pushCurrentMetadata, &keylogger](const ForegroundObservation &foreground,
                                            const QString &idleText, double idleSeconds,
                                            bool screensaver) {
                          *currentForeground = foreground;
+                         keylogger.setForegroundUrl(foreground.window, foreground.url);
                          *currentIdleText = idleText;
                          *currentIdleSeconds = idleSeconds;
                          *currentScreensaver = screensaver;
@@ -188,7 +189,7 @@ int main(int argc, char *argv[])
                      });
     QObject::connect(&activityProbe, &ActivityProbe::logMessage, &application,
                      [](const QString &message) { printLine(message); });
-    QObject::connect(&keylogger, &Keylogger::textFlushed, &host, &SubServiceHost::pushKeystroke);
+    QObject::connect(&keylogger, &Keylogger::eventsFlushed, &host, &SubServiceHost::pushKeyEvents);
 
     // Samples input-activity intensity for the History "Activity" bar on
     // the same cadence HistoryRecorder samples frames at (10s), independent

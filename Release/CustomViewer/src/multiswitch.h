@@ -19,6 +19,9 @@ public:
     void addTab(const QString &text, const QString &onIcon = QString(), const QString &offIcon = QString(),
                 bool selectable = true);
     int currentIndex() const { return m_current; }
+    int count() const { return int(m_tabs.size()); }
+    // Drops every item (a model replaced as a whole).
+    void clear();
     void setCurrentIndex(int index);
     // implicitTextMargin: space on each side of an item's label (8; 4 in the
     // speed choice).
