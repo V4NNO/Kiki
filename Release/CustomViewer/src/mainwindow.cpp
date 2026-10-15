@@ -1,4 +1,5 @@
 #include "mainwindow.h"
+#include "historysegmentstore.h"
 
 #include "devicedetailview.h"
 #include "devicetilewidget.h"
@@ -575,6 +576,16 @@ void MainWindow::openNewWindow()
 
 void MainWindow::closeEvent(QCloseEvent *event)
 {
+    // WindowContent.qml onWindowClosing: a History video still being saved
+    // in this window is lost -- ask first.
+    if (m_historyView && m_historyView->isVideoSaving()
+        && QMessageBox::question(this, QStringLiteral("Video saver"),
+                                 QStringLiteral("Video saving in progress. Are you sure you want to close this "
+                                                "window and lost all progress?"))
+               != QMessageBox::Yes) {
+        event->ignore();
+        return;
+    }
     // An extra window closed while another stays open is gone for good; the
     // last one standing (the viewer quitting) is reopened next time.
     if (m_windowIndex > 0) {
@@ -611,6 +622,7 @@ MainWindow::MainWindow(int windowIndex, QWidget *parent)
     const QString marker = pendingCacheClearMarkerPath();
     if (QFile::exists(marker)) {
         QSettings().clear();
+        QDir(HistorySegmentStore::cacheDirectory()).removeRecursively();
         QFile::remove(marker);
     }
 
@@ -642,6 +654,18 @@ MainWindow::MainWindow(int windowIndex, QWidget *parent)
             this, &MainWindow::updateFrame);
     connect(&m_connection, &ViewerConnection::metadataChanged,
             this, &MainWindow::updateMetadata);
+    connect(&m_connection, &ViewerConnection::activeUrlChanged, this, [this](quint32 streamId, const QString &url) {
+        const quint32 deviceKey = m_streamDeviceKey.value(streamId, 0);
+        if (deviceKey != 0 && m_devicePrimaryStream.value(deviceKey) == streamId
+            && m_deviceUrl.value(deviceKey) != url) {
+            m_deviceUrl.insert(deviceKey, url);
+            refreshTileActivity(deviceKey);
+        }
+    });
+    m_noDataTimer = new QTimer(this);
+    m_noDataTimer->setInterval(5000);
+    connect(m_noDataTimer, &QTimer::timeout, this, &MainWindow::refreshNoData);
+    m_noDataTimer->start();
     connect(&m_connection, &ViewerConnection::protocolError,
             this, &MainWindow::showProtocolError);
     // A (re)authenticated session announces every stream again; until it
@@ -661,6 +685,13 @@ MainWindow::MainWindow(int windowIndex, QWidget *parent)
                 if (deviceKey != 0) {
                     m_deviceEmployeeCategories.insert(deviceKey, categories);
                     refreshTileActivity(deviceKey);
+                }
+            });
+    connect(&m_connection, &ViewerConnection::historyDepartmentCategoriesReceived, this,
+            [this](quint32 streamId, const QList<HistoryDepartmentCategories> &departments) {
+                const quint32 deviceKey = m_streamDeviceKey.value(streamId, 0);
+                if (deviceKey != 0) {
+                    m_deviceDepartmentCategories.insert(deviceKey, departments);
                 }
             });
     auto *categoryRefresh = new QTimer(this);
@@ -981,6 +1012,10 @@ void MainWindow::addMonitor(quint32 streamId, const QString &name, const QSize &
         return;
     }
     const quint32 deviceKey = sessionId != 0 ? sessionId : streamId;
+    // The no-data clock starts when the device shows up.
+    if (!m_deviceLastDataMs.contains(deviceKey)) {
+        m_deviceLastDataMs.insert(deviceKey, QDateTime::currentMSecsSinceEpoch());
+    }
     // Stamp when this device's connection state last changed, for the
     // "online from / offline since <date>" line in the employee picker
     // (employeePicker/Header.qml's getTimestampText).
@@ -1139,6 +1174,10 @@ void MainWindow::updateMetadata(quint32 streamId, const QString &application,
 {
     const quint32 deviceKey = m_streamDeviceKey.value(streamId, 0);
     if (deviceKey != 0) {
+        m_deviceLastDataMs.insert(deviceKey, QDateTime::currentMSecsSinceEpoch());
+        if (m_deviceNoData.contains(deviceKey)) {
+            refreshNoData();
+        }
         // Every monitor's metadata carries the same active-monitor stream;
         // update the tiles' "Show active monitor" target when it moves.
         if (m_deviceActiveMonitorStream.value(deviceKey) != activeMonitorStreamId) {
@@ -1153,11 +1192,36 @@ void MainWindow::updateMetadata(quint32 streamId, const QString &application,
     }
 }
 
-QString MainWindow::deviceCategory(quint32 deviceKey, const QString &application) const
+QString MainWindow::deviceCategory(quint32 deviceKey, const QString &resource, bool webPage) const
 {
-    // The employee's own rule wins over the global one (same as History).
-    const QHash<QString, QString> employee = m_deviceEmployeeCategories.value(deviceKey);
-    return employee.value(application, m_globalCategories.value(application));
+    // The same scope resolution as History: the employee's own rule, else
+    // the nearest department's, else the organization's.
+    CategoryScopes scopes;
+    scopes.organization = m_globalCategories;
+    scopes.departments = m_deviceDepartmentCategories.value(deviceKey);
+    scopes.employee = m_deviceEmployeeCategories.value(deviceKey);
+    return scopes.resolve(resource, webPage);
+}
+
+void MainWindow::refreshNoData()
+{
+    constexpr qint64 kNoDataGapMs = 35 * 1000;
+    const qint64 now = QDateTime::currentMSecsSinceEpoch();
+    QSet<quint32> noData;
+    for (auto it = m_devicePrimaryStream.cbegin(); it != m_devicePrimaryStream.cend(); ++it) {
+        const qint64 last = m_deviceLastDataMs.value(it.key(), 0);
+        if (last > 0 && now - last > kNoDataGapMs) {
+            noData.insert(it.key());
+        }
+    }
+    if (noData == m_deviceNoData) {
+        return;
+    }
+    m_deviceNoData = noData;
+    for (DeviceTileWidget *tile : std::as_const(m_deviceTiles)) {
+        tile->setNoData(m_deviceNoData.contains(tile->sessionKey()));
+    }
+    m_deviceDetailView->setNoData(m_deviceNoData.contains(m_openDeviceKey));
 }
 
 void MainWindow::refreshTileActivity(quint32 deviceKey)
@@ -1168,6 +1232,8 @@ void MainWindow::refreshTileActivity(quint32 deviceKey)
     for (DeviceTileWidget *tile : std::as_const(m_deviceTiles)) {
         if (tile->sessionKey() == deviceKey) {
             tile->setActivity(activity.first, activity.second, saver, category);
+            const QString url = m_deviceUrl.value(deviceKey);
+            tile->setActiveWebPage(url, url.isEmpty() ? QString() : deviceCategory(deviceKey, url, true));
         }
     }
     if (m_openDeviceKey == deviceKey) {
@@ -1262,6 +1328,13 @@ void MainWindow::resetLiveStreams()
     m_deviceSessionState.clear();
     m_deviceActivity.clear();
     m_deviceSaver.clear();
+    m_deviceUrl.clear();
+    m_deviceLastDataMs.clear();
+    m_deviceNoData.clear();
+    for (DeviceTileWidget *tile : std::as_const(m_deviceTiles)) {
+        tile->setNoData(false);
+    }
+    m_deviceDetailView->setNoData(false);
     m_selectedStream = 0;
     // The user names stay: a cell keeps showing who it is for while the
     // device is away.
@@ -1828,6 +1901,7 @@ void MainWindow::openDeviceDetail(quint32 sessionKey)
                                      m_deviceActiveWindowStream.value(sessionKey, 0),
                                      !m_deviceWindowStreams.value(sessionKey).isEmpty());
     m_deviceDetailView->setNodeOnline(m_nodeOnline);
+    m_deviceDetailView->setNoData(m_deviceNoData.contains(m_openDeviceKey));
     m_deviceDetailView->setActivityState(
         m_deviceActivity.value(sessionKey).second.startsWith(QStringLiteral("Locked ")),
         m_deviceSaver.value(sessionKey));
@@ -2315,6 +2389,8 @@ void MainWindow::buildInterface()
     contentLayout->addLayout(contentRow, 1);
 
     m_historyView = new HistoryView(m_connection, root);
+    // The History tabs (shared by every window) and this window's current one.
+    m_historyView->restoreTabs(windowKey(QStringLiteral("history/currentTab")));
     connect(m_historyView, &HistoryView::panelFullChanged, this, [this](bool full) {
         m_historyPanelFull = full;
         updateTopPanel();
@@ -2804,6 +2880,7 @@ void MainWindow::relayoutCurrentTab()
             });
             connect(tile, &DeviceTileWidget::streamsChanged, this, &MainWindow::scheduleSubscriptionRefresh);
             tile->setNodeOnline(m_nodeOnline);
+            tile->setNoData(m_deviceNoData.contains(entry.deviceKey));
             tile->setAvailableStreams(m_deviceMonitorStreams.value(entry.deviceKey),
                                       m_deviceActiveMonitorStream.value(entry.deviceKey, 0),
                                       m_deviceActiveWindowStream.value(entry.deviceKey, 0),
@@ -2820,9 +2897,19 @@ void MainWindow::relayoutCurrentTab()
             const QPair<QString, QString> activity = m_deviceActivity.value(entry.deviceKey);
             tile->setActivity(activity.first, activity.second, m_deviceSaver.value(entry.deviceKey),
                               deviceCategory(entry.deviceKey, activity.first));
+            const QString url = m_deviceUrl.value(entry.deviceKey);
+            tile->setActiveWebPage(url, url.isEmpty() ? QString() : deviceCategory(entry.deviceKey, url, true));
         }
         tile->setParent(m_monitorContainer);
         tile->setGeometry(rect);
+        {
+            // fullCell.occupiedColumns: the distinct grid columns it spans.
+            QSet<int> columns;
+            for (int index : cell.indices) {
+                columns.insert(index % columns4View);
+            }
+            tile->setOccupiedColumns(qMax(1, static_cast<int>(columns.size())));
+        }
         tile->setDropHighlight(false);
         tile->show();
         m_cellTargets.insert(tile, cell.target);
@@ -3207,8 +3294,11 @@ void MainWindow::loadTabs()
         tab.title = object.value(QStringLiteral("title")).toString(QStringLiteral("New tab"));
         tab.gridLayout = object.value(QStringLiteral("gridLayout")).toString(QStringLiteral("simple"));
         tab.gridLayoutVertical = object.value(QStringLiteral("gridLayoutVertical")).toBool();
-        tab.gridColumns = qMax(1, object.value(QStringLiteral("gridColumns")).toInt(2));
-        tab.gridRows = qMax(1, object.value(QStringLiteral("gridRows")).toInt(2));
+        // TrackerQuadrator.qml load(): gridRows = data.gridRows || 2,
+        // gridColumns = max(data.gridColumns || 0, 2).
+        tab.gridColumns = qMax(2, object.value(QStringLiteral("gridColumns")).toInt(0));
+        const int rows = object.value(QStringLiteral("gridRows")).toInt(0);
+        tab.gridRows = rows > 0 ? rows : 2;
         for (const QJsonValue &cellValue : object.value(QStringLiteral("cells")).toArray()) {
             const QJsonObject cell = cellValue.toObject();
             if (cell.isEmpty()) {

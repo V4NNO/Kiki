@@ -632,7 +632,15 @@ DeviceDetailView::DeviceDetailView(ViewerConnection &connection, QWidget *parent
                 if (streamId != m_primaryStreamId) {
                     return;
                 }
-                m_categories = categories;
+                m_scopes.organization = categories;
+                updateInfoPanel();
+            });
+    connect(&m_connection, &ViewerConnection::historyDepartmentCategoriesReceived, this,
+            [this](quint32 streamId, const QList<HistoryDepartmentCategories> &departments) {
+                if (streamId != m_primaryStreamId) {
+                    return;
+                }
+                m_scopes.departments = departments;
                 updateInfoPanel();
             });
     connect(&m_connection, &ViewerConnection::historyEmployeeCategoriesReceived, this,
@@ -640,7 +648,7 @@ DeviceDetailView::DeviceDetailView(ViewerConnection &connection, QWidget *parent
                 if (streamId != m_primaryStreamId) {
                     return;
                 }
-                m_employeeCategories = categories;
+                m_scopes.employee = categories;
                 updateInfoPanel();
             });
     connect(&m_connection, &ViewerConnection::historyKeystrokesReceived, this,
@@ -998,7 +1006,7 @@ void DeviceDetailView::showDevice(quint32 sessionKey, const QString &displayName
     m_keylogTicker->setText(QStringLiteral("Se incarca..."));
     m_lastPrograms.clear();
     m_lastWebPages.clear();
-    m_employeeCategories.clear();
+    m_scopes = CategoryScopes();
     m_activeApplication.clear();
     updateInfoPanel();
     // Reset the Violations chart to a fresh "now"-anchored window.
@@ -1046,6 +1054,14 @@ void DeviceDetailView::setActivityState(bool locked, bool saver)
     }
 }
 
+void DeviceDetailView::setNoData(bool noData)
+{
+    if (m_noData != noData) {
+        m_noData = noData;
+        updateMonitorStatusIcon();
+    }
+}
+
 QString DeviceDetailView::cellStatusKind() const
 {
     // The cell's StatusIcon.kind (same order as DeviceTileWidget's).
@@ -1059,6 +1075,9 @@ QString DeviceDetailView::cellStatusKind() const
     if (m_sessionState == QStringLiteral("idle") || m_sessionState == QStringLiteral("other")
         || m_currentMonitors.isEmpty()) {
         return QStringLiteral("noSessions");
+    }
+    if (m_noData) {
+        return QStringLiteral("noData");
     }
     if (m_locked) {
         return QStringLiteral("lock");
@@ -1230,50 +1249,35 @@ void DeviceDetailView::updateInfoPanel()
 {
     // Today's totals per resource, each resource's share of them; the
     // application currently in front is the active one.
-    QHash<QString, QString> categories = m_categories;
-    for (auto it = m_employeeCategories.cbegin(); it != m_employeeCategories.cend(); ++it) {
-        categories.insert(it.key(), it.value());
-    }
-    const auto build = [&](const QList<HistoryAppUsage> &entries, bool matchActive) {
+    const auto build = [&](const QList<HistoryAppUsage> &entries, bool matchActive, bool webPages) {
         qint64 totalMs = 0;
         for (const HistoryAppUsage &entry : entries) {
             totalMs += entry.totalMs;
         }
         QList<HistoryInfoPanel::Item> items;
         for (const HistoryAppUsage &entry : entries) {
+            // A web page by its site, a program by its executable; the
+            // nearest scope with a rule decides.
+            const QString resolved = m_scopes.resolve(entry.application, webPages);
             items.append({entry.application,
                           entry.title.isEmpty() ? QStringLiteral("No title") : entry.title,
                           100.0 * entry.totalMs / qMax<qint64>(1, totalMs),
-                          categories.value(entry.application, entry.category),
-                          matchActive && entry.application == m_activeApplication});
+                          resolved.isEmpty() ? QStringLiteral("none") : resolved,
+                          matchActive && entry.application == m_activeApplication, webPages});
         }
         std::sort(items.begin(), items.end(), [](const HistoryInfoPanel::Item &a, const HistoryInfoPanel::Item &b) {
             return a.percent > b.percent;
         });
         return items;
     };
-    m_infoPanel->setItems(build(m_lastWebPages, false), build(m_lastPrograms, true));
+    m_infoPanel->setItems(build(m_lastWebPages, false, true), build(m_lastPrograms, true, false));
 }
 
-void DeviceDetailView::onCategorizationRequested(const QString &resource)
+void DeviceDetailView::onCategorizationRequested(const QString &resource, bool webPage)
 {
-    CategorizationDialog dialog(resource, m_categories.value(resource), m_employeeCategories.value(resource),
-                                m_nameLabel->text(), this);
-    dialog.move(mapToGlobal(rect().center()) - QPoint(dialog.width() / 2, dialog.height() / 2));
-    if (dialog.exec() != QDialog::Accepted) {
+    if (!runCategorizationDialog(this, m_connection, m_primaryStreamId, resource, webPage,
+                                 m_nameLabel->text(), m_scopes)) {
         return;
-    }
-    if (dialog.category() != m_categories.value(resource, QStringLiteral("none"))) {
-        m_categories[resource] = dialog.category();
-        m_connection.setAppCategory(m_primaryStreamId, resource, dialog.category());
-    }
-    if (dialog.employeeCategory() != m_employeeCategories.value(resource, QStringLiteral("none"))) {
-        if (dialog.employeeCategory() == QStringLiteral("none")) {
-            m_employeeCategories.remove(resource);
-        } else {
-            m_employeeCategories[resource] = dialog.employeeCategory();
-        }
-        m_connection.setAppCategory(m_primaryStreamId, resource, dialog.employeeCategory(), true);
     }
     if (m_violChartsModel) {
         m_violChartsModel->applicationsChanged();

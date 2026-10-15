@@ -363,6 +363,7 @@ void ViewerConnection::processJsonMessage(const ViewerProtocol::Header &header,
                          static_cast<quint32>(
                              object.value(QStringLiteral("activeMonitor")).toDouble()),
                          object.value(QStringLiteral("saver")).toBool());
+    emit activeUrlChanged(header.streamId, object.value(QStringLiteral("url")).toString());
 }
 
 void ViewerConnection::setStreamSubscriptions(const QHash<quint32, double> &fpsByStream)
@@ -514,6 +515,16 @@ void ViewerConnection::setAppCategory(quint32 streamId, const QString &applicati
         request.insert(QStringLiteral("scope"), QStringLiteral("employee"));
     }
     sendHistoryQuery(streamId, request);
+}
+
+void ViewerConnection::setDepartmentCategory(quint32 streamId, qint64 departmentId,
+                                             const QString &application, const QString &category)
+{
+    sendHistoryQuery(streamId, QJsonObject{{QStringLiteral("action"), QStringLiteral("setCategory")},
+                                           {QStringLiteral("application"), application},
+                                           {QStringLiteral("category"), category},
+                                           {QStringLiteral("scope"), QStringLiteral("department")},
+                                           {QStringLiteral("departmentId"), static_cast<double>(departmentId)}});
 }
 
 void ViewerConnection::requestKeystrokes(quint32 streamId, const QString &day)
@@ -675,7 +686,7 @@ void ViewerConnection::processHistoryQuery(const ViewerProtocol::Header &header,
             return result;
         };
         emit historySessionStatesReceived(header.streamId, object.value(QStringLiteral("day")).toString(),
-                                          ranges("online"), ranges("lock"), ranges("saver"));
+                                          ranges("online"), ranges("lock"), ranges("saver"), ranges("noData"));
     } else if (action == QStringLiteral("listActivity")) {
         QList<HistoryActivitySample> samples;
         for (const QJsonValue &value : object.value(QStringLiteral("samples")).toArray()) {
@@ -744,6 +755,20 @@ void ViewerConnection::processHistoryQuery(const ViewerProtocol::Header &header,
                               entry.value(QStringLiteral("category")).toString());
         }
         emit historyCategoriesReceived(header.streamId, categories);
+        QList<HistoryDepartmentCategories> departments;
+        for (const QJsonValue &value : object.value(QStringLiteral("departments")).toArray()) {
+            const QJsonObject department = value.toObject();
+            HistoryDepartmentCategories rules;
+            rules.id = static_cast<qint64>(department.value(QStringLiteral("id")).toDouble());
+            rules.name = department.value(QStringLiteral("name")).toString();
+            for (const QJsonValue &rule : department.value(QStringLiteral("categories")).toArray()) {
+                const QJsonObject entry = rule.toObject();
+                rules.categories.insert(entry.value(QStringLiteral("application")).toString(),
+                                        entry.value(QStringLiteral("category")).toString());
+            }
+            departments.append(rules);
+        }
+        emit historyDepartmentCategoriesReceived(header.streamId, departments);
         QHash<QString, QString> employeeCategories;
         for (const QJsonValue &value : object.value(QStringLiteral("employeeCategories")).toArray()) {
             const QJsonObject entry = value.toObject();
@@ -758,10 +783,13 @@ void ViewerConnection::processHistoryQuery(const ViewerProtocol::Header &header,
         QList<HistoryKeystrokeEntry> entries;
         for (const QJsonValue &value : object.value(QStringLiteral("entries")).toArray()) {
             const QJsonObject entry = value.toObject();
-            entries.append(HistoryKeystrokeEntry{
-                static_cast<qint64>(entry.value(QStringLiteral("timestampMs")).toDouble()),
-                entry.value(QStringLiteral("windowTitle")).toString(),
-                entry.value(QStringLiteral("text")).toString()});
+            HistoryKeystrokeEntry keystroke;
+            keystroke.timestampMs = static_cast<qint64>(entry.value(QStringLiteral("timestampMs")).toDouble());
+            keystroke.windowTitle = entry.value(QStringLiteral("windowTitle")).toString();
+            keystroke.text = entry.value(QStringLiteral("text")).toString();
+            keystroke.beginMs = static_cast<qint64>(entry.value(QStringLiteral("beginMs")).toDouble());
+            keystroke.application = entry.value(QStringLiteral("application")).toString();
+            entries.append(keystroke);
         }
         emit historyKeystrokesReceived(header.streamId, object.value(QStringLiteral("day")).toString(),
                                        entries);

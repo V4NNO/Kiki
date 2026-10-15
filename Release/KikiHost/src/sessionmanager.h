@@ -50,7 +50,8 @@ private slots:
                            const QString &idleText, int inputEvents, const QString &url,
                            quint32 activeMonitorLocalStreamId, const QString &windowTitle,
                            double idleSeconds, bool screensaver);
-    void onKeystrokeReceived(quint32 sessionId, const QString &windowTitle, const QString &text);
+    void onKeystrokeReceived(quint32 sessionId, const QString &windowTitle, const QString &text,
+                             qint64 beginMs, const QString &application);
     // See MessageType::StreamClosed / SessionIngest::streamClosed.
     void onStreamClosed(quint32 sessionId, quint32 localStreamId);
     void onIngestDisconnected(quint32 sessionId);

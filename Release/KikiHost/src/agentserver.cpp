@@ -130,7 +130,7 @@ void AgentServer::adoptConnection(QSslSocket *socket)
         self->setMonitors(m_monitors);
         for (auto it = m_latestMetadata.cbegin(); it != m_latestMetadata.cend(); ++it) {
             self->pushMetadata(it.key(), it->application, it->idleText,
-                               it->activeMonitorStreamId, it->saver);
+                               it->activeMonitorStreamId, it->saver, it->url);
         }
         for (auto it = m_latestFrames.cbegin(); it != m_latestFrames.cend(); ++it) {
             self->pushFrame(it.key(), it.value());
@@ -173,12 +173,12 @@ void AgentServer::broadcastFrame(quint32 streamId, const QImage &image)
 
 void AgentServer::broadcastMetadata(quint32 streamId, const QString &application,
                                     const QString &idleText, quint32 activeMonitorStreamId,
-                                    bool saver)
+                                    bool saver, const QString &url)
 {
-    m_latestMetadata.insert(streamId, {application, idleText, activeMonitorStreamId, saver});
+    m_latestMetadata.insert(streamId, {application, idleText, activeMonitorStreamId, saver, url});
     for (AgentConnection *connection : std::as_const(m_connections)) {
         if (connection->isAuthenticated()) {
-            connection->pushMetadata(streamId, application, idleText, activeMonitorStreamId, saver);
+            connection->pushMetadata(streamId, application, idleText, activeMonitorStreamId, saver, url);
         }
     }
 }

@@ -429,7 +429,7 @@ void AgentConnection::sendPending(quint32 streamId, StreamState &state)
 
 void AgentConnection::pushMetadata(quint32 streamId, const QString &application,
                                    const QString &idleText, quint32 activeMonitorStreamId,
-                                   bool saver)
+                                   bool saver, const QString &url)
 {
     if (!m_authenticated) {
         return;
@@ -439,7 +439,8 @@ void AgentConnection::pushMetadata(quint32 streamId, const QString &application,
                         {QStringLiteral("idle"), idleText},
                         {QStringLiteral("activeMonitor"),
                          static_cast<qint64>(activeMonitorStreamId)},
-                        {QStringLiteral("saver"), saver}});
+                        {QStringLiteral("saver"), saver},
+                        {QStringLiteral("url"), url}});
 }
 
 void AgentConnection::pushStreamClosed(quint32 streamId)
@@ -637,7 +638,8 @@ void AgentConnection::runHistoryQuery(quint32 monitorStreamId, const QJsonObject
                             {QStringLiteral("day"), day},
                             {QStringLiteral("online"), toArray(states.online)},
                             {QStringLiteral("lock"), toArray(states.lock)},
-                            {QStringLiteral("saver"), toArray(states.saver)}});
+                            {QStringLiteral("saver"), toArray(states.saver)},
+                            {QStringLiteral("noData"), toArray(states.noData)}});
     } else if (action == QStringLiteral("listAppSegments")) {
         QJsonArray array;
         for (const AppSegment &segment : m_historyRecorder->listAppSegments(monitorStreamId, rangeStart, rangeStop)) {
@@ -699,16 +701,35 @@ void AgentConnection::runHistoryQuery(quint32 monitorStreamId, const QJsonObject
             employeeArray.append(QJsonObject{{QStringLiteral("application"), entry.first},
                                              {QStringLiteral("category"), entry.second}});
         }
+        // The departments between the organization and the employee, root
+        // first, each with its own rules (CategorizationPanel.qml's rows).
+        QJsonArray departments;
+        for (const DepartmentRules &department : m_historyRecorder->departmentChain(username)) {
+            QJsonArray rules;
+            for (const auto &entry : department.categories) {
+                rules.append(QJsonObject{{QStringLiteral("application"), entry.first},
+                                         {QStringLiteral("category"), entry.second}});
+            }
+            departments.append(QJsonObject{{QStringLiteral("id"), static_cast<double>(department.id)},
+                                           {QStringLiteral("name"), department.name},
+                                           {QStringLiteral("categories"), rules}});
+        }
         sendJson(ViewerProtocol::MessageType::HistoryQuery, monitorStreamId,
                 QJsonObject{{QStringLiteral("action"), action},
                             {QStringLiteral("categories"), array},
-                            {QStringLiteral("employeeCategories"), employeeArray}});
+                            {QStringLiteral("employeeCategories"), employeeArray},
+                            {QStringLiteral("departments"), departments}});
     } else if (action == QStringLiteral("setCategory")) {
         const QString application = request.value(QStringLiteral("application")).toString();
         const QString category = request.value(QStringLiteral("category")).toString();
-        if (request.value(QStringLiteral("scope")).toString() == QStringLiteral("employee")) {
+        const QString scope = request.value(QStringLiteral("scope")).toString();
+        if (scope == QStringLiteral("employee")) {
             m_historyRecorder->setEmployeeCategory(m_historyRecorder->usernameForStream(monitorStreamId),
                                                    application, category);
+        } else if (scope == QStringLiteral("department")) {
+            m_historyRecorder->setDepartmentCategory(
+                static_cast<qint64>(request.value(QStringLiteral("departmentId")).toDouble()), application,
+                category);
         } else {
             m_historyRecorder->setCategory(application, category);
         }
@@ -728,7 +749,9 @@ void AgentConnection::runHistoryQuery(quint32 monitorStreamId, const QJsonObject
         for (const KeystrokeEntry &entry : m_historyRecorder->listKeystrokes(sessionId, rangeStart, rangeStop)) {
             array.append(QJsonObject{{QStringLiteral("timestampMs"), entry.timestampMs},
                                      {QStringLiteral("windowTitle"), entry.windowTitle},
-                                     {QStringLiteral("text"), entry.text}});
+                                     {QStringLiteral("text"), entry.text},
+                                     {QStringLiteral("beginMs"), entry.beginMs},
+                                     {QStringLiteral("application"), entry.application}});
         }
         sendJson(ViewerProtocol::MessageType::HistoryQuery, monitorStreamId,
                 QJsonObject{{QStringLiteral("action"), action},

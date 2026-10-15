@@ -1,6 +1,7 @@
 #pragma once
 
 #include "historysegmentstore.h"
+#include "historyvideoexport.h"
 #include "viewerconnection.h"
 
 #include <QIcon>
@@ -20,6 +21,7 @@
 #include <QWidget>
 
 class QComboBox;
+class QVariantAnimation;
 class QDateTimeEdit;
 class QDialog;
 class QEvent;
@@ -124,6 +126,7 @@ public:
         double percent = 0.0;
         QString category;
         bool active = false;
+        bool webPage = false; // a WebPages row (its text1 is a url)
     };
     explicit HistoryInfoPanel(QWidget *parent = nullptr);
     void setItems(const QList<Item> &webPages, const QList<Item> &programs);
@@ -132,12 +135,13 @@ public:
     void setInset(int inset);
 
 signals:
-    void categorizationRequested(const QString &resource);
+    void categorizationRequested(const QString &resource, bool webPage);
 
 protected:
     void paintEvent(QPaintEvent *event) override;
     void mouseMoveEvent(QMouseEvent *event) override;
     void mousePressEvent(QMouseEvent *event) override;
+    void mouseReleaseEvent(QMouseEvent *event) override;
     void leaveEvent(QEvent *event) override;
     void resizeEvent(QResizeEvent *event) override;
 
@@ -152,6 +156,19 @@ private:
     };
     void relayout();
     QRect categorizationRect(const Row &row) const;
+    // TriLine.qml's two TextWithToolTips: the title (text3, a click opens
+    // the categorization) and the url / executable under it (text1: a web
+    // page's opens in the browser, a program's opens the categorization).
+    // Each rect is as wide as its text actually is.
+    struct TextRects {
+        QRect title;
+        QRect resource;
+        QRect titleLine;    // the whole line, for drawing
+        QRect resourceLine;
+    };
+    TextRects textRects(const Row &row) const;
+    enum class Part { None, Title, Resource, Categorize };
+    Part partAt(const QPoint &pos, int *row) const;
 
     QList<Item> m_webPages;
     QList<Item> m_programs;
@@ -159,25 +176,33 @@ private:
     QList<Title> m_titles;
     QList<int> m_separatorsY;
     int m_hoveredRow = -1;
+    Part m_hoveredPart = Part::None;
+    Part m_pressedPart = Part::None;
+    int m_pressedRow = -1;
     int m_inset = 10;
 };
 
 // utils/sessionInfo/CategorizationPanel.qml (a GenericBox): "Efficiency
-// <resource>" and one categorizationPanel/Row.qml per level -- the
-// organization, then the employee -- each with Productive / Neutral /
-// Unproductive / Uncategorized, Cancel / OK. The organization row is the
-// global rule, the employee row that employee's own override
-// (Uncategorized = no override, inherit the global one).
+// <mask>" and one categorizationPanel/Row.qml per scope, root first -- the
+// organization, every department down to the employee's own (indented,
+// multiuser icon), then the employee (user icon) -- each with its own
+// Productive / Neutral / Unproductive / Uncategorized, Cancel / OK. Every
+// row is that scope's own rule; Uncategorized = no rule there, the scope
+// above decides. The mask is the site for a web page, the executable for a
+// program.
 class CategorizationDialog final : public QDialog
 {
     Q_OBJECT
 
 public:
-    CategorizationDialog(const QString &resource, const QString &globalCategory,
-                         const QString &employeeCategory, const QString &employeeName,
-                         QWidget *parent = nullptr);
-    QString category() const { return m_category; }
-    QString employeeCategory() const { return m_employeeCategory; }
+    struct Row {
+        QString name;
+        bool employee = false;  // user_on.png; a department/organization: multiuser_on.png
+        bool readOnly = false;  // Row.qml: a scope the viewer may not edit, in gray
+        QString category;       // "none" when the scope has no rule
+    };
+    CategorizationDialog(const QString &mask, const QList<Row> &rows, QWidget *parent = nullptr);
+    QString category(int row) const { return row >= 0 && row < m_rows.size() ? m_rows.at(row).category : QString(); }
 
 protected:
     void paintEvent(QPaintEvent *event) override;
@@ -189,13 +214,21 @@ private:
     QRect cancelRect() const;
     QRect okRect() const;
     QRect closeRect() const;
+    // The dialog grows by a row pitch for every scope past the two of the
+    // measured dialog.
+    int extraHeight() const;
 
     QString m_title;
-    QString m_employeeName;
-    QString m_category;
-    QString m_employeeCategory;
+    QList<Row> m_rows;
     QPoint m_hover;
 };
+
+// Opens the CategorizationPanel for a resource of an employee and pushes
+// what changed (applicationsIndex.pushActions): one rule per edited scope.
+// The scopes are updated in place; true when anything changed.
+bool runCategorizationDialog(QWidget *parent, ViewerConnection &connection, quint32 streamId,
+                             const QString &resource, bool webPage, const QString &employeeName,
+                             CategoryScopes &scopes);
 
 // HistoryTab.qml's historyPanelState period: "recent" (recentType d/w/m/q +
 // recentMultiplier, with recentBegin/recentEnd fixed when it was chosen) or
@@ -372,6 +405,13 @@ public:
     // The last marker that has anything recorded (-1 when the period is
     // empty) -- where a freshly opened period starts.
     int lastAllowedMarker() const;
+    // HistoryTab's effectiveRanges are the session's online ranges: a
+    // moment the session was online (noData included) is reachable even
+    // with no video -- History shows its status icon there.
+    void setSessionRanges(const QList<QPair<qint64, qint64>> &ranges);
+    // SliderBar's knob tooltip: the session's bullet (alive / dead) and its
+    // name.
+    void setSessionLabel(const QString &label, bool alive);
 
 signals:
     void markerSelected(int marker);
@@ -382,8 +422,11 @@ protected:
     void mouseMoveEvent(QMouseEvent *event) override;
     void mouseReleaseEvent(QMouseEvent *event) override;
     void leaveEvent(QEvent *event) override;
+    void hideEvent(QHideEvent *event) override;
 
 private:
+    // SliderBar.qml's __sliderBar: the widget's width (widthSlider) - 10.
+    int barWidth() const;
     double markWidth() const;
     int markerForX(int x) const;
     void seekToX(int x);
@@ -396,6 +439,22 @@ private:
     static void addMarker(QList<MarkerRange> &ranges, int marker);
     static bool contains(const QList<MarkerRange> &ranges, int marker);
     void drawRanges(QPainter &painter, const QList<MarkerRange> &ranges, const QPixmap &image);
+    void applySessionRanges();
+    // TooltipController: shown 500 ms after the mouse settles on the knob
+    // (MouseAreaWithTooltip, the session) or on a stretch with no data
+    // (MouseAreaWithTextualTooltip, "No data for a given period"), at the
+    // mouse + 10 px, following it, hidden again after 8 s.
+    enum class Tip { None, Session, NoData };
+    Tip tipAt(const QPoint &pos) const;
+    void updateTip(const QPoint &pos);
+    void hideTip();
+    QList<QPair<qint64, qint64>> m_sessionRanges;
+    QString m_sessionLabel;
+    bool m_sessionAlive = false;
+    Tip m_tip = Tip::None;
+    QTimer *m_tipDelay = nullptr;
+    QTimer *m_tipHide = nullptr;
+    QPointer<QWidget> m_tipWidget;
 
     QList<qint64> m_timestamps;           // sorted once, in setTimestamps
     QList<MarkerRange> m_effectiveRanges; // a recording exists (gray)
@@ -484,14 +543,40 @@ public:
     // false -- the extra area is ExtraContent.requestedHeigth tall and the
     // filters area takes the rest of the tab; no player marker.
     void setFillMode(bool on);
+    // History.qml's Filters Instantiator: the chart's content exists only
+    // once the violation panel finished opening (and until it finished
+    // closing); while it slides only the background shows.
+    void setContentVisible(bool visible);
 
     // HistoryTab.qml: chartTimeStep = alingStep(rangeSeconds, stepSeconds, 60).
     static qint64 chartStepMs(qint64 rangeMs, qint64 userStepMs);
 
+signals:
+    // HistoryPlayerMarkerControl.wantChangeMarker: the khaki line dragged
+    // onto another marker (live, while dragging).
+    void markerDragged(int marker);
+    // TimeRangeSelector.timeRangeSelected: an interval of at least 5
+    // minutes selected with the mouse.
+    void intervalSelected(qint64 beginMs, qint64 endMs);
+
 protected:
     void paintEvent(QPaintEvent *event) override;
+    void mousePressEvent(QMouseEvent *event) override;
+    void mouseMoveEvent(QMouseEvent *event) override;
+    void mouseReleaseEvent(QMouseEvent *event) override;
 
 private:
+    double gridWidthPx() const;
+    double markerWidthPx() const;
+    double markerX() const;
+    bool m_contentVisible = true;
+    bool m_markerDragging = false;
+    double m_dragBeginX = 0;
+    double m_dragInitX = 0;
+    bool m_selecting = false;
+    double m_selectBeginX = 0;
+    double m_zoneX = 0;     // relative to the grid
+    double m_zoneWidth = 0;
     HistoryChartResult m_activity;
     HistoryChartResult m_productivity;
     QList<HistoryChartFilterRow> m_filterRows;
@@ -574,6 +659,12 @@ public:
     // to this device and shows the given day ("yyyyMMdd", defaults to
     // today) as a recent Day period.
     void openForDevice(quint32 deviceKey, const QString &day = QString());
+    // A History video is being saved (gBackgroundWorkers.windowsWithSaver
+    // InProgress): closing the window asks first.
+    bool isVideoSaving() const { return m_videoSaver && m_videoSaver->busy(); }
+    // HistoryContainer's tab list (shared by every window) and this window's
+    // current tab (activity/History.qml's own Config, per window).
+    void restoreTabs(const QString &currentTabKey);
 
 private slots:
     void onFramesReceived(quint32 streamId, const QString &day, const QList<qint64> &timestamps);
@@ -590,7 +681,7 @@ private slots:
                                const QList<HistoryAppSegment> &segments);
     void onWebVisitsReceived(quint32 streamId, const QString &day,
                              const QList<HistoryAppSegment> &visits);
-    void onCategorizationRequested(const QString &resource);
+    void onCategorizationRequested(const QString &resource, bool webPage);
     void onEmployeeCategoriesReceived(quint32 streamId, const QHash<QString, QString> &categories);
     void onCategoriesReceived(quint32 streamId, const QHash<QString, QString> &categories);
     void onKeystrokesReceived(quint32 streamId, const QString &day,
@@ -718,7 +809,21 @@ private:
     bool isEmptyRange(quint32 streamId, qint64 timestampMs) const;
     // Shows every screen at this moment from what is already held; returns
     // false when at least one screen still has to be fetched.
+    // What a screen shows at a moment (videoStore/player): its downloaded
+    // picture, Loading while the run holding it is still to come, Offline
+    // where nothing was recorded -- and, for history recorded before the VP8
+    // runs, a picture fetched on demand.
+    enum class ScreenState { Ready, Loading, Fetch, Offline };
+    ScreenState screenState(quint32 streamId, qint64 timestampMs, qint64 *lookupMs = nullptr) const;
+    bool markerReady(int marker) const;
+    // Shows every screen's state at the moment; true if some screen needs a
+    // picture fetched on demand.
     bool showFromStore(qint64 timestampMs);
+    // The persistent cache (vhdb.<n>.sqlite) of the current period.
+    QString cacheTag(quint32 deviceKey, const HistoryPeriod &period) const;
+    void evictUnusedCaches();
+    QString m_cacheTag;
+    QTimer *m_cacheEvictTimer = nullptr;
 
     QHash<QPair<quint32, qint64>, QImage> m_frameCache;
     QList<QPair<quint32, qint64>> m_frameCacheOrder; // oldest first
@@ -740,9 +845,12 @@ private:
     void updateTextLogHighlight(qint64 timestampMs);
     void updateKeystream(qint64 timestampMs);
     void updateInfoPanel();
-    // Global categories with this employee's own overrides applied.
-    QHash<QString, QString> effectiveCategories() const;
+    // The organization's, the departments' and this employee's rules
+    // (CategoryScopes::resolve: the nearest scope with a rule decides).
+    CategoryScopes m_scopes;
     void showNoData();
+    // Header.qml's "( start - stop )" while there is no current moment.
+    void showPeriodMoment();
     void jumpTo(quint32 deviceKey, const HistoryPeriod &period);
 
     // HistoryPanel.qml / ViewerControls/Tabs.qml: one tab per history
@@ -753,8 +861,30 @@ private:
         HistoryPeriod period;
         qint64 timeStepMs = 5 * 60 * 1000;
         int speedIndex = 2; // each tab's History has its own speed (1x)
+        // Saved (HistoryTab.qml's Config): its id, the employee, the period
+        // and the Time step. A restored tab finds its employee by name.
+        QString id;
+        QString employeeName;
+        // Each tab's own View.History keeps these while another tab is shown.
+        qint64 positionMs = -1;
+        bool playing = false;
+        bool chartOpen = false;
+        bool appsOpen = false;
+        bool panelFull = false;
     };
-    void addHistoryTab(const HistoryTab &tab);
+    // atIndex < 0: at the end.
+    void addHistoryTab(const HistoryTab &tab, int atIndex = -1);
+    void saveTabs() const;
+    QString m_currentTabKey;
+    // The moment (and play state) a tab is put back at once its period is
+    // loaded again.
+    qint64 m_resumeMomentMs = -1;
+    void applyPanelState(bool chartOpen, bool appsOpen, bool panelFull);
+    void setChartOpen(bool open);
+    void setAppsOpen(bool open);
+    // TimeRangeSelector -> GoToHistoryDialog "Change period": a new tab for
+    // the selected interval, at the front.
+    void onChartInterval(qint64 beginMs, qint64 endMs);
     void showHistoryTab(int index);
     void storeCurrentTab();
     void openAddTabDialog();
@@ -773,6 +903,9 @@ private:
     // chartsItem so the video (and keylogger bar) take the whole page.
     void togglePanelFull();
     void stepMarkers(int markers);
+    // Left/Right reach the player unless a text field is being edited, a
+    // modal dialog or popup is up, or the controls are locked.
+    bool rewindAllowed() const;
     void updateStatusVisibility();
     void positionOverlays();
 
@@ -794,12 +927,11 @@ private:
     bool m_chartOpen = false;
     QTableWidget *m_textLog = nullptr;
 
-    // Opens the grouped keylog table (see m_textLog) in a popup dialog --
-    // that table is the real Tracker-tile Keylogger tab's shape
-    // (Table.qml), not a "mode" of History's main view.
+    // History.qml exportTextButton ("Text"): the KeyloggerExporter flow --
+    // the period's keystrokes of the session saved as csv / xlsx.
     QPushButton *m_keylogTableButton = nullptr;
-    // Exports the current day's frames as a numbered PNG sequence -- see
-    // onExportVideoClicked's comment for why not an actual video file.
+    // History.qml exportAviButton ("Video"): VideoSaverSelector ->
+    // VideoSaverProgress, the period saved as a .webm.
     QPushButton *m_exportVideoButton = nullptr;
     QPushButton *m_changeSettingsButton = nullptr;
     QPushButton *m_playButton = nullptr;
@@ -830,6 +962,8 @@ private:
     // sliderAndMeta's button columns; its width is History.qml's
     // widthActionButtons, which also decides where the chart grid starts.
     QWidget *m_leftColumn = nullptr;
+    // MultiSessionsSlider's column (bar + TimeLine), widthSlider wide.
+    QWidget *m_sliderColumn = nullptr;
     void applyTimeStep();
 
     QTimer *m_playbackTimer = nullptr;
@@ -843,7 +977,24 @@ private:
     QList<QPair<qint64, qint64>> m_onlineRanges;
     QList<QPair<qint64, qint64>> m_lockRanges;
     QList<QPair<qint64, qint64>> m_saverRanges;
+    QList<QPair<qint64, qint64>> m_noDataRanges;
     bool m_statesLoaded = false;
+    // HistoryTab.waitingForLoad: the controls stay locked ("Downloading...")
+    // until the period's information is in -- the screens, every screen's
+    // frame list and the session states (30 s at most, InfoSelector's
+    // timeout) -- and only then does the player open on its first marker.
+    bool m_infoPending = false;
+    bool m_screensAnswered = false;
+    bool m_infoTimedOut = false;
+    QTimer *m_infoTimeout = nullptr;
+    void checkInfoReady();
+    void startPlayer();
+    // History.qml animationOpen / animationClose on chartsItem.wantHeight.
+    QVariantAnimation *m_chartAnimation = nullptr;
+    bool m_chartOpening = false;
+    // Video.qml's scrollVideo: narrower by the panel while Running
+    // applications is open (rightPadding).
+    QHBoxLayout *m_videoBody = nullptr;
     void updateHistoryStatusIcon(qint64 momentMs);
     // History.qml `panel` (Running applications) over the video, and its
     // 250 ms slide.
@@ -865,8 +1016,6 @@ private:
     qint64 m_timeStepMs = 5 * 60 * 1000;
 
     QList<qint64> m_timestamps;
-    QHash<QString, QString> m_categories;
-    QHash<QString, QString> m_employeeCategories;
     QList<HistoryAppSegment> m_webVisits;
     QList<HistoryAppSegment> m_appSegments;
     QList<HistoryKeystrokeEntry> m_keystrokeEntries;
@@ -885,25 +1034,37 @@ private:
     int m_resumeMarker = -1;
     bool m_resumePlaying = false;
 
-    // In-progress "export imagini" job (see onExportVideoClicked): requests
-    // one frame at a time (via the same requestHistoryFrame/onFrameReceived
-    // path normal playback uses) and saves it to disk, so it doesn't need
-    // its own protocol message.
-    struct VideoExportState {
+    // The session marker the export dialogs show (Session:). The original
+    // prints domain\user@computer; the host only reports the user.
+    QString sessionMarker() const;
+
+    // History.qml videoSaverDialogHolder: the PlayerVideoSaver of this page,
+    // its VideoSaverProgress box, and the period it exports (its cache tag).
+    HistoryVideoSaver *m_videoSaver = nullptr;
+    QPointer<QDialog> m_videoSaverBox;
+    QWidget *m_videoSaverBar = nullptr;
+    QString m_videoSaverTag;
+    HistoryVideoJob m_videoSaverJob;
+    // Starts the job once the whole period is downloaded (S_waiting until
+    // then); false while it still waits.
+    bool tryStartVideoJob();
+    void showVideoSaverBox();
+    void onVideoSaverStateChanged();
+    // dispatchPrefetch found nothing left to download in the period and
+    // nothing is in flight (videoStore's "downloaded").
+    bool m_downloadComplete = false;
+
+    // KeyloggerExporter.qml: the export waits for the period's keystrokes
+    // (Keylogger.Selector) and writes them (Result.exportToCsv/Xlsx).
+    struct TextExportState {
         bool active = false;
-        QString directory;
+        QString path;
+        bool xlsx = false;
+        bool cutSystemKeys = false;
+        QString rangeKey;
         quint32 streamId = 0;
-        QList<qint64> pending;
-        int total = 0;
-        // The id the current export frame was asked under -- export answers
-        // must survive the generation filter that drops stale seeks.
-        quint64 requestId = 0;
-        // VideoSaverSelector.qml's quality picker -- we still write PNGs
-        // (no video encoder here, see m_exportVideoButton), but quality
-        // isn't purely cosmetic: it scales the exported image resolution
-        // (100/75/50%), same trade-off the real quality picker makes.
-        int qualityPercent = 100;
+        QPointer<QDialog> progress;
     };
-    VideoExportState m_videoExport;
-    void exportNextVideoFrame();
+    TextExportState m_textExport;
+    void finishTextExport(const QList<HistoryKeystrokeEntry> &entries);
 };

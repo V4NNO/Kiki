@@ -2,7 +2,22 @@
 #include "devicetilewidget.h"
 #include "multiswitch.h"
 
+#include <QCheckBox>
 #include <QComboBox>
+#include <QCursor>
+#include <QDateTimeEdit>
+#include <QDesktopServices>
+#include <QJsonArray>
+#include <QJsonDocument>
+#include <QJsonObject>
+#include <QRandomGenerator>
+#include <QVariantAnimation>
+#include <QLocale>
+#include <QProgressDialog>
+#include <QRegularExpression>
+#include <QSettings>
+#include <QStandardPaths>
+#include <QDir>
 #include <QTabBar>
 #include <QToolTip>
 #include <QMenu>
@@ -14,6 +29,7 @@
 #include <QDialogButtonBox>
 #include <QFile>
 #include <QFileDialog>
+#include <QFileInfo>
 #include <QFormLayout>
 #include <QGraphicsOpacityEffect>
 #include <QHBoxLayout>
@@ -27,6 +43,10 @@
 #include <QPainterPath>
 #include <QSet>
 #include <QShortcut>
+#include <QAbstractSpinBox>
+#include <QLineEdit>
+#include <QPlainTextEdit>
+#include <QTextEdit>
 #include <QAbstractItemView>
 #include <QApplication>
 #include <QHeaderView>
@@ -48,6 +68,15 @@
 #include <array>
 #include <cmath>
 #include <limits>
+
+namespace {
+// Every History page's cache files (one page per window), for the cleanup.
+QHash<const HistoryView *, QSet<QString>> &referencedCacheFiles()
+{
+    static QHash<const HistoryView *, QSet<QString>> files;
+    return files;
+}
+}
 
 // Instrumentation for the seek path: enable with
 // QT_LOGGING_RULES="kiki.history.timing.debug=true" to see, per seek, how
@@ -91,6 +120,10 @@ constexpr int kControlBlockHeight = 125;
 constexpr int kChartsItemHeight = 186;
 constexpr int kSliderBarY = 35;         // MultiSessionsSlider: ListView topMargin 35
 constexpr int kSliderBarHeight = 4;     // SliderBar.qml __sliderBar
+// SliderBar.qml:257's Item { width: 10 } does not shorten the bar on screen:
+// measured on the running original (1920px, Time step 1s) the bar's last
+// pixel is x 1907, i.e. it ends at its column's right edge (W - 12).
+constexpr int kSliderBarRightGap = 0;
 constexpr int kTimeLineY = 62;          // MultiSessionsSlider column, single session
 constexpr int kTimeLineHighHeight = 16; // TimeLine.qml highLineHeight
 constexpr int kTimeLineLowHeight = 12;  // TimeLine.qml lowLineHeight
@@ -113,6 +146,25 @@ QFont smallBoldFont()
     QFont font(QStringLiteral("Roboto"));
     font.setPointSize(8);
     return font;
+}
+
+// History.qml:407 exportAviRow.width = avi_export_normal.png (13) + spacing
+// 5 + "Video" in Fonts.rb_small (8pt, the same face as smallBoldFont; QML
+// Text rounds its implicitWidth up) + anchors.leftMargin 10 * 2. The speed
+// button (History.qml:495) and exportTextButton (History.qml:508) take the
+// same width.
+int exportAviButtonWidth()
+{
+    const double textWidth = QFontMetricsF(smallBoldFont()).horizontalAdvance(QStringLiteral("Video"));
+    return 13 + 5 + static_cast<int>(std::ceil(textWidth)) + 2 * 10;
+}
+
+// history/video/Header.qml:37-39 fmt(): toLocaleDateString(Qt.locale(),
+// Locale.ShortFormat) + " " + toLocaleTimeString(..., "hh:mm:ss").
+QString headerMomentText(const QDateTime &moment)
+{
+    return QStringLiteral("%1 %2").arg(QLocale::system().toString(moment.date(), QLocale::ShortFormat),
+                                       moment.toString(QStringLiteral("hh:mm:ss")));
 }
 
 // Fonts.rr_medium: Roboto Regular 12px ("Activity" measures 40px in the
@@ -168,31 +220,52 @@ void drawVerticalSeparator(QPainter &painter, qreal x, qreal y, qreal height)
     painter.fillRect(QRectF(x + 1, y, 1, height), kSeparatorLight);
 }
 
-// Groups consecutive same-window keystroke entries into "pressing period"
-// rows, matching the real Kickidler keylogger table's shape (Src/Viewer_SRC/
-// qml_real/.../keylogger/Table.qml: Date/Pressing period/Application/Title/
-// Keystrokes columns) as closely as our flatter HistoryKeystrokeEntry data
-// (no separate application field) allows. A gap over kGroupGapMs starts a
-// new row even for the same window.
+// The keylogger table's / export's records (keylogger/Table.qml: Date,
+// Pressing period, Application, Title, Keystrokes), built from what was
+// recorded rather than guessed from time gaps: every keylogger chunk
+// carries its program, its window and its first and last key, and the
+// chunks of one record are the consecutive ones typed into the same
+// program and window during the same foreground run of that program (the
+// recorded app segments). A chunk recorded before the program was kept
+// takes the program of the app segment it was typed in.
 struct KeylogRow {
     qint64 fromMs = 0;
     qint64 toMs = 0;
+    QString application;
     QString windowTitle;
     QString text;
 };
 
-QList<KeylogRow> groupKeystrokeEntries(const QList<HistoryKeystrokeEntry> &entries)
+QList<KeylogRow> groupKeystrokeEntries(const QList<HistoryKeystrokeEntry> &entries,
+                                       const QList<HistoryAppSegment> &programs)
 {
-    constexpr qint64 kGroupGapMs = 60000;
+    QList<HistoryAppSegment> runs = programs;
+    std::sort(runs.begin(), runs.end(),
+              [](const HistoryAppSegment &a, const HistoryAppSegment &b) { return a.startMs < b.startMs; });
+    const auto runAt = [&runs](qint64 timestampMs) {
+        const auto after = std::upper_bound(runs.cbegin(), runs.cend(), timestampMs,
+                                            [](qint64 value, const HistoryAppSegment &run) { return value < run.startMs; });
+        if (after == runs.cbegin()) {
+            return -1;
+        }
+        const int index = int(after - runs.cbegin()) - 1;
+        return timestampMs < runs.at(index).endMs ? index : -1;
+    };
     QList<KeylogRow> rows;
+    int lastRun = -2;
     for (const HistoryKeystrokeEntry &entry : entries) {
-        if (!rows.isEmpty() && rows.last().windowTitle == entry.windowTitle
-            && entry.timestampMs - rows.last().toMs <= kGroupGapMs) {
+        const qint64 beginMs = entry.beginMs > 0 ? qMin(entry.beginMs, entry.timestampMs) : entry.timestampMs;
+        const int run = runAt(beginMs);
+        const QString application =
+            !entry.application.isEmpty() ? entry.application : (run >= 0 ? runs.at(run).application : QString());
+        if (!rows.isEmpty() && rows.last().application == application && rows.last().windowTitle == entry.windowTitle
+            && run == lastRun) {
             rows.last().toMs = entry.timestampMs;
             rows.last().text += entry.text;
         } else {
-            rows.append({entry.timestampMs, entry.timestampMs, entry.windowTitle, entry.text});
+            rows.append({beginMs, entry.timestampMs, application, entry.windowTitle, entry.text});
         }
+        lastRun = run;
     }
     return rows;
 }
@@ -719,38 +792,106 @@ QRect HistoryInfoPanel::categorizationRect(const Row &row) const
     return QRect(row.rect.right() - 10 - kProgressWidth - 15 - 13, centerY - 6, 13, 13);
 }
 
+HistoryInfoPanel::TextRects HistoryInfoPanel::textRects(const Row &row) const
+{
+    static const QPixmap activeProgram(QStringLiteral(":/sessionInfo/images/active_program.png"));
+    const QRect &r = row.rect;
+    const QFontMetrics titleMetrics(bigFont());
+    const QFontMetrics resourceMetrics(mediumFont());
+    const int contentLeft = r.left() + 10;
+    const int centerY = r.top() + 5 + kTriLineHeight / 2;
+    const int textLeft = contentLeft + 2 + (row.item.active ? activeProgram.width() + 6 : 0);
+    // Text column: title over resource, spacing 5, centered 3px up.
+    const int textWidth = qMax(10, r.width() - 13 - kProgressWidth - 2 - 64 - (textLeft - contentLeft - 2));
+    const int blockHeight = titleMetrics.height() + 5 + resourceMetrics.height();
+    const int top = centerY - 3 - blockHeight / 2;
+    TextRects rects;
+    rects.titleLine = QRect(textLeft, top, textWidth, titleMetrics.height());
+    rects.resourceLine = QRect(textLeft, top + titleMetrics.height() + 5, textWidth, resourceMetrics.height());
+    rects.title = QRect(rects.titleLine.topLeft(),
+                        QSize(qMin(textWidth, titleMetrics.horizontalAdvance(row.item.title)), rects.titleLine.height()));
+    rects.resource = QRect(rects.resourceLine.topLeft(),
+                           QSize(qMin(textWidth, resourceMetrics.horizontalAdvance(row.item.resource)),
+                                 rects.resourceLine.height()));
+    return rects;
+}
+
+HistoryInfoPanel::Part HistoryInfoPanel::partAt(const QPoint &pos, int *rowIndex) const
+{
+    *rowIndex = -1;
+    for (int i = 0; i < m_rows.size(); ++i) {
+        const Row &row = m_rows.at(i);
+        if (!row.rect.adjusted(0, 0, 0, kTriLineSpacing).contains(pos)) {
+            continue;
+        }
+        *rowIndex = i;
+        // The CategorizationButton only exists while the row is hovered,
+        // and it is.
+        if (categorizationRect(row).contains(pos)) {
+            return Part::Categorize;
+        }
+        const TextRects rects = textRects(row);
+        if (rects.title.contains(pos)) {
+            return Part::Title;
+        }
+        if (rects.resource.contains(pos)) {
+            return Part::Resource;
+        }
+        return Part::None;
+    }
+    return Part::None;
+}
+
 void HistoryInfoPanel::mouseMoveEvent(QMouseEvent *event)
 {
     int hovered = -1;
-    for (int i = 0; i < m_rows.size(); ++i) {
-        if (m_rows.at(i).rect.adjusted(0, 0, 0, kTriLineSpacing).contains(event->pos())) {
-            hovered = i;
-            break;
-        }
-    }
-    if (hovered != m_hoveredRow) {
+    const Part part = partAt(event->pos(), &hovered);
+    if (hovered != m_hoveredRow || part != m_hoveredPart) {
         m_hoveredRow = hovered;
+        m_hoveredPart = part;
+        // TextWithToolTip cursorHoveredEnable / the buttons' cursorShape.
+        setCursor(part == Part::None ? Qt::ArrowCursor : Qt::PointingHandCursor);
         update();
     }
 }
 
 void HistoryInfoPanel::leaveEvent(QEvent *)
 {
-    if (m_hoveredRow != -1) {
+    if (m_hoveredRow != -1 || m_hoveredPart != Part::None) {
         m_hoveredRow = -1;
+        m_hoveredPart = Part::None;
+        unsetCursor();
         update();
     }
 }
 
 void HistoryInfoPanel::mousePressEvent(QMouseEvent *event)
 {
-    // TriLine: clicking the texts or the categorization button opens the
-    // categorization for that resource.
-    if (m_hoveredRow < 0 || m_hoveredRow >= m_rows.size()) {
+    // TriLine's row-wide MouseArea has its click commented out: only the
+    // texts and the button act, on click (press and release on the same).
+    m_pressedPart = event->button() == Qt::LeftButton ? partAt(event->pos(), &m_pressedRow) : Part::None;
+}
+
+void HistoryInfoPanel::mouseReleaseEvent(QMouseEvent *event)
+{
+    int row = -1;
+    const Part part = partAt(event->pos(), &row);
+    const Part pressed = m_pressedPart;
+    const int pressedRow = m_pressedRow;
+    m_pressedPart = Part::None;
+    m_pressedRow = -1;
+    if (event->button() != Qt::LeftButton || part == Part::None || part != pressed || row != pressedRow) {
         return;
     }
-    Q_UNUSED(event)
-    emit categorizationRequested(m_rows.at(m_hoveredRow).item.resource);
+    const Item item = m_rows.at(row).item;
+    if (part == Part::Resource && item.webPage) {
+        // text1 onClickedText: Qt.openUrlExternally(text) for a web page.
+        QDesktopServices::openUrl(QUrl::fromUserInput(item.resource));
+        return;
+    }
+    // The title, a program's executable and the CategorizationButton all
+    // emitCategorizationRequest().
+    emit categorizationRequested(item.resource, item.webPage);
 }
 
 void HistoryInfoPanel::paintEvent(QPaintEvent *)
@@ -791,20 +932,19 @@ void HistoryInfoPanel::paintEvent(QPaintEvent *)
 
         const int contentLeft = r.left() + 10;
         const int centerY = r.top() + 5 + kTriLineHeight / 2;
-        int textLeft = contentLeft + 2;
         if (row.item.active) {
             painter.drawPixmap(contentLeft + 2, centerY - 4 - activeProgram.height() / 2, activeProgram);
-            textLeft = contentLeft + 2 + activeProgram.width() + 6;
         }
-        // Text column: title over resource, spacing 5, centered 3px up.
-        const int textWidth = qMax(10, r.width() - 13 - kProgressWidth - 2 - 64 - (textLeft - contentLeft - 2));
-        const int blockHeight = titleMetrics.height() + 5 + resourceMetrics.height();
-        const int top = centerY - 3 - blockHeight / 2;
+        const TextRects rects = textRects(row);
+        const int textWidth = rects.titleLine.width();
         painter.setFont(titleFont);
         painter.setPen(Qt::white);
-        painter.drawText(QRect(textLeft, top, textWidth, titleMetrics.height()), Qt::AlignLeft | Qt::AlignVCenter,
+        painter.drawText(rects.titleLine, Qt::AlignLeft | Qt::AlignVCenter,
                          titleMetrics.elidedText(row.item.title, Qt::ElideRight, textWidth));
-        painter.setFont(resourceFont);
+        // Fonts.rr_medium_u while a web page's url is hovered.
+        QFont lineFont = resourceFont;
+        lineFont.setUnderline(row.item.webPage && i == m_hoveredRow && m_hoveredPart == Part::Resource);
+        painter.setFont(lineFont);
         const QString category = row.item.category.isEmpty() ? QStringLiteral("none") : row.item.category;
         // statusToColor gives the brighter "hovered" EfficiencyColors
         // variants here (a real screenshot's productive text is #29a16e,
@@ -815,8 +955,7 @@ void HistoryInfoPanel::paintEvent(QPaintEvent *)
             {QStringLiteral("unproductive"), QColor(0xcc, 0x55, 0x4a)},
         };
         painter.setPen(kTextColors.value(category, QColor(Qt::white)));
-        painter.drawText(QRect(textLeft, top + titleMetrics.height() + 5, textWidth, resourceMetrics.height()),
-                         Qt::AlignLeft | Qt::AlignVCenter,
+        painter.drawText(rects.resourceLine, Qt::AlignLeft | Qt::AlignVCenter,
                          resourceMetrics.elidedText(row.item.resource, Qt::ElideRight, textWidth));
 
         if (i == m_hoveredRow) {
@@ -873,20 +1012,24 @@ QFont ratingFont()
 }
 }
 
-CategorizationDialog::CategorizationDialog(const QString &resource, const QString &globalCategory,
-                                           const QString &employeeCategory, const QString &employeeName,
-                                           QWidget *parent)
+CategorizationDialog::CategorizationDialog(const QString &mask, const QList<Row> &rows, QWidget *parent)
     : QDialog(parent, Qt::FramelessWindowHint | Qt::Dialog)
-    , m_employeeName(employeeName)
-    , m_category(globalCategory.isEmpty() ? QStringLiteral("none") : globalCategory)
-    , m_employeeCategory(employeeCategory.isEmpty() ? QStringLiteral("none") : employeeCategory)
+    , m_title(QStringLiteral("Efficiency %1").arg(mask))
+    , m_rows(rows)
 {
-    // mask: a web page is categorized by its site, a program by itself.
-    const QUrl url(resource);
-    m_title = QStringLiteral("Efficiency %1").arg(url.isValid() && !url.host().isEmpty() ? url.host() : resource);
+    for (Row &row : m_rows) {
+        if (row.category.isEmpty()) {
+            row.category = QStringLiteral("none");
+        }
+    }
     setModal(true);
-    setFixedSize(kDialogWidth, kDialogHeight);
+    setFixedSize(kDialogWidth, kDialogHeight + extraHeight());
     setMouseTracking(true);
+}
+
+int CategorizationDialog::extraHeight() const
+{
+    return qRound(qMax(0, int(m_rows.size()) - 2) * kDialogRowPitch);
 }
 
 QRect CategorizationDialog::ratingRect(int row, int option) const
@@ -898,12 +1041,12 @@ QRect CategorizationDialog::ratingRect(int row, int option) const
 
 QRect CategorizationDialog::cancelRect() const
 {
-    return QRect(286, 238, 56, 26);
+    return QRect(286, 238 + extraHeight(), 56, 26);
 }
 
 QRect CategorizationDialog::okRect() const
 {
-    return QRect(354, 238, 56, 26);
+    return QRect(354, 238 + extraHeight(), 56, 26);
 }
 
 QRect CategorizationDialog::closeRect() const
@@ -927,10 +1070,13 @@ void CategorizationDialog::mousePressEvent(QMouseEvent *event)
         accept();
         return;
     }
-    for (int row = 0; row < 2; ++row) {
+    for (int row = 0; row < m_rows.size(); ++row) {
+        if (m_rows.at(row).readOnly) {
+            continue;
+        }
         for (int option = 0; option < 4; ++option) {
             if (ratingRect(row, option).contains(event->pos())) {
-                (row == 0 ? m_category : m_employeeCategory) = kRatingCategories[option];
+                m_rows[row].category = kRatingCategories[option];
                 update();
                 return;
             }
@@ -973,29 +1119,29 @@ void CategorizationDialog::paintEvent(QPaintEvent *)
     drawHorizontalSeparator(painter, 1, 39, width() - 2);
 
     // Rows: name column (icons + text, 220px), then the rating options.
-    const QString names[] = {QStringLiteral("All employees"), m_employeeName};
     const QFont nameFont = bigFont();
     const QFontMetrics nameMetrics(nameFont);
-    for (int row = 0; row < 2; ++row) {
+    for (int row = 0; row < m_rows.size(); ++row) {
         const int centerY = qRound(kDialogRowCenter0 + row * kDialogRowPitch);
-        const bool readOnly = false;
+        const bool readOnly = m_rows.at(row).readOnly;
         int x = 23;
+        // Row.qml: indent.png on every row but the root's.
         if (row > 0) {
             painter.drawPixmap(x, centerY - 6, indent);
             x += 11 + 10;
         }
-        const QPixmap &icon = row == 0 ? multiuser : user;
+        const QPixmap &icon = m_rows.at(row).employee ? user : multiuser;
         painter.drawPixmap(x + (11 - icon.width()) / 2, centerY - icon.height() / 2, icon);
         x += 11 + 10;
         painter.setFont(nameFont);
         painter.setPen(readOnly ? QColor(Qt::gray) : QColor(Qt::white));
         const int nameWidth = 274 - 10 - x;
         painter.drawText(QRect(x, centerY - 11, nameWidth, 20), Qt::AlignLeft | Qt::AlignVCenter,
-                         nameMetrics.elidedText(names[row], Qt::ElideRight, nameWidth));
+                         nameMetrics.elidedText(m_rows.at(row).name, Qt::ElideRight, nameWidth));
 
         // RatingButtons: selected option in its (hovered) category color,
         // Uncategorized selected in white, the rest #a3a6a9.
-        const QString selected = row == 0 ? m_category : m_employeeCategory;
+        const QString selected = m_rows.at(row).category;
         painter.setFont(ratingFont());
         for (int option = 0; option < 4; ++option) {
             QColor color(0xa3, 0xa6, 0xa9);
@@ -1693,6 +1839,90 @@ void KeystreamBar::paintEvent(QPaintEvent *)
                      Qt::AlignLeft | Qt::AlignVCenter, m_future);
 }
 
+namespace {
+// The TooltipController's tooltips, on the window's top layer: the textual
+// one on tooltipController/bg_tooltip.png (borders 30/17/30/22, text 17px
+// in, 3px up, implicit width + 38), the knob's own flat #424349 box with
+// the session's bullet and name.
+class HoverTip final : public QWidget
+{
+public:
+    explicit HoverTip(QWidget *parent)
+        : QWidget(parent)
+    {
+        setAttribute(Qt::WA_TransparentForMouseEvents);
+    }
+    void showText(const QString &text)
+    {
+        m_session = false;
+        m_text = text;
+        const QFontMetrics metrics(mediumFont());
+        resize(metrics.horizontalAdvance(text) + 38, 54);
+        update();
+    }
+    void showSession(const QString &text, bool alive)
+    {
+        m_session = true;
+        m_text = text;
+        m_alive = alive;
+        QFont font = mediumFont();
+        font.setPointSize(8);
+        resize(4 + 7 + 5 + QFontMetrics(font).horizontalAdvance(text) + 6, 24);
+        update();
+    }
+
+protected:
+    void paintEvent(QPaintEvent *) override
+    {
+        QPainter painter(this);
+        if (m_session) {
+            painter.fillRect(rect(), QColor(0x42, 0x43, 0x49));
+            painter.setPen(QColor(0x57, 0x58, 0x60));
+            painter.drawRect(rect().adjusted(0, 0, -1, -1));
+            // Session.qml: a 7px ring bullet, then the name (rb_small_b).
+            painter.setRenderHint(QPainter::Antialiasing);
+            painter.setPen(QPen(m_alive ? QColor(0x28, 0xa3, 0x6f) : QColor(0xed, 0x5b, 0x4c), 1.5));
+            painter.setBrush(Qt::NoBrush);
+            painter.drawEllipse(QRectF(4.5, 7.5, 6, 6));
+            QFont font = mediumFont();
+            font.setPointSize(8);
+            painter.setFont(font);
+            painter.setPen(Qt::white);
+            painter.drawText(QRect(4 + 7 + 5, 0, width() - 16, 21), Qt::AlignLeft | Qt::AlignVCenter, m_text);
+            return;
+        }
+        static const QPixmap background(QStringLiteral(":/controls/tooltip/bg_tooltip.png"));
+        // A nine-slice BorderImage.
+        const int l = 30, t = 17, r = 30, b = 22;
+        const int w = background.width(), h = background.height();
+        const QRect target = rect();
+        const auto slice = [&](const QRect &to, const QRect &from) {
+            if (to.width() > 0 && to.height() > 0) {
+                painter.drawPixmap(to, background, from);
+            }
+        };
+        const int cw = target.width() - l - r, ch = target.height() - t - b;
+        slice(QRect(0, 0, l, t), QRect(0, 0, l, t));
+        slice(QRect(l, 0, cw, t), QRect(l, 0, w - l - r, t));
+        slice(QRect(l + cw, 0, r, t), QRect(w - r, 0, r, t));
+        slice(QRect(0, t, l, ch), QRect(0, t, l, h - t - b));
+        slice(QRect(l, t, cw, ch), QRect(l, t, w - l - r, h - t - b));
+        slice(QRect(l + cw, t, r, ch), QRect(w - r, t, r, h - t - b));
+        slice(QRect(0, t + ch, l, b), QRect(0, h - b, l, b));
+        slice(QRect(l, t + ch, cw, b), QRect(l, h - b, w - l - r, b));
+        slice(QRect(l + cw, t + ch, r, b), QRect(w - r, h - b, r, b));
+        painter.setFont(mediumFont());
+        painter.setPen(Qt::white);
+        painter.drawText(QRect(17, -3, width() - 17, height()), Qt::AlignLeft | Qt::AlignVCenter, m_text);
+    }
+
+private:
+    QString m_text;
+    bool m_session = false;
+    bool m_alive = false;
+};
+} // namespace
+
 TimelineWidget::TimelineWidget(QWidget *parent)
     : QWidget(parent)
 {
@@ -1700,12 +1930,141 @@ TimelineWidget::TimelineWidget(QWidget *parent)
     // bar lands at the real y=35 of the 125px block.
     setFixedHeight(kTimeLineY);
     setMouseTracking(true);
+    m_tipDelay = new QTimer(this);
+    m_tipDelay->setSingleShot(true);
+    m_tipDelay->setInterval(500);
+    connect(m_tipDelay, &QTimer::timeout, this, [this] {
+        if (m_tip == Tip::None) {
+            return;
+        }
+        QWidget *layer = window();
+        if (!m_tipWidget) {
+            m_tipWidget = new HoverTip(layer);
+        }
+        auto *tip = static_cast<HoverTip *>(m_tipWidget.data());
+        if (m_tip == Tip::Session) {
+            tip->showSession(m_sessionLabel, m_sessionAlive);
+        } else {
+            tip->showText(QStringLiteral("No data for a given period"));
+        }
+        updateTip(mapFromGlobal(QCursor::pos()));
+        tip->show();
+        tip->raise();
+        m_tipHide->start();
+    });
+    m_tipHide = new QTimer(this);
+    m_tipHide->setSingleShot(true);
+    m_tipHide->setInterval(8000);
+    connect(m_tipHide, &QTimer::timeout, this, [this] {
+        if (m_tipWidget) {
+            m_tipWidget->hide();
+        }
+    });
+}
+
+void TimelineWidget::setSessionLabel(const QString &label, bool alive)
+{
+    m_sessionLabel = label;
+    m_sessionAlive = alive;
+}
+
+TimelineWidget::Tip TimelineWidget::tipAt(const QPoint &pos) const
+{
+    if (m_markersAmount <= 0) {
+        return Tip::None;
+    }
+    if (pickRect().contains(pos) && !m_sessionLabel.isEmpty()) {
+        return Tip::Session;
+    }
+    // The online / loaded stretches carry MouseBlockers: only bg_none, i.e.
+    // a marker with nothing, shows the textual tooltip.
+    if (barRect().adjusted(0, -2, 0, 2).contains(pos)) {
+        const int marker = markerForX(pos.x());
+        if (marker >= 0 && !isAllowedMarker(marker)) {
+            return Tip::NoData;
+        }
+    }
+    return Tip::None;
+}
+
+void TimelineWidget::updateTip(const QPoint &pos)
+{
+    const Tip tip = m_dragging ? Tip::None : tipAt(pos);
+    if (tip != m_tip) {
+        m_tip = tip;
+        if (m_tipWidget) {
+            m_tipWidget->hide();
+        }
+        m_tipHide->stop();
+        if (tip == Tip::None) {
+            m_tipDelay->stop();
+        } else {
+            m_tipDelay->start();
+        }
+        return;
+    }
+    if (m_tipWidget && m_tipWidget->isVisible()) {
+        // Follows the mouse: x + 10, clamped inside the window.
+        QWidget *layer = m_tipWidget->parentWidget();
+        const QPoint at = mapTo(layer, pos);
+        const int x = at.x() + 10 + m_tipWidget->width() > layer->width() ? layer->width() - m_tipWidget->width()
+                                                                          : at.x() + 10;
+        const int y = at.y() + m_tipWidget->height() > layer->height() ? layer->height() - m_tipWidget->height()
+                                                                       : at.y();
+        m_tipWidget->move(x, y);
+    }
+}
+
+void TimelineWidget::hideTip()
+{
+    m_tip = Tip::None;
+    m_tipDelay->stop();
+    m_tipHide->stop();
+    if (m_tipWidget) {
+        m_tipWidget->hide();
+    }
+}
+
+void TimelineWidget::hideEvent(QHideEvent *event)
+{
+    hideTip();
+    QWidget::hideEvent(event);
+}
+
+void TimelineWidget::setSessionRanges(const QList<QPair<qint64, qint64>> &ranges)
+{
+    m_sessionRanges = ranges;
+    rebuildRanges();
+}
+
+void TimelineWidget::applySessionRanges()
+{
+    for (const auto &range : std::as_const(m_sessionRanges)) {
+        const qint64 begin = qMax(range.first, m_rangeStart);
+        const qint64 end = qMin(range.second, m_rangeEnd);
+        if (end <= begin) {
+            continue;
+        }
+        const int first = int((begin - m_rangeStart) / m_stepMs);
+        const int last = qMin(m_markersAmount - 1, int((end - 1 - m_rangeStart) / m_stepMs));
+        for (int marker = first; marker <= last; ++marker) {
+            addMarker(m_effectiveRanges, marker);
+        }
+    }
+}
+
+int TimelineWidget::barWidth() const
+{
+    // SliderBar.qml:79-262: a RowLayout of the bar (fillWidth), a 10px Item
+    // and sliderRightMargin (History.qml:41, 0) -- the bar is the slider's
+    // width (MultiSessionsSlider.qml:117, = widthSlider) minus 10.
+    return qMax(0, width() - kSliderBarRightGap);
 }
 
 double TimelineWidget::markWidth() const
 {
     // SliderBar.qml: __sliderBar.width / markersAmount.
-    return m_markersAmount > 0 ? static_cast<double>(width()) / m_markersAmount : 0.0;
+    return m_markersAmount > 0 ? static_cast<double>(barWidth()) / m_markersAmount : 0.0;
 }
 
 void TimelineWidget::addMarker(QList<MarkerRange> &ranges, int marker)
@@ -1781,6 +2140,7 @@ void TimelineWidget::rebuildRanges()
         }
         lastStop = marker;
     }
+    applySessionRanges();
     m_currentMarker = qBound(-1, m_currentMarker, m_markersAmount - 1);
     update();
 }
@@ -1899,7 +2259,7 @@ int TimelineWidget::markerForTimestamp(qint64 timestampMs) const
 
 qint64 TimelineWidget::timestampForMarker(int marker) const
 {
-    if (m_timestamps.isEmpty() || marker < 0) {
+    if ((m_timestamps.isEmpty() && m_sessionRanges.isEmpty()) || marker < 0) {
         return -1;
     }
     const qint64 slotStart = m_rangeStart + qint64(marker) * m_stepMs;
@@ -1909,6 +2269,11 @@ qint64 TimelineWidget::timestampForMarker(int marker) const
     const auto at = std::lower_bound(m_timestamps.cbegin(), m_timestamps.cend(), slotStart);
     if (at != m_timestamps.cend() && *at < slotEnd) {
         return *at; // a frame inside this marker's own slice
+    }
+    // A reachable marker with no frame of its own (online, no video): its
+    // own moment -- the screens answer for it (held picture or No video).
+    if (isAllowedMarker(marker) || m_timestamps.isEmpty()) {
+        return slotStart;
     }
     if (at == m_timestamps.cbegin()) {
         return m_timestamps.first();
@@ -1942,7 +2307,7 @@ double TimelineWidget::pickWidth() const
 
 QRect TimelineWidget::barRect() const
 {
-    return QRect(0, kSliderBarY, width(), kSliderBarHeight);
+    return QRect(0, kSliderBarY, barWidth(), kSliderBarHeight);
 }
 
 int TimelineWidget::rewindTarget(int current, int target, bool right) const
@@ -2009,11 +2374,12 @@ void TimelineWidget::mousePressEvent(QMouseEvent *event)
 
 void TimelineWidget::mouseMoveEvent(QMouseEvent *event)
 {
+    updateTip(event->pos());
     if (m_dragging) {
         // onPositionChanged: draggedX clamped to [0, lastX], lastX =
         // bar width - pick width; the marker under it is requested whenever
         // it changes (a gap is refused, the pick still follows the mouse).
-        const double lastX = width() - pickWidth();
+        const double lastX = barWidth() - pickWidth();
         m_dragX = qBound(0.0, m_dragInitX + (event->pos().x() - m_dragBeginX), qMax(0.0, lastX));
         update();
         seekToX(int(m_dragX));
@@ -2041,6 +2407,7 @@ void TimelineWidget::mouseReleaseEvent(QMouseEvent *event)
 
 void TimelineWidget::leaveEvent(QEvent *)
 {
+    hideTip();
     if (m_pickHovered) {
         m_pickHovered = false;
         update();
@@ -2079,7 +2446,7 @@ void TimelineWidget::paintEvent(QPaintEvent *)
     // SliderBar.qml's three layers: bg_none everywhere, bg_online over every
     // recorded range (gray "exists but not downloaded"), bg_loaded on top
     // over what has actually been fetched (it grows as you watch).
-    drawBorderImage(painter, QRectF(0, kSliderBarY, width(), kSliderBarHeight), bgNone, 4, 4);
+    drawBorderImage(painter, QRectF(0, kSliderBarY, barWidth(), kSliderBarHeight), bgNone, 4, 4);
     if (m_markersAmount <= 0) {
         return;
     }
@@ -2328,6 +2695,101 @@ void HistoryChartWidget::setCurrentPositionMs(qint64 positionMs)
     update();
 }
 
+void HistoryChartWidget::setContentVisible(bool visible)
+{
+    if (m_contentVisible != visible) {
+        m_contentVisible = visible;
+        update();
+    }
+}
+
+double HistoryChartWidget::gridWidthPx() const
+{
+    return qMax(1, width() - m_gridLeft - (m_fillMode ? kViolationsRightMargin : 0));
+}
+
+double HistoryChartWidget::markerWidthPx() const
+{
+    const qint64 span = m_rangeEnd - m_rangeStart;
+    return span > 0 ? gridWidthPx() * m_markerStepMs / span : 0.0;
+}
+
+double HistoryChartWidget::markerX() const
+{
+    // x = sliderMarkWidt * selectedIndex + extraGrid.x.
+    const int index = int((m_currentPositionMs - m_rangeStart) / qMax<qint64>(1, m_markerStepMs));
+    return m_gridLeft + markerWidthPx() * index;
+}
+
+void HistoryChartWidget::mousePressEvent(QMouseEvent *event)
+{
+    if (m_fillMode || event->button() != Qt::LeftButton || m_rangeEnd <= m_rangeStart || !m_contentVisible) {
+        return;
+    }
+    const double x = event->position().x();
+    // HistoryPlayerMarkerControl's sensor: 6px wide, centered on the line,
+    // above the selector (z 1).
+    if (m_currentPositionMs >= m_rangeStart && m_currentPositionMs < m_rangeEnd && qAbs(x - markerX()) <= 3) {
+        m_markerDragging = true;
+        m_dragBeginX = x;
+        m_dragInitX = markerX();
+        return;
+    }
+    // TimeRangeSelector over the grid.
+    if (x >= m_gridLeft && x <= m_gridLeft + gridWidthPx()) {
+        m_selecting = true;
+        m_selectBeginX = x - m_gridLeft;
+        m_zoneX = m_selectBeginX;
+        m_zoneWidth = 0;
+        update();
+    }
+}
+
+void HistoryChartWidget::mouseMoveEvent(QMouseEvent *event)
+{
+    const double x = event->position().x();
+    if (m_markerDragging) {
+        const double lastX = m_gridLeft + gridWidthPx();
+        const double newX = qBound(0.0, m_dragInitX + (x - m_dragBeginX), lastX);
+        const double markWidth = markerWidthPx();
+        if (markWidth > 0) {
+            const int newMarker = qRound((newX - m_gridLeft) / markWidth);
+            const int current = int((m_currentPositionMs - m_rangeStart) / qMax<qint64>(1, m_markerStepMs));
+            if (newMarker != current && newMarker >= 0) {
+                emit markerDragged(newMarker);
+            }
+        }
+        return;
+    }
+    if (m_selecting) {
+        const double current = qMax(0.0, x - m_gridLeft);
+        m_zoneX = qMin(m_selectBeginX, current);
+        m_zoneWidth = qMin(qAbs(current - m_selectBeginX), gridWidthPx() - m_zoneX);
+        update();
+    }
+}
+
+void HistoryChartWidget::mouseReleaseEvent(QMouseEvent *)
+{
+    if (m_markerDragging) {
+        m_markerDragging = false;
+        return;
+    }
+    if (!m_selecting) {
+        return;
+    }
+    m_selecting = false;
+    const double span = double(m_rangeEnd - m_rangeStart);
+    const qint64 left = m_rangeStart + qint64(span * (m_zoneX / gridWidthPx()));
+    const qint64 right = m_rangeStart + qint64(span * ((m_zoneX + m_zoneWidth) / gridWidthPx()));
+    m_zoneWidth = 0;
+    update();
+    // validRange: at least 5 minutes; anything shorter is dropped silently.
+    if (right - left >= 5 * 60 * 1000) {
+        emit intervalSelected(left, right);
+    }
+}
+
 void HistoryChartWidget::setFillMode(bool on)
 {
     if (m_fillMode == on) {
@@ -2386,6 +2848,9 @@ void HistoryChartWidget::paintEvent(QPaintEvent *)
 {
     QPainter painter(this);
     painter.fillRect(rect(), kHistoryBackground);
+    if (!m_contentVisible) {
+        return;
+    }
 
     // MultiSessionActivity: one HistoLine row (30px) per session serie;
     // ExtraContent.requestedHeigth is 192 with more than one, else 60.
@@ -2558,6 +3023,20 @@ void HistoryChartWidget::paintEvent(QPaintEvent *)
         const double x =
             gridLeft + markerWidth * ((m_currentPositionMs - m_rangeStart) / m_markerStepMs);
         painter.fillRect(QRectF(x, 0, 1, chartHeight + 10), kMarkerColor);
+    }
+
+    // TimeRangeSelector while pressed: the zone and its two edges, #B7C245
+    // once it spans at least 5 minutes, gray before, at 30% opacity.
+    if (m_selecting && span > 0) {
+        const bool valid = span * (m_zoneWidth / gridWidth) >= 5 * 60 * 1000;
+        const QColor color = valid ? QColor(0xb7, 0xc2, 0x45) : QColor(Qt::gray);
+        const double x0 = gridLeft + m_zoneX;
+        const double selectorHeight = extraHeight + filtersHeight + (filtersHeight > 0 ? 10 : 0);
+        painter.fillRect(QRectF(x0, 0, 1, selectorHeight), color);
+        painter.fillRect(QRectF(x0 + m_zoneWidth, 0, 1, selectorHeight), color);
+        QColor fill = color;
+        fill.setAlphaF(0.3);
+        painter.fillRect(QRectF(x0, 0, m_zoneWidth, selectorHeight), fill);
     }
 }
 
@@ -2835,6 +3314,7 @@ HistoryView::HistoryView(ViewerConnection &connection, QWidget *parent)
         } else if (from > m_currentTab && to <= m_currentTab) {
             ++m_currentTab;
         }
+        saveTabs(); // tabMove: the new order is saved right away
     });
     tabRow->addWidget(m_historyTabBar, 0, Qt::AlignBottom);
     tabRow->addSpacing(3);
@@ -2883,6 +3363,7 @@ HistoryView::HistoryView(ViewerConnection &connection, QWidget *parent)
     videoLayout->addWidget(m_videoHeader);
 
     auto *videoBody = new QHBoxLayout;
+    m_videoBody = videoBody;
     videoBody->setContentsMargins(0, 0, 0, 0);
     videoBody->setSpacing(0);
     m_monitorStripArea = new QScrollArea(m_videoPanel);
@@ -2951,13 +3432,17 @@ HistoryView::HistoryView(ViewerConnection &connection, QWidget *parent)
     connect(m_appsAnimation, &QPropertyAnimation::finished, this, [this] {
         if (!m_appsOpen) {
             m_appsPanel->hide();
+            return;
         }
+        // animationPanel.onStopped: rightPadding = panel.width -- the video's
+        // viewport now ends where the panel begins.
+        m_videoBody->setContentsMargins(0, 0, m_appsPanel->width(), 0);
     });
     videoLayout->addLayout(videoBody, 1);
 
-    // History.qml statusIcon: over the video, no background, no mouse area
-    // (a click still reaches the video and toggles panelFull).
-    m_historyStatusIcon = new BigStatusIcon(m_monitorStripArea);
+    // History.qml statusIcon: anchors.fill the whole Video (its header
+    // included), no background, no mouse area.
+    m_historyStatusIcon = new BigStatusIcon(m_videoPanel);
     m_historyStatusIcon->setAttribute(Qt::WA_TransparentForMouseEvents);
     m_historyStatusIcon->hide();
 
@@ -3036,7 +3521,10 @@ HistoryView::HistoryView(ViewerConnection &connection, QWidget *parent)
     // qsTr("Change period") -- the running original shows its translation.
     m_changeSettingsButton = new QPushButton(QStringLiteral("Change settings"), this);
     m_changeSettingsButton->setObjectName(QStringLiteral("historyChangeButton"));
-    m_changeSettingsButton->setFixedSize(140, 25);
+    // History.qml:380,395: width = twoButtons.width = exportAviButton.width
+    // * 2 + column1.spacing (10).
+    const int actionButtonWidth = exportAviButtonWidth();
+    m_changeSettingsButton->setFixedSize(actionButtonWidth * 2 + 10, 25);
     connect(m_changeSettingsButton, &QPushButton::clicked, this, &HistoryView::onChangeSettingsClicked);
 
     const QIcon exportIcon = [] {
@@ -3046,13 +3534,11 @@ HistoryView::HistoryView(ViewerConnection &connection, QWidget *parent)
         icon.addPixmap(QPixmap(QStringLiteral(":/history/avi_export_normal.png")), QIcon::Disabled);
         return icon;
     }();
-    // "Video" in the real viewer saves an AVI; with no encoder here it
-    // exports the day's frames as a PNG sequence instead.
+    // "Video" saves the period as a .webm (VideoSaverSelector).
     m_exportVideoButton = new QPushButton(exportIcon, QStringLiteral("Video"), this);
     m_exportVideoButton->setObjectName(QStringLiteral("historyAssetButton"));
     m_exportVideoButton->setIconSize(QSize(13, 9));
-    m_exportVideoButton->setFixedSize(65, 19);
-    m_exportVideoButton->setToolTip(QStringLiteral("Export imagini (secventa PNG -- fara encoder video)"));
+    m_exportVideoButton->setFixedSize(actionButtonWidth, 19);
     connect(m_exportVideoButton, &QPushButton::clicked, this, &HistoryView::onExportVideoClicked);
     // SpeedButton.qml options.
     m_speedCombo = new QComboBox(this);
@@ -3070,7 +3556,7 @@ HistoryView::HistoryView(ViewerConnection &connection, QWidget *parent)
     m_speedCombo->hide();
     m_speedButton = new SpeedFaceButton(this);
     m_speedButton->setObjectName(QStringLiteral("historySpeedButton"));
-    m_speedButton->setFixedSize(65, 19);
+    m_speedButton->setFixedSize(actionButtonWidth, 19); // History.qml:495
     const auto updateSpeedFace = [this] {
         static_cast<SpeedFaceButton *>(m_speedButton)->setSpeedText(m_speedCombo->currentText());
     };
@@ -3110,8 +3596,7 @@ HistoryView::HistoryView(ViewerConnection &connection, QWidget *parent)
     m_keylogTableButton = new QPushButton(exportIcon, QStringLiteral("Text"), this);
     m_keylogTableButton->setObjectName(QStringLiteral("historyAssetButton"));
     m_keylogTableButton->setIconSize(QSize(13, 9));
-    m_keylogTableButton->setFixedSize(65, 19);
-    m_keylogTableButton->setToolTip(QStringLiteral("Keylogger"));
+    m_keylogTableButton->setFixedSize(actionButtonWidth, 19); // History.qml:508
     connect(m_keylogTableButton, &QPushButton::clicked, this, &HistoryView::onKeylogTableClicked);
 
     m_playButton = new QPushButton(this);
@@ -3225,7 +3710,10 @@ HistoryView::HistoryView(ViewerConnection &connection, QWidget *parent)
     buttonColumns->addStretch(1);
 
     auto *rightColumn = new QWidget(controlBlock);
+    m_sliderColumn = rightColumn;
     auto *rightColumnLayout = new QVBoxLayout(rightColumn);
+    // Its right margin (what is left of the page past widthSlider) is set
+    // by applyTimeStep.
     rightColumnLayout->setContentsMargins(0, 0, 0, 0);
     rightColumnLayout->setSpacing(0);
     rightColumnLayout->addWidget(m_timeline);
@@ -3258,12 +3746,45 @@ HistoryView::HistoryView(ViewerConnection &connection, QWidget *parent)
     m_chart->hide();
     m_chartsModel = new HistoryChartsModel(m_connection, m_chart, this);
     root->addWidget(m_chart);
+    // animationOpen / animationClose: chartsItem.wantHeight 0 <-> 186 in
+    // 250 ms (linear), pushing the controls and the keylogger bar up; the
+    // button's text and arrow follow only when it stops.
+    m_chartAnimation = new QVariantAnimation(this);
+    m_chartAnimation->setDuration(250);
+    connect(m_chartAnimation, &QVariantAnimation::valueChanged, this,
+            [this](const QVariant &value) { m_chart->setFixedHeight(value.toInt()); });
+    connect(m_chartAnimation, &QVariantAnimation::finished, this, [this] {
+        if (m_chartOpening) {
+            m_chartOpen = true;
+            m_chart->setContentVisible(true);
+        } else {
+            m_chartOpen = false;
+            m_chart->hide();
+            m_chart->setFixedHeight(kChartsItemHeight);
+        }
+        updateViolationToggleText();
+    });
+    connect(m_chart, &HistoryChartWidget::markerDragged, this, [this](int marker) {
+        // HistoryTab.setOnlineMarker: a marker with nothing is ignored.
+        if (m_timeline->isAllowedMarker(marker)) {
+            requestFrameAtMarker(marker);
+        }
+    });
+    connect(m_chart, &HistoryChartWidget::intervalSelected, this, &HistoryView::onChartInterval);
     updateViolationToggleText();
     applyTimeStep();
 
     // utils/LoadingStatusDialog.qml equivalent.
     // LoadingStatusDialog lives on the window's top layer; it is created on
     // first use, once this page is inside the main window.
+
+    m_infoTimeout = new QTimer(this);
+    m_infoTimeout->setSingleShot(true);
+    m_infoTimeout->setInterval(30 * 1000);
+    connect(m_infoTimeout, &QTimer::timeout, this, [this] {
+        m_infoTimedOut = true;
+        checkInfoReady();
+    });
 
     m_loadingDelay = new QTimer(this);
     m_loadingDelay->setSingleShot(true);
@@ -3274,6 +3795,16 @@ HistoryView::HistoryView(ViewerConnection &connection, QWidget *parent)
         }
     });
 
+    // videoStore's cleanup (every 60 s): a period's cache file goes once no
+    // History tab refers to it any more.
+    m_cacheEvictTimer = new QTimer(this);
+    m_cacheEvictTimer->setInterval(60 * 1000);
+    connect(m_cacheEvictTimer, &QTimer::timeout, this, &HistoryView::evictUnusedCaches);
+    connect(this, &QObject::destroyed, this, [page = static_cast<const HistoryView *>(this)] {
+        referencedCacheFiles().remove(page);
+    });
+    m_cacheEvictTimer->start();
+
     m_playbackTimer = new QTimer(this);
     // History.qml: markersPerSecond = speed -- at 1x one Time step marker
     // per second.
@@ -3282,16 +3813,30 @@ HistoryView::HistoryView(ViewerConnection &connection, QWidget *parent)
 
     // SliderBar.qml's rewind actions (Left/Right = one marker, Ctrl = ten)
     // and History.qml's stopPlay (Space).
-    const auto addShortcut = [this](const QKeySequence &keys, auto slot) {
+    const auto addShortcut = [this](const QKeySequence &keys, Qt::ShortcutContext context, auto slot) {
         auto *shortcut = new QShortcut(keys, this);
-        shortcut->setContext(Qt::WidgetWithChildrenShortcut);
+        shortcut->setContext(context);
         connect(shortcut, &QShortcut::activated, this, slot);
     };
-    addShortcut(QKeySequence(Qt::Key_Right), [this] { stepMarkers(1); });
-    addShortcut(QKeySequence(Qt::CTRL | Qt::Key_Right), [this] { stepMarkers(10); });
-    addShortcut(QKeySequence(Qt::Key_Left), [this] { stepMarkers(-1); });
-    addShortcut(QKeySequence(Qt::CTRL | Qt::Key_Left), [this] { stepMarkers(-10); });
-    addShortcut(QKeySequence(Qt::Key_Space), [this] { onPlayClicked(); });
+    // The rewind keys work anywhere in the window while History is shown --
+    // no click on the video or Play first (the top panel and the tab strip
+    // live outside this page, so focus is often not in it). A window
+    // shortcut is only enabled while this page is visible, a modal dialog
+    // takes the active window away, and a text field claims Left/Right
+    // through ShortcutOverride before the shortcut sees them;
+    // rewindAllowed() is the belt to those braces.
+    const auto rewind = [this](int markers) {
+        return [this, markers] {
+            if (rewindAllowed()) {
+                stepMarkers(markers);
+            }
+        };
+    };
+    addShortcut(QKeySequence(Qt::Key_Right), Qt::WindowShortcut, rewind(1));
+    addShortcut(QKeySequence(Qt::CTRL | Qt::Key_Right), Qt::WindowShortcut, rewind(10));
+    addShortcut(QKeySequence(Qt::Key_Left), Qt::WindowShortcut, rewind(-1));
+    addShortcut(QKeySequence(Qt::CTRL | Qt::Key_Left), Qt::WindowShortcut, rewind(-10));
+    addShortcut(QKeySequence(Qt::Key_Space), Qt::WidgetWithChildrenShortcut, [this] { onPlayClicked(); });
 
     connect(&m_connection, &ViewerConnection::historyFramesReceived, this,
             &HistoryView::onFramesReceived);
@@ -3305,23 +3850,38 @@ HistoryView::HistoryView(ViewerConnection &connection, QWidget *parent)
             &HistoryView::onCategoriesReceived);
     connect(&m_connection, &ViewerConnection::historyEmployeeCategoriesReceived, this,
             &HistoryView::onEmployeeCategoriesReceived);
+    connect(&m_connection, &ViewerConnection::historyDepartmentCategoriesReceived, this,
+            [this](quint32 streamId, const QList<HistoryDepartmentCategories> &departments) {
+                if (streamId != currentStreamId()) {
+                    return;
+                }
+                m_scopes.departments = departments;
+                updateInfoPanel();
+            });
     connect(&m_connection, &ViewerConnection::historyKeystrokesReceived, this,
             &HistoryView::onKeystrokesReceived);
     connect(&m_connection, &ViewerConnection::historyError, this, &HistoryView::onHistoryError);
     connect(&m_connection, &ViewerConnection::historySessionStatesReceived, this,
             [this](quint32 streamId, const QString &day, const QList<QPair<qint64, qint64>> &online,
-                   const QList<QPair<qint64, qint64>> &lock, const QList<QPair<qint64, qint64>> &saver) {
+                   const QList<QPair<qint64, qint64>> &lock, const QList<QPair<qint64, qint64>> &saver,
+                   const QList<QPair<qint64, qint64>> &noData) {
                 if (day != m_rangeKey || streamId != m_periodAnchor) {
                     return;
                 }
                 m_onlineRanges = online;
                 m_lockRanges = lock;
                 m_saverRanges = saver;
+                m_noDataRanges = noData;
                 m_statesLoaded = true;
+                // effectiveRanges: wherever the session was online, its
+                // noData stretches included.
+                m_timeline->setSessionRanges(online + noData);
+                refreshLoadedOverlay();
                 const int marker = m_timeline->currentMarker();
                 if (marker >= 0) {
                     updateHistoryStatusIcon(m_timeline->timestampForMarker(marker));
                 }
+                checkInfoReady();
             });
     connect(&m_connection, &ViewerConnection::statusChanged, this,
             [this](const QString &, bool connected) { onConnectionStatus(connected); });
@@ -3355,8 +3915,27 @@ void HistoryView::setDevices(const QHash<quint32, QString> &deviceNames,
         }
         return;
     }
+    // A tab restored from the saved configuration (or one whose employee
+    // came back under another session) finds its employee by name.
+    bool currentResolved = false;
     for (int i = 0; i < m_historyTabs.size(); ++i) {
+        HistoryTab &tab = m_historyTabs[i];
+        if (tab.deviceKey != 0 && deviceNames.contains(tab.deviceKey)) {
+            tab.employeeName = deviceNames.value(tab.deviceKey);
+        } else {
+            for (auto it = deviceNames.cbegin(); it != deviceNames.cend(); ++it) {
+                if (!tab.employeeName.isEmpty() && it.value() == tab.employeeName) {
+                    tab.deviceKey = it.key();
+                    currentResolved = currentResolved || i == m_currentTab;
+                    break;
+                }
+            }
+        }
         updateHistoryTabText(i);
+    }
+    if (currentResolved && m_activated && m_currentDeviceKey != m_historyTabs.at(m_currentTab).deviceKey) {
+        showHistoryTab(m_currentTab);
+        return;
     }
     if (m_reloadPending && !deviceMonitorStreams.value(m_currentDeviceKey).isEmpty()) {
         resumeAfterReconnect();
@@ -3399,9 +3978,9 @@ void HistoryView::showLoadingDialog(const QString &message)
         m_loadingDialog = new LoadingOverlay(window());
     }
     static_cast<LoadingOverlay *>(m_loadingDialog.data())->showMessage(message);
-    // History.qml:51,359: sliderAndMeta.enabled = !lockButtons (waitingForLoad).
-    m_leftColumn->setEnabled(false);
-    m_timeline->setEnabled(false);
+    // History.qml:51,359: sliderAndMeta.enabled = !lockButtons
+    // (waitingForLoad) -- every button, the slider and the violation toggle.
+    m_controlBlock->setEnabled(false);
 }
 
 void HistoryView::hideLoadingDialog()
@@ -3409,8 +3988,7 @@ void HistoryView::hideLoadingDialog()
     if (m_loadingDialog) {
         static_cast<LoadingOverlay *>(m_loadingDialog.data())->dismiss();
     }
-    m_leftColumn->setEnabled(true);
-    m_timeline->setEnabled(true);
+    m_controlBlock->setEnabled(true);
 }
 
 void HistoryView::openForDevice(quint32 deviceKey, const QString &day)
@@ -3424,10 +4002,14 @@ void HistoryView::openForDevice(quint32 deviceKey, const QString &day)
     // employee, otherwise a new tab for them.
     if (m_currentTab >= 0 && m_historyTabs.at(m_currentTab).deviceKey == deviceKey) {
         m_historyTabs[m_currentTab].period = period;
+        m_resumeMomentMs = -1;
+        m_resumePlaying = false;
+        saveTabs();
         jumpTo(deviceKey, period);
         return;
     }
-    addHistoryTab({deviceKey, period, m_timeStepMs});
+    // historyPanel.addTab(0, ...): a jump opens its tab first in the row.
+    addHistoryTab({deviceKey, period, m_timeStepMs}, 0);
 }
 
 void HistoryView::jumpTo(quint32 deviceKey, const HistoryPeriod &period)
@@ -3439,8 +4021,22 @@ void HistoryView::jumpTo(quint32 deviceKey, const HistoryPeriod &period)
     loadPeriod();
 }
 
+void HistoryView::showPeriodMoment()
+{
+    // history/video/Header.qml:40-45: with no current player block the
+    // header reads "( <start> - <stop> )" of the period.
+    if (!m_period.begin().isValid() || !m_period.end().isValid()) {
+        m_videoHeader->setMoment(QString());
+        return;
+    }
+    m_videoHeader->setMoment(QStringLiteral("( %1 - %2 )")
+                                 .arg(headerMomentText(m_period.begin()), headerMomentText(m_period.end())));
+}
+
 void HistoryView::showNoData()
 {
+    m_infoPending = false;
+    m_infoTimeout->stop();
     m_playbackTimer->stop();
     setPlaying(false);
     ++m_frameGeneration;
@@ -3452,13 +4048,15 @@ void HistoryView::showNoData()
     m_timestamps.clear();
     m_timeline->setTimestamps({});
     clearFrameCache();
+    m_segmentStore.close();
     m_segmentStore.clear();
+    m_cacheTag.clear();
     m_videoSegments.clear();
     m_emptyRanges.clear();
     m_segmentRequestInFlight = false;
     m_cacheRangeKey.clear();
     m_videoStrip->setStreams({});
-    m_videoHeader->setMoment(QString());
+    showPeriodMoment();
     m_keystream->setText(QString(), QString());
     m_infoPanel->setItems({}, {});
     m_statusLabel->setText(QStringLiteral("No information for selected period"));
@@ -3481,8 +4079,10 @@ void HistoryView::updateHistoryTabText(int index)
     if (index < 0 || index >= m_historyTabs.size()) {
         return;
     }
-    const quint32 deviceKey = m_historyTabs.at(index).deviceKey;
-    const QString name = m_deviceNames.value(deviceKey, QStringLiteral("Employee %1").arg(deviceKey));
+    const HistoryTab &tab = m_historyTabs.at(index);
+    const QString name = m_deviceNames.value(tab.deviceKey,
+                                             tab.employeeName.isEmpty() ? QStringLiteral("Employee %1").arg(tab.deviceKey)
+                                                                        : tab.employeeName);
     m_historyTabBar->setTabText(index, name);
     m_historyTabBar->setTabToolTip(index, name);
 }
@@ -3492,19 +4092,123 @@ void HistoryView::storeCurrentTab()
     if (m_currentTab < 0 || m_currentTab >= m_historyTabs.size()) {
         return;
     }
-    m_historyTabs[m_currentTab] = {m_currentDeviceKey, m_period, m_timeStepMs, m_speedCombo->currentIndex()};
+    HistoryTab &tab = m_historyTabs[m_currentTab];
+    if (m_currentDeviceKey != 0) {
+        tab.deviceKey = m_currentDeviceKey;
+        tab.employeeName = m_deviceNames.value(m_currentDeviceKey, tab.employeeName);
+    }
+    tab.period = m_period;
+    tab.timeStepMs = m_timeStepMs;
+    tab.speedIndex = m_speedCombo->currentIndex();
+    // Its View.History lives on while another tab is shown: the moment, the
+    // play state and the panels come back with it.
+    const int marker = m_timeline->currentMarker();
+    tab.positionMs = marker >= 0 && m_timeline->hasData() ? m_timeline->timestampForMarker(marker) : -1;
+    tab.playing = m_playbackTimer->isActive();
+    tab.chartOpen = m_chartAnimation->state() == QAbstractAnimation::Running ? m_chartOpening : m_chartOpen;
+    tab.appsOpen = m_appsOpen;
+    tab.panelFull = m_panelFull;
 }
 
-void HistoryView::addHistoryTab(const HistoryTab &tab)
+void HistoryView::saveTabs() const
+{
+    // HistoryContainer (one list, every window) + each tab's Config:
+    // employee, period, Time step -- written on every change.
+    QJsonArray tabs;
+    for (const HistoryTab &tab : m_historyTabs) {
+        const auto ms = [](const QDateTime &moment) {
+            return moment.isValid() ? static_cast<double>(moment.toMSecsSinceEpoch()) : 0.0;
+        };
+        tabs.append(QJsonObject{{QStringLiteral("id"), tab.id},
+                                {QStringLiteral("employee"), m_deviceNames.value(tab.deviceKey, tab.employeeName)},
+                                {QStringLiteral("type"), tab.period.type},
+                                {QStringLiteral("recentType"), tab.period.recentType},
+                                {QStringLiteral("recentMultiplier"), tab.period.recentMultiplier},
+                                {QStringLiteral("recentBegin"), ms(tab.period.recentBegin)},
+                                {QStringLiteral("recentEnd"), ms(tab.period.recentEnd)},
+                                {QStringLiteral("customBegin"), ms(tab.period.customBegin)},
+                                {QStringLiteral("customEnd"), ms(tab.period.customEnd)},
+                                {QStringLiteral("timeStep"), static_cast<double>(tab.timeStepMs)}});
+    }
+    QSettings settings;
+    settings.setValue(QStringLiteral("history/tabs"),
+                      QString::fromUtf8(QJsonDocument(tabs).toJson(QJsonDocument::Compact)));
+    if (!m_currentTabKey.isEmpty() && m_currentTab >= 0 && m_currentTab < m_historyTabs.size()) {
+        settings.setValue(m_currentTabKey, m_historyTabs.at(m_currentTab).id);
+    }
+}
+
+void HistoryView::restoreTabs(const QString &currentTabKey)
+{
+    m_currentTabKey = currentTabKey;
+    QSettings settings;
+    const QJsonArray tabs =
+        QJsonDocument::fromJson(settings.value(QStringLiteral("history/tabs")).toString().toUtf8()).array();
+    const QString currentId = settings.value(currentTabKey).toString();
+    const auto moment = [](const QJsonValue &value) {
+        const qint64 ms = static_cast<qint64>(value.toDouble());
+        return ms > 0 ? QDateTime::fromMSecsSinceEpoch(ms) : QDateTime();
+    };
+    int current = 0;
+    const QSignalBlocker blocker(m_historyTabBar);
+    for (const QJsonValue &value : tabs) {
+        const QJsonObject object = value.toObject();
+        HistoryTab tab;
+        tab.id = object.value(QStringLiteral("id")).toString();
+        tab.employeeName = object.value(QStringLiteral("employee")).toString();
+        // getInterval() returns the stored dates as they are: a restored
+        // "Today" stays on the day it was chosen.
+        tab.period.type = object.value(QStringLiteral("type")).toString(QStringLiteral("recent"));
+        tab.period.recentType = object.value(QStringLiteral("recentType")).toString(QStringLiteral("d"));
+        tab.period.recentMultiplier = object.value(QStringLiteral("recentMultiplier")).toInt(1);
+        tab.period.recentBegin = moment(object.value(QStringLiteral("recentBegin")));
+        tab.period.recentEnd = moment(object.value(QStringLiteral("recentEnd")));
+        tab.period.customBegin = moment(object.value(QStringLiteral("customBegin")));
+        tab.period.customEnd = moment(object.value(QStringLiteral("customEnd")));
+        tab.timeStepMs = static_cast<qint64>(object.value(QStringLiteral("timeStep")).toDouble(5 * 60 * 1000));
+        if (tab.id.isEmpty() || !tab.period.begin().isValid() || !tab.period.end().isValid()) {
+            continue;
+        }
+        if (tab.id == currentId) {
+            current = int(m_historyTabs.size());
+        }
+        m_historyTabs.append(tab);
+        m_historyTabBar->addTab(QString());
+        updateHistoryTabText(int(m_historyTabs.size()) - 1);
+    }
+    if (!m_historyTabs.isEmpty()) {
+        m_currentTab = current;
+        m_historyTabBar->setCurrentIndex(current);
+    }
+}
+
+void HistoryView::addHistoryTab(const HistoryTab &tab, int atIndex)
 {
     storeCurrentTab();
-    m_historyTabs.append(tab);
-    const QSignalBlocker blocker(m_historyTabBar);
-    m_historyTabBar->addTab(QString());
-    updateHistoryTabText(m_historyTabs.size() - 1);
-    m_historyTabBar->setCurrentIndex(m_historyTabs.size() - 1);
-    m_currentTab = m_historyTabs.size() - 1;
+    HistoryTab added = tab;
+    if (added.id.isEmpty()) {
+        // activity/History.qml addTab: "h" + random digits.
+        added.id = QStringLiteral("h%1").arg(QRandomGenerator::global()->bounded(100000000, 999999999));
+    }
+    if (added.employeeName.isEmpty()) {
+        added.employeeName = m_deviceNames.value(added.deviceKey);
+    }
+    const int index = atIndex < 0 || atIndex > m_historyTabs.size() ? int(m_historyTabs.size()) : atIndex;
+    m_historyTabs.insert(index, added);
+    {
+        const QSignalBlocker blocker(m_historyTabBar);
+        m_historyTabBar->insertTab(index, QString());
+        updateHistoryTabText(index);
+        m_historyTabBar->setCurrentIndex(index);
+    }
+    // The new tab is made current at once; it starts with its own player.
+    m_currentTab = index;
+    m_resumeMomentMs = -1;
+    m_resumePlaying = false;
+    saveTabs();
     if (m_activated) {
+        // A new tab is a new View.History: its panels start closed.
+        applyPanelState(false, false, false);
         showHistoryTab(m_currentTab);
     } else if (m_activateWhenReady) {
         activate();
@@ -3516,9 +4220,14 @@ void HistoryView::showHistoryTab(int index)
     if (index < 0 || index >= m_historyTabs.size()) {
         return;
     }
-    if (index != m_currentTab) {
+    const bool switching = index != m_currentTab;
+    if (switching) {
         storeCurrentTab();
         m_currentTab = index;
+        // The tab put back at its own moment, playing again if it was.
+        m_resumeMomentMs = m_historyTabs.at(index).positionMs;
+        m_resumePlaying = m_historyTabs.at(index).playing;
+        saveTabs();
     }
     if (!m_activated) {
         return;
@@ -3527,6 +4236,15 @@ void HistoryView::showHistoryTab(int index)
     m_timeStepMs = tab.timeStepMs;
     applyTimeStep();
     m_speedCombo->setCurrentIndex(tab.speedIndex);
+    if (switching) {
+        applyPanelState(tab.chartOpen, tab.appsOpen, tab.panelFull);
+    }
+    if (tab.deviceKey == 0 || !m_deviceNames.contains(tab.deviceKey)) {
+        // A restored tab whose employee is not known (yet): setDevices loads
+        // it as soon as the employee shows up.
+        m_videoHeader->setName(tab.employeeName);
+        return;
+    }
     jumpTo(tab.deviceKey, tab.period);
 }
 
@@ -3539,12 +4257,20 @@ void HistoryView::openAddTabDialog()
         return;
     }
     m_activated = true;
-    addHistoryTab({dialog.employee(), dialog.period(), dialog.timeStepMs()});
+    // HistoryPanel: the "+" dialog inserts at the current tab's place.
+    addHistoryTab({dialog.employee(), dialog.period(), dialog.timeStepMs()}, qMax(0, m_currentTab));
 }
 
 void HistoryView::closeHistoryTab(int index)
 {
     if (index < 0 || index >= m_historyTabs.size()) {
+        return;
+    }
+    // activity/History.qml onTabDel: a tab whose video is being saved stays.
+    if (isVideoSaving()
+        && cacheTag(m_historyTabs.at(index).deviceKey, m_historyTabs.at(index).period) == m_videoSaverTag) {
+        QMessageBox::critical(this, QStringLiteral("Error"),
+                              QStringLiteral("Cannot delete this tab, because video saving in progress"));
         return;
     }
     // Tabs.qml's ConfirmBox.
@@ -3560,6 +4286,7 @@ void HistoryView::closeHistoryTab(int index)
         const QSignalBlocker blocker(m_historyTabBar);
         m_historyTabBar->removeTab(index);
     }
+    saveTabs();
     if (m_historyTabs.isEmpty()) {
         m_currentTab = -1;
         m_currentDeviceKey = 0;
@@ -3569,6 +4296,17 @@ void HistoryView::closeHistoryTab(int index)
         showNoData();
         // HistoryPanel.openPanelName(): with no tabs left, ask for one.
         openAddTabDialog();
+        return;
+    }
+    // The closed tab was not necessarily the current one: only a closed
+    // current tab hands over to its neighbour.
+    if (index != m_currentTab) {
+        if (index < m_currentTab) {
+            --m_currentTab;
+        }
+        const QSignalBlocker blocker(m_historyTabBar);
+        m_historyTabBar->setCurrentIndex(m_currentTab);
+        saveTabs();
         return;
     }
     m_currentTab = -1;
@@ -3616,7 +4354,7 @@ void HistoryView::positionOverlays()
     // shrink them.
     m_videoStrip->setViewSize(QSize(m_monitorStripArea->viewport()->width(), m_monitorStripArea->height()));
     m_statusLabel->setGeometry(m_monitorStripArea->rect());
-    m_historyStatusIcon->setGeometry(m_monitorStripArea->rect());
+    m_historyStatusIcon->setGeometry(m_videoPanel->rect());
     // Right edge 1px inside the video's right border, top on the header's
     // last line (videoCell 7px inset + 24px header - 1).
     const QSize hint = m_toggleAppsButton->sizeHint();
@@ -3640,6 +4378,8 @@ void HistoryView::positionOverlays()
 
 void HistoryView::updateStatusVisibility()
 {
+    // exportTextButton.enabled: !!historyModel.currentActiveSession.
+    m_keylogTableButton->setEnabled(m_timeline->hasData());
     m_statusLabel->setVisible(!m_statusLabel->text().isEmpty());
     m_statusLabel->raise();
     updateAppsButton();
@@ -3686,8 +4426,9 @@ void HistoryView::switchDevice(quint32 deviceKey)
     setPlaying(false);
     m_currentDeviceKey = deviceKey;
     m_videoHeader->setName(m_deviceNames.value(deviceKey, QStringLiteral("Employee %1").arg(deviceKey)));
+    m_timeline->setSessionLabel(sessionMarker(), !m_deviceMonitorStreams.value(deviceKey).isEmpty());
     rebuildMonitorStrip();
-    m_employeeCategories.clear();
+    m_scopes = CategoryScopes();
     m_chartsModel->clear();
 
     const quint32 streamId = currentStreamId();
@@ -3708,9 +4449,13 @@ void HistoryView::loadPeriod()
     m_inFlightMarker = -1;
     m_inFlightRequestId = 0;
     m_inFlightStreams.clear();
-    m_videoExport.active = false;
-    m_videoExport.pending.clear();
-    m_exportVideoButton->setEnabled(true);
+    m_downloadComplete = false;
+    m_infoPending = true;
+    m_screensAnswered = false;
+    m_infoTimedOut = false;
+    m_infoTimeout->start();
+    m_noDataRanges.clear();
+    m_timeline->setSessionRanges({});
     m_segmentRequestInFlight = false;
     m_videoSegments.clear();
     m_emptyRanges.clear();
@@ -3724,12 +4469,20 @@ void HistoryView::loadPeriod()
     const QString nextRangeKey = ViewerConnection::rangeKey(periodStartMs(), periodStopMs());
     if (nextRangeKey != m_cacheRangeKey || m_currentDeviceKey != m_cacheDeviceKey) {
         clearFrameCache();
-        m_segmentStore.clear();
+        // Each period has its own cache file; what it holds is known (and
+        // blue) at once, from an earlier visit or an earlier run.
+        const QString tag = cacheTag(m_currentDeviceKey, m_period);
+        if (tag != m_cacheTag) {
+            m_cacheTag = tag;
+            QDir().mkpath(HistorySegmentStore::cacheDirectory());
+            if (!m_segmentStore.open(HistorySegmentStore::cacheFileForTag(tag))) {
+                m_segmentStore.clear();
+            }
+        }
     }
     m_cacheRangeKey = nextRangeKey;
     m_cacheDeviceKey = m_currentDeviceKey;
     m_videoStrip->setAllLoading();
-    m_videoHeader->setMoment(QString());
     m_keystream->setText(QString(), QString());
     m_webVisits.clear();
     m_appSegments.clear();
@@ -3739,6 +4492,8 @@ void HistoryView::loadPeriod()
 
     const qint64 start = periodStartMs();
     const qint64 stop = periodStopMs();
+    // No moment until the first marker lands (applyMarker): the period.
+    showPeriodMoment();
     m_rangeKey = ViewerConnection::rangeKey(start, stop);
     m_timeline->setRange(start, stop);
     m_timeAxis->setRange(start, stop);
@@ -3781,6 +4536,25 @@ void HistoryView::loadPeriod()
 void HistoryView::onTimelineMoved(int marker)
 {
     requestFrameAtMarker(marker);
+}
+
+bool HistoryView::rewindAllowed() const
+{
+    if (!isVisible() || !m_timeline->isEnabled() || QApplication::activeModalWidget()
+        || QApplication::activePopupWidget()) {
+        return false;
+    }
+    QWidget *focus = QApplication::focusWidget();
+    if (auto *line = qobject_cast<QLineEdit *>(focus)) {
+        return line->isReadOnly();
+    }
+    if (auto *text = qobject_cast<QTextEdit *>(focus)) {
+        return text->isReadOnly();
+    }
+    if (auto *plain = qobject_cast<QPlainTextEdit *>(focus)) {
+        return plain->isReadOnly();
+    }
+    return !qobject_cast<QAbstractSpinBox *>(focus);
 }
 
 void HistoryView::stepMarkers(int markers)
@@ -3857,9 +4631,12 @@ void HistoryView::refreshLoadedOverlay()
     for (qint64 timestampMs : std::as_const(m_loadedTimestamps)) {
         m_timeline->markLoaded(m_timeline->markerForTimestamp(timestampMs));
     }
-    // And every downloaded VP8 stretch -- these are most of what is loaded.
-    for (const QPair<qint64, qint64> &span : m_segmentStore.spans(currentStreamId())) {
-        m_timeline->markLoadedRange(span.first, span.second);
+    // And every screen's downloaded VP8 stretch -- these are most of what
+    // is loaded.
+    for (quint32 streamId : historyStreams()) {
+        for (const QPair<qint64, qint64> &span : m_segmentStore.spans(streamId)) {
+            m_timeline->markLoadedRange(span.first, span.second);
+        }
     }
 }
 
@@ -3893,9 +4670,7 @@ void HistoryView::applyMarker(int marker)
     // The handle, the moment, the running-apps panel, the keystream and the
     // chart marker all move now -- the UI never waits on the host.
     const QDateTime moment = QDateTime::fromMSecsSinceEpoch(timestampMs);
-    m_videoHeader->setMoment(QStringLiteral("( %1 %2 )")
-                                 .arg(QLocale(QLocale::English).toString(moment.date(), QStringLiteral("M/d/yy")),
-                                      moment.toString(QStringLiteral("hh:mm:ss"))));
+    m_videoHeader->setMoment(QStringLiteral("( %1 )").arg(headerMomentText(moment)));
     updateTextLogHighlight(timestampMs);
     updateKeystream(timestampMs);
     updateHistoryStatusIcon(timestampMs);
@@ -3907,11 +4682,13 @@ void HistoryView::applyMarker(int marker)
     // JPEG fetched earlier -- is drawn straight away, with no request at all.
     // This is the whole point of the segment store: scrubbing over
     // downloaded ground is as smooth as a video player.
-    const bool complete = showFromStore(timestampMs);
+    // Nothing is asked for per seek: a moment not downloaded yet shows
+    // Loading until the background download (re-ordered around the new
+    // position right here) reaches it.
+    const bool needsFetch = showFromStore(timestampMs);
     m_desiredMarker = marker;
-    // Keep pulling the period down around wherever the user just moved to.
     dispatchPrefetch();
-    if (complete) {
+    if (!needsFetch) {
         qCDebug(lcHistoryTiming, "marker %d: served locally in %lld ms", marker,
                 applyTimer.elapsed());
         return;
@@ -3941,7 +4718,7 @@ void HistoryView::dispatchFrameRequest()
     // Every screen of the device is shown at once (see rebuildMonitorStrip),
     // but only the ones not already cached are asked for.
     for (quint32 streamId : historyStreams()) {
-        if (!cachedFrame(streamId, timestampMs).isNull()) {
+        if (screenState(streamId, timestampMs) != ScreenState::Fetch) {
             continue;
         }
         m_inFlightStreams.insert(streamId);
@@ -3976,11 +4753,15 @@ void HistoryView::onPlayClicked()
     if (m_timestamps.isEmpty()) {
         return;
     }
-    if (m_timeline->currentMarker() >= m_timeline->lastAllowedMarker()) {
-        requestFrameAtMarker(m_timeline->nearestAllowedMarker(0, true));
-    }
     setPlaying(true);
     m_playbackTimer->start();
+    if (m_timeline->currentMarker() >= m_timeline->lastAllowedMarker()) {
+        requestFrameAtMarker(m_timeline->nearestAllowedMarker(0, true));
+    } else {
+        // The player's first step is taken at once, the next ones on the
+        // timer.
+        onPlaybackTick();
+    }
 }
 
 void HistoryView::onPlaybackTick()
@@ -4000,14 +4781,140 @@ void HistoryView::onPlaybackTick()
         setPlaying(false);
         return;
     }
+    // The player waits while the next moment is still Loading on any screen
+    // -- playback never runs ahead of the download.
+    if (!markerReady(next)) {
+        dispatchPrefetch();
+        return;
+    }
     requestFrameAtMarker(next);
 }
 
 void HistoryView::onToggleViolationPanel()
 {
-    m_chartOpen = !m_chartOpen;
-    m_chart->setVisible(m_chartOpen && !m_panelFull);
+    if (m_chartAnimation->state() == QAbstractAnimation::Running) {
+        return;
+    }
+    m_chartOpening = !m_chartOpen;
+    if (m_chartOpening) {
+        // The content is created only once the panel is open.
+        m_chart->setContentVisible(false);
+        m_chart->setFixedHeight(0);
+        m_chart->setVisible(!m_panelFull);
+        m_chartAnimation->setStartValue(0);
+        m_chartAnimation->setEndValue(kChartsItemHeight);
+    } else {
+        m_chartAnimation->setStartValue(m_chart->height());
+        m_chartAnimation->setEndValue(0);
+    }
+    m_chartAnimation->start();
+}
+
+void HistoryView::onChartInterval(qint64 beginMs, qint64 endMs)
+{
+    // History.qml onWantGoToHistory -> GoToHistoryDialog titled "Change
+    // period": the selected range (read-only) and a Time step for it; OK
+    // opens a new History tab for that custom period, first in the row.
+    const QDateTime begin = QDateTime::fromMSecsSinceEpoch(beginMs);
+    const QDateTime end = QDateTime::fromMSecsSinceEpoch(endMs);
+    QDialog dialog(this);
+    dialog.setWindowTitle(QStringLiteral("Change period"));
+    dialog.setModal(true);
+    auto *layout = new QVBoxLayout(&dialog);
+    layout->addWidget(new QLabel(QStringLiteral("Time range: "), &dialog));
+    auto *range = new QWidget(&dialog);
+    auto *rangeRow = new QHBoxLayout(range);
+    rangeRow->setContentsMargins(0, 0, 0, 0);
+    auto *from = new QDateTimeEdit(begin, range);
+    auto *to = new QDateTimeEdit(end, range);
+    from->setDisplayFormat(QStringLiteral("dd.MM.yyyy HH:mm"));
+    to->setDisplayFormat(QStringLiteral("dd.MM.yyyy HH:mm"));
+    rangeRow->addWidget(new QLabel(QStringLiteral("from: "), range));
+    rangeRow->addWidget(from);
+    rangeRow->addWidget(new QLabel(QStringLiteral("to: "), range));
+    rangeRow->addWidget(to);
+    range->setEnabled(false); // enabled: false; opacity: 0.5
+    auto *dim = new QGraphicsOpacityEffect(range);
+    dim->setOpacity(0.5);
+    range->setGraphicsEffect(dim);
+    layout->addWidget(range);
+    auto *stepRow = new QHBoxLayout;
+    stepRow->addWidget(new QLabel(QStringLiteral("Time step: "), &dialog));
+    auto *steps = new QComboBox(&dialog);
+    steps->setFixedWidth(130);
+    // TimeStepComboBox: the steps that fit the range (10 .. maxSteps of
+    // them), the one closest to the current step selected.
+    const qint64 target = endMs - beginMs;
+    const double maxSteps = target <= 86400000LL ? 86400 : (target <= 8 * 86400000LL ? 2304 : 300);
+    int bestIndex = -1;
+    qint64 bestDistance = std::numeric_limits<qint64>::max();
+    for (qint64 value : kTimeSteps) {
+        const double count = static_cast<double>(target) / value;
+        if (count < 10 || count > maxSteps) {
+            continue;
+        }
+        steps->addItem(timeStepText(value), value);
+        if (qAbs(value - m_timeStepMs) < bestDistance) {
+            bestDistance = qAbs(value - m_timeStepMs);
+            bestIndex = steps->count() - 1;
+        }
+    }
+    if (bestIndex >= 0) {
+        steps->setCurrentIndex(bestIndex);
+    }
+    stepRow->addWidget(steps);
+    stepRow->addStretch(1);
+    layout->addLayout(stepRow);
+    auto *buttons = new QDialogButtonBox(QDialogButtonBox::Ok | QDialogButtonBox::Cancel, &dialog);
+    connect(buttons, &QDialogButtonBox::accepted, &dialog, &QDialog::accept);
+    connect(buttons, &QDialogButtonBox::rejected, &dialog, &QDialog::reject);
+    layout->addWidget(buttons);
+    if (dialog.exec() != QDialog::Accepted || m_currentDeviceKey == 0) {
+        return;
+    }
+    HistoryPeriod period = m_period;
+    period.type = QStringLiteral("custom");
+    period.customBegin = begin;
+    period.customEnd = end;
+    period.recentBegin = begin;
+    period.recentEnd = end;
+    const qint64 step = steps->currentIndex() >= 0 ? steps->currentData().toLongLong() : m_timeStepMs;
+    addHistoryTab({m_currentDeviceKey, period, step}, 0);
+}
+
+void HistoryView::setChartOpen(bool open)
+{
+    m_chartAnimation->stop();
+    m_chartOpen = open;
+    m_chart->setContentVisible(true);
+    m_chart->setFixedHeight(kChartsItemHeight);
+    m_chart->setVisible(open && !m_panelFull);
     updateViolationToggleText();
+}
+
+void HistoryView::setAppsOpen(bool open)
+{
+    m_appsAnimation->stop();
+    m_appsOpen = open;
+    m_toggleAppsButton->setIcon(QIcon(open
+        ? QStringLiteral(":/history/video/buttonRunningApp/applications_arrow_right.png")
+        : QStringLiteral(":/history/video/buttonRunningApp/applications_arrow_left.png")));
+    m_videoBody->setContentsMargins(0, 0, open ? m_appsPanel->width() : 0, 0);
+    positionOverlays();
+    m_appsPanel->setVisible(open);
+    if (open) {
+        m_appsPanel->raise();
+        m_toggleAppsButton->raise();
+    }
+}
+
+void HistoryView::applyPanelState(bool chartOpen, bool appsOpen, bool panelFull)
+{
+    setChartOpen(chartOpen);
+    setAppsOpen(appsOpen);
+    if (panelFull != m_panelFull) {
+        togglePanelFull();
+    }
 }
 
 void HistoryView::togglePanelFull()
@@ -4060,15 +4967,26 @@ void HistoryView::setPlaying(bool playing)
 void HistoryView::applyTimeStep()
 {
     // Audio.qml (column21) only exists at Time step = 1s, and shifts both
-    // the slider/TimeLine (12 leftMargin + column1 140 + 5 + column2 60 + 5
+    // the slider/TimeLine (12 leftMargin + column1 + 5 + column2 60 + 5
     // [+ column21 39 + 5] + 1 + MultiSessionsSlider spacing 10) and the chart
     // grid (Filters leftMargin 10 + widthActionButtons = column1 + column2
-    // + 20 + 12 [+ column21]).
+    // + 20 + 12 [+ column21], History.qml:363). column1 is as wide as
+    // changeButton (2 * exportAviButton.width + 10).
     const bool audioVisible = m_timeStepMs <= 1000;
     m_muteButton->setVisible(audioVisible);
     const int audioWidth = audioVisible ? 39 : 0;
-    m_leftColumn->setFixedWidth(12 + 140 + 5 + 60 + 5 + (audioVisible ? audioWidth + 5 : 0) + 1 + 10);
-    m_chart->setGridLeft(10 + 140 + 60 + 20 + 12 + audioWidth);
+    const int column1Width = m_changeSettingsButton->width();
+    const int column2Width = 60;
+    const int leftWidth = 12 + column1Width + 5 + column2Width + 5 + (audioVisible ? audioWidth + 5 : 0) + 1 + 10;
+    m_leftColumn->setFixedWidth(leftWidth);
+    m_chart->setGridLeft(10 + column1Width + column2Width + 20 + 12 + audioWidth);
+    // History.qml:658-660 widthSlider = sliderAndMeta.width - column1 -
+    // column2 [- column21] - 50 (single session): the TimeLine stops
+    // 50 - (leftWidth - column1 - column2 - column21) px short of the page's
+    // right edge -- 17, or 12 at Time step = 1s; the bar reaches it
+    // (TimelineWidget::barWidth, measured).
+    const int rightGap = 50 - (leftWidth - column1Width - column2Width - audioWidth);
+    m_sliderColumn->layout()->setContentsMargins(0, 0, qMax(0, rightGap), 0);
     m_timeline->setStepMs(m_timeStepMs);
     // The marker grid was renumbered: put the blue overlay (and the handle)
     // back where the cache says they belong.
@@ -4086,153 +5004,456 @@ void HistoryView::onSpeedChanged(int index)
     m_playbackTimer->setInterval(qMax(20, static_cast<int>(1000.0 / multiplier)));
 }
 
+namespace {
+// SaveDialog.qml fixFileName: lower-case on Windows, and every character a
+// file name cannot (or should not) carry replaced by '_'.
+QString fixFileName(QString name)
+{
+#ifdef Q_OS_WIN
+    name = name.toLower();
+#endif
+    static const QString kBad = QStringLiteral("/\\:*?\"'<>|+%!@~&`#{}$=");
+    for (QChar &c : name) {
+        if (kBad.contains(c)) {
+            c = QLatin1Char('_');
+        }
+    }
+    return name;
+}
+
+// utils/DatetimePrinter.dateToStr for the English UI.
+QString dateToStr(const QDateTime &moment)
+{
+    return QLocale(QLocale::English, QLocale::UnitedStates).toString(moment, QStringLiteral("MM.dd.yyyy hh.mm ap"));
+}
+
+// Layers/SaveDialog.qml: the extra content (session, format, ...), the
+// directory (remembered per recentDirCookie) and the file name; Ok checks
+// the path, cleans the name, adds the extension and asks before
+// overwriting (Yes / No = name_1, name_2... / Cancel).
+class HistorySaveDialog final : public QDialog
+{
+public:
+    HistorySaveDialog(const QString &title, const QString &extension, const QString &recentDirCookie,
+                      const QString &initialName, QWidget *parent)
+        : QDialog(parent)
+        , m_extension(extension)
+        , m_cookie(recentDirCookie)
+    {
+        setWindowTitle(title);
+        setModal(true);
+        auto *layout = new QVBoxLayout(this);
+        m_form = new QFormLayout;
+        layout->addLayout(m_form);
+        const QString recent = QSettings().value(QStringLiteral("saveDialog/") + m_cookie).toString();
+        m_dirEdit = new QLineEdit(recent.isEmpty() || !QFileInfo(recent).isDir()
+                                      ? QStandardPaths::writableLocation(QStandardPaths::DocumentsLocation)
+                                      : recent,
+                                  this);
+        m_dirEdit->setReadOnly(true);
+        auto *browse = new QPushButton(QStringLiteral("..."), this);
+        browse->setFixedWidth(32);
+        connect(browse, &QPushButton::clicked, this, [this] {
+            const QString dir = QFileDialog::getExistingDirectory(this, QStringLiteral("Directories Tree:"),
+                                                                  m_dirEdit->text());
+            if (!dir.isEmpty()) {
+                m_dirEdit->setText(QDir::toNativeSeparators(dir));
+            }
+        });
+        auto *dirRow = new QHBoxLayout;
+        dirRow->addWidget(m_dirEdit, 1);
+        dirRow->addWidget(browse);
+        m_form->addRow(QStringLiteral("Current dir:"), dirRow);
+        m_fileEdit = new QLineEdit(initialName, this);
+        m_fileEdit->setMinimumWidth(360);
+        m_form->addRow(QStringLiteral("File:"), m_fileEdit);
+        auto *buttons = new QDialogButtonBox(this);
+        buttons->addButton(QStringLiteral("Cancel"), QDialogButtonBox::RejectRole);
+        buttons->addButton(QStringLiteral("Ok"), QDialogButtonBox::AcceptRole);
+        connect(buttons, &QDialogButtonBox::accepted, this, &HistorySaveDialog::tryAccept);
+        connect(buttons, &QDialogButtonBox::rejected, this, &QDialog::reject);
+        layout->addWidget(buttons);
+    }
+
+    // The extra content goes above the directory and the file name.
+    void addRow(const QString &label, QWidget *field) { m_form->insertRow(m_extraRows++, label, field); }
+    void addRow(const QString &label, const QString &value) { addRow(label, new QLabel(value, this)); }
+    void addWidget(QWidget *widget) { m_form->insertRow(m_extraRows++, widget); }
+    void setExtension(const QString &extension) { m_extension = extension; }
+    QString path() const { return m_path; }
+
+private:
+    void tryAccept()
+    {
+        const QString directory = m_dirEdit->text().trimmed();
+        if (directory.isEmpty() || !QFileInfo(directory).isDir()) {
+            QMessageBox::warning(this, QStringLiteral("Warning"), QStringLiteral("Path ok file name is not set"));
+            return;
+        }
+        QString file = m_fileEdit->text().trimmed();
+        if (file.isEmpty()) {
+            file = QStringLiteral("No name");
+        }
+        file = fixFileName(file);
+        if (!file.endsWith(m_extension)) {
+            file += QLatin1Char('.') + m_extension;
+        }
+        QString path = QDir(directory).filePath(file);
+        if (QFileInfo::exists(path)) {
+            QMessageBox box(QMessageBox::Question, QStringLiteral("Rewrite confirmation"),
+                            QStringLiteral("File \"%1\" already exists. Press Yes to rewrite, No to save with different name.")
+                                .arg(file),
+                            QMessageBox::Yes | QMessageBox::No | QMessageBox::Cancel, this);
+            const int answer = box.exec();
+            if (answer == QMessageBox::Cancel) {
+                return;
+            }
+            if (answer == QMessageBox::No) {
+                const QString base = file.left(file.size() - m_extension.size() - 1);
+                for (int n = 1;; ++n) {
+                    path = QDir(directory).filePath(QStringLiteral("%1_%2.%3").arg(base).arg(n).arg(m_extension));
+                    if (!QFileInfo::exists(path)) {
+                        break;
+                    }
+                }
+            }
+        }
+        QSettings().setValue(QStringLiteral("saveDialog/") + m_cookie, directory);
+        m_path = path;
+        accept();
+    }
+
+    QFormLayout *m_form = nullptr;
+    int m_extraRows = 0;
+    QLineEdit *m_dirEdit = nullptr;
+    QLineEdit *m_fileEdit = nullptr;
+    QString m_extension;
+    QString m_cookie;
+    QString m_path;
+};
+
+// ProgressBar { kind: "big" } in VideoSaverProgress: 250 wide, 0..100.
+class SaverProgressBar final : public QWidget
+{
+public:
+    explicit SaverProgressBar(QWidget *parent)
+        : QWidget(parent)
+    {
+        setFixedSize(250, kProgressHeight);
+    }
+    void setValue(int value)
+    {
+        if (value != m_value) {
+            m_value = value;
+            update();
+        }
+    }
+
+protected:
+    void paintEvent(QPaintEvent *) override
+    {
+        QPainter painter(this);
+        painter.setRenderHint(QPainter::Antialiasing);
+        const QRectF bar(0, 0, width(), height());
+        QPainterPath pill;
+        pill.addRoundedRect(bar, height() / 2.0, height() / 2.0);
+        painter.setClipPath(pill);
+        painter.fillRect(bar, QColor(0x43, 0x44, 0x4b));
+        painter.fillRect(QRectF(0, 0, width() * qBound(0, m_value, 100) / 100.0, height()), QColor(0x6f, 0x71, 0x7f));
+        painter.setClipping(false);
+        painter.setPen(Qt::white);
+        QFont font(QStringLiteral("Roboto"));
+        font.setPixelSize(13);
+        painter.setFont(font);
+        painter.drawText(bar, Qt::AlignCenter, QStringLiteral("%1%").arg(m_value));
+    }
+
+private:
+    int m_value = 0;
+};
+
+// Keystrokes without the bracketed special keys (Result.cutSystemKeys:
+// "without system buttons").
+QString cutSystemKeys(const QString &text)
+{
+    static const QRegularExpression kSystemKey(QStringLiteral("<[A-Z][A-Z0-9_]*>"));
+    QString out = text;
+    out.remove(kSystemKey);
+    return out;
+}
+} // namespace
+
+QString HistoryView::sessionMarker() const
+{
+    return m_deviceNames.value(m_currentDeviceKey, QStringLiteral("Employee %1").arg(m_currentDeviceKey));
+}
+
 void HistoryView::onKeylogTableClicked()
 {
-    // m_textLog is a persistent widget (so its scroll position/selection
-    // survive being reopened) -- reparent it into a throwaway dialog and
-    // back out again on close, rather than owning a QTableWidget per open.
-    auto *dialog = new QDialog(this);
-    dialog->setWindowTitle(QStringLiteral("Keylogger"));
-    dialog->resize(760, 420);
-    auto *layout = new QVBoxLayout(dialog);
-    layout->addWidget(m_textLog);
+    // History.qml exportTextButton -> KeyloggerExporter.beginExport(session,
+    // employee, historyModel.start, historyModel.stop): the session's
+    // keystrokes over the whole period.
+    if (m_textExport.active || !m_timeline->hasData()) {
+        return;
+    }
+    const QString employee = m_deviceNames.value(m_currentDeviceKey).trimmed();
+    const QString initial = QStringLiteral("%1_%2_%3").arg(employee, dateToStr(m_period.begin()),
+                                                           dateToStr(m_period.end()));
+    // utils/KeyloggerExport.qml.
+    HistorySaveDialog dialog(QStringLiteral("Save keystrokes"), QStringLiteral("csv"),
+                             QStringLiteral("keyloggerExport"), initial, this);
+    dialog.addRow(QStringLiteral("Session:"), sessionMarker());
+    auto *format = new MultiSwitch(&dialog);
+    format->addTab(QStringLiteral("csv"));
+    format->addTab(QStringLiteral("xlsx"));
+    format->setCurrentIndex(0);
+    connect(format, &MultiSwitch::currentChanged, &dialog, [&dialog](int index) {
+        dialog.setExtension(index == 1 ? QStringLiteral("xlsx") : QStringLiteral("csv"));
+    });
+    dialog.addRow(QStringLiteral("File format:"), format);
+    auto *withoutSystemKeys = new QCheckBox(QStringLiteral("without system buttons"), &dialog);
+    dialog.addWidget(withoutSystemKeys);
+    if (dialog.exec() != QDialog::Accepted) {
+        return;
+    }
+    m_textExport = TextExportState();
+    m_textExport.active = true;
+    m_textExport.path = dialog.path();
+    m_textExport.xlsx = format->currentIndex() == 1;
+    m_textExport.cutSystemKeys = withoutSystemKeys->isChecked();
+    m_textExport.rangeKey = m_rangeKey;
+    m_textExport.streamId = currentStreamId();
+    // GenericBox "In progress..." with a Spinner and Cancel.
+    auto *progress = new QProgressDialog(QStringLiteral("In progress..."), QStringLiteral("Cancel"), 0, 0, this);
+    progress->setWindowTitle(QStringLiteral("In progress..."));
+    progress->setModal(true);
+    progress->setMinimumDuration(0);
+    progress->setAttribute(Qt::WA_DeleteOnClose);
+    connect(progress, &QProgressDialog::canceled, this, [this] {
+        m_textExport.active = false;
+        if (m_textExport.progress) {
+            m_textExport.progress->close();
+        }
+    });
+    m_textExport.progress = progress;
+    progress->show();
+    m_connection.requestKeystrokes(m_textExport.streamId, periodStartMs(), periodStopMs());
+}
 
-    // Matches the real viewer's KeyloggerExporter.qml (CSV/XLSX export) --
-    // both formats are real now (see writeMinimalXlsx below).
-    auto *exportRow = new QHBoxLayout;
-    auto *exportCsvButton = new QPushButton(QStringLiteral("Export CSV"), dialog);
-    auto *exportXlsxButton = new QPushButton(QStringLiteral("Export XLSX"), dialog);
-    exportRow->addWidget(exportCsvButton);
-    exportRow->addWidget(exportXlsxButton);
-    exportRow->addStretch();
-    layout->addLayout(exportRow);
-
-    static const QStringList kHeaders = {QStringLiteral("Date"), QStringLiteral("Pressing period"),
-                                         QStringLiteral("Application"), QStringLiteral("Title"),
-                                         QStringLiteral("Keystrokes")};
-    auto collectRows = [this]() {
-        QList<QStringList> rows;
-        rows.append(kHeaders);
-        for (int row = m_textLog->rowCount() - 1; row >= 0; --row) {
-            QStringList fields;
-            for (int col = 0; col < 5; ++col) {
-                fields << (m_textLog->item(row, col) ? m_textLog->item(row, col)->text() : QString());
+void HistoryView::finishTextExport(const QList<HistoryKeystrokeEntry> &entries)
+{
+    m_textExport.active = false;
+    if (m_textExport.progress) {
+        QPointer<QDialog> progress = m_textExport.progress;
+        m_textExport.progress = nullptr;
+        progress->close();
+    }
+    // Result.content: one row per recorded record -- the program, the
+    // window, from its first key to its last.
+    QList<QStringList> rows;
+    rows.append({QStringLiteral("Date"), QStringLiteral("Pressing period"), QStringLiteral("Application"),
+                 QStringLiteral("Title"), QStringLiteral("Keystrokes")});
+    for (const KeylogRow &row : groupKeystrokeEntries(entries, m_appSegments)) {
+        const QDateTime from = QDateTime::fromMSecsSinceEpoch(row.fromMs);
+        const QDateTime to = QDateTime::fromMSecsSinceEpoch(row.toMs);
+        const QString text = m_textExport.cutSystemKeys ? cutSystemKeys(row.text) : row.text;
+        if (text.isEmpty()) {
+            continue;
+        }
+        rows.append({from.toString(QStringLiteral("dd.MM.yyyy")),
+                     QStringLiteral("%1 - %2").arg(from.toString(QStringLiteral("HH:mm:ss")),
+                                                   to.toString(QStringLiteral("HH:mm:ss"))),
+                     row.application, row.windowTitle, text});
+    }
+    bool ok = false;
+    if (m_textExport.xlsx) {
+        ok = writeMinimalXlsx(m_textExport.path, rows);
+    } else {
+        QFile file(m_textExport.path);
+        if (file.open(QIODevice::WriteOnly | QIODevice::Text | QIODevice::Truncate)) {
+            QTextStream out(&file);
+            for (const QStringList &row : std::as_const(rows)) {
+                QStringList escaped;
+                for (QString field : row) {
+                    field.replace(QLatin1Char('"'), QStringLiteral("\"\""));
+                    escaped << QStringLiteral("\"%1\"").arg(field);
+                }
+                out << escaped.join(QLatin1Char(',')) << "\n";
             }
-            rows.append(fields);
+            out.flush();
+            ok = out.status() == QTextStream::Ok;
         }
-        return rows;
-    };
-
-    connect(exportCsvButton, &QPushButton::clicked, this, [this, dialog, collectRows]() {
-        const QString path = QFileDialog::getSaveFileName(
-            dialog, QStringLiteral("Exporta keylogger"),
-            QStringLiteral("keylogger_%1.csv").arg(m_period.begin().toString(QStringLiteral("yyyyMMdd"))),
-            QStringLiteral("CSV (*.csv)"));
-        if (path.isEmpty()) {
-            return;
-        }
-        QFile file(path);
-        if (!file.open(QIODevice::WriteOnly | QIODevice::Text)) {
-            QMessageBox::warning(dialog, QStringLiteral("Export"),
-                                 QStringLiteral("Nu s-a putut scrie fisierul."));
-            return;
-        }
-        QTextStream out(&file);
-        const QList<QStringList> rows = collectRows();
-        for (const QStringList &row : rows) {
-            QStringList escaped;
-            for (QString field : row) {
-                field.replace(QLatin1Char('"'), QStringLiteral("\"\""));
-                escaped << QStringLiteral("\"%1\"").arg(field);
-            }
-            out << escaped.join(QLatin1Char(',')) << "\n";
-        }
-    });
-    connect(exportXlsxButton, &QPushButton::clicked, this, [this, dialog, collectRows]() {
-        const QString path = QFileDialog::getSaveFileName(
-            dialog, QStringLiteral("Exporta keylogger"),
-            QStringLiteral("keylogger_%1.xlsx").arg(m_period.begin().toString(QStringLiteral("yyyyMMdd"))),
-            QStringLiteral("Excel (*.xlsx)"));
-        if (path.isEmpty()) {
-            return;
-        }
-        if (!writeMinimalXlsx(path, collectRows())) {
-            QMessageBox::warning(dialog, QStringLiteral("Export"),
-                                 QStringLiteral("Nu s-a putut scrie fisierul."));
-        }
-    });
-
-    m_textLog->show();
-    connect(dialog, &QDialog::finished, this, [this, dialog]() {
-        m_textLog->setParent(this);
-        m_textLog->hide();
-        dialog->deleteLater();
-    });
-    dialog->show();
+    }
+    if (!ok) {
+        QMessageBox::warning(this, QStringLiteral("Keylogger export failed"),
+                             QStringLiteral("Unable to save file %1. Choose another directory.").arg(m_textExport.path));
+    }
 }
 
 void HistoryView::onExportVideoClicked()
 {
-    // See m_exportVideoButton's comment: PNG sequence, not an actual video
-    // file (no encoder in this project's dependencies).
-    if (m_timestamps.isEmpty()) {
-        QMessageBox::information(this, QStringLiteral("Export imagini"),
-                                 QStringLiteral("Nimic de exportat pentru aceasta zi."));
+    // History.qml exportAviButton -> VideoSaverSelector (a SaveDialog for a
+    // .webm) -> VideoSaverProgress (PlayerVideoSaver.start(destination, mps,
+    // "History of <session>", quallity)).
+    if (isVideoSaving()) {
+        showVideoSaverBox();
         return;
     }
-    // VideoSaverSelector.qml's quality picker (Low/Medium/High).
-    QDialog qualityDialog(this);
-    qualityDialog.setWindowTitle(QStringLiteral("Export imagini"));
-    auto *qualityLayout = new QVBoxLayout(&qualityDialog);
-    qualityLayout->addWidget(new QLabel(QStringLiteral("Calitate:"), &qualityDialog));
-    auto *qualityCombo = new QComboBox(&qualityDialog);
-    qualityCombo->addItem(QStringLiteral("Low"), 50);
-    qualityCombo->addItem(QStringLiteral("Medium"), 75);
-    qualityCombo->addItem(QStringLiteral("High"), 100);
-    qualityCombo->setCurrentIndex(2);
-    qualityLayout->addWidget(qualityCombo);
-    auto *qualityButtons =
-        new QDialogButtonBox(QDialogButtonBox::Ok | QDialogButtonBox::Cancel, &qualityDialog);
-    connect(qualityButtons, &QDialogButtonBox::accepted, &qualityDialog, &QDialog::accept);
-    connect(qualityButtons, &QDialogButtonBox::rejected, &qualityDialog, &QDialog::reject);
-    qualityLayout->addWidget(qualityButtons);
-    if (qualityDialog.exec() != QDialog::Accepted) {
+    static const double kSpeeds[] = {0.5, 0.75, 1.0, 2.0, 4.0, 8.0, 16.0};
+    const double mps = kSpeeds[qBound(0, m_speedCombo->currentIndex(), 6)];
+    const QString employee = m_deviceNames.value(m_currentDeviceKey).trimmed();
+    const QString initial = QStringLiteral("%1_%2 - %3").arg(employee, dateToStr(m_period.begin()),
+                                                             dateToStr(m_period.end()));
+    HistorySaveDialog dialog(QStringLiteral("Video saver"), QStringLiteral("webm"), QStringLiteral("videoSave"),
+                             initial, this);
+    dialog.addRow(QStringLiteral("Session: "), sessionMarker());
+    dialog.addRow(QStringLiteral("Time acceleration factor: "), m_speedCombo->currentText());
+    auto *quality = new MultiSwitch(&dialog);
+    quality->addTab(QStringLiteral("Low"));
+    quality->addTab(QStringLiteral("Medium"));
+    quality->addTab(QStringLiteral("High"));
+    quality->setCurrentIndex(1); // Q_good
+    dialog.addRow(QStringLiteral("Quallity:"), quality);
+    if (dialog.exec() != QDialog::Accepted) {
         return;
     }
-
-    const QString dir = QFileDialog::getExistingDirectory(
-        this, QStringLiteral("Alege folderul pentru exportul imaginilor"));
-    if (dir.isEmpty()) {
-        return;
+    m_videoSaverJob = HistoryVideoJob();
+    m_videoSaverJob.destination = dialog.path();
+    m_videoSaverJob.mps = mps;
+    m_videoSaverJob.trackName = QStringLiteral("History of %1").arg(sessionMarker());
+    m_videoSaverJob.quality = quality->currentIndex() == 0 ? WebmWriter::Quality::Poor
+                            : quality->currentIndex() == 2 ? WebmWriter::Quality::Best
+                                                           : WebmWriter::Quality::Good;
+    m_videoSaverTag = m_cacheTag;
+    if (m_videoSaver) {
+        m_videoSaver->deleteLater();
     }
-    m_videoExport.active = true;
-    m_videoExport.directory = dir;
-    m_videoExport.streamId = currentStreamId();
-    m_videoExport.pending = m_timestamps;
-    m_videoExport.total = m_timestamps.size();
-    m_videoExport.qualityPercent = qualityCombo->currentData().toInt();
-    m_exportVideoButton->setEnabled(false);
-    exportNextVideoFrame();
+    m_videoSaver = new HistoryVideoSaver(this);
+    connect(m_videoSaver, &HistoryVideoSaver::stateChanged, this, &HistoryView::onVideoSaverStateChanged);
+    connect(m_videoSaver, &HistoryVideoSaver::progressChanged, this, [this](double progress) {
+        if (m_videoSaverBar) {
+            static_cast<SaverProgressBar *>(m_videoSaverBar)->setValue(qRound(progress * 100));
+        }
+    });
+    showVideoSaverBox();
+    if (!tryStartVideoJob()) {
+        // S_waiting: the saver starts once the block has nothing left to
+        // download (onUpdatedLoadedRanges).
+        m_videoSaver->wait();
+    }
 }
 
-void HistoryView::exportNextVideoFrame()
+bool HistoryView::tryStartVideoJob()
 {
-    if (m_videoExport.pending.isEmpty()) {
-        m_videoExport.active = false;
-        m_exportVideoButton->setEnabled(true);
-        hideLoadingDialog();
-        QMessageBox::information(
-            this, QStringLiteral("Export imagini"),
-            QStringLiteral("Export finalizat: %1 imagini in %2").arg(m_videoExport.total).arg(m_videoExport.directory));
+    if (!m_videoSaver || (m_videoSaver->state() != HistoryVideoSaver::State::Ready
+                          && m_videoSaver->state() != HistoryVideoSaver::State::Waiting)) {
+        return false;
+    }
+    // The period has to be the one shown (its download only runs then) and
+    // completely downloaded.
+    if (m_cacheTag != m_videoSaverTag || !m_downloadComplete || !m_timeline->hasData()) {
+        return false;
+    }
+    HistoryVideoJob job = m_videoSaverJob;
+    job.cacheFile = HistorySegmentStore::cacheFileForTag(m_cacheTag);
+    job.streams = historyStreams();
+    // One picture per marker that has one on any screen (FUN_1402a8430).
+    for (int marker = 0; marker < m_timeline->markersAmount(); ++marker) {
+        if (!m_timeline->isAllowedMarker(marker)) {
+            continue;
+        }
+        if (!markerReady(marker)) {
+            return false; // still Loading somewhere: keep waiting
+        }
+        const qint64 timestampMs = m_timeline->timestampForMarker(marker);
+        HistoryVideoJob::Marker entry;
+        for (quint32 streamId : std::as_const(job.streams)) {
+            qint64 lookupMs = timestampMs;
+            if (screenState(streamId, timestampMs, &lookupMs) == ScreenState::Ready
+                && m_segmentStore.covers(streamId, lookupMs)) {
+                entry.lookupMs.insert(streamId, lookupMs);
+            }
+        }
+        if (!entry.lookupMs.isEmpty()) {
+            job.markers.append(entry);
+        }
+    }
+    m_videoSaver->startJob(job);
+    return true;
+}
+
+void HistoryView::showVideoSaverBox()
+{
+    if (m_videoSaverBox) {
+        m_videoSaverBox->show();
+        m_videoSaverBox->raise();
         return;
     }
-    const qint64 timestampMs = m_videoExport.pending.first();
-    showLoadingDialog(QStringLiteral("Se exporta %1/%2...")
-                          .arg(m_videoExport.total - m_videoExport.pending.size() + 1)
-                          .arg(m_videoExport.total));
-    m_videoExport.requestId = allocateRequestId();
-    m_connection.requestHistoryFrame(m_videoExport.streamId, timestampMs,
-                                     m_videoExport.requestId);
+    // VideoSaverProgress.qml: a modal GenericBox "Video saver", not
+    // closable, with the progress bar and Cancel.
+    auto *box = new QDialog(this, Qt::Dialog | Qt::CustomizeWindowHint | Qt::WindowTitleHint);
+    box->setWindowTitle(QStringLiteral("Video saver"));
+    box->setModal(true);
+    auto *layout = new QVBoxLayout(box);
+    auto *bar = new SaverProgressBar(box);
+    bar->setValue(m_videoSaver ? qRound(m_videoSaver->progress() * 100) : 0);
+    m_videoSaverBar = bar;
+    layout->addWidget(bar, 0, Qt::AlignHCenter);
+    auto *buttons = new QDialogButtonBox(box);
+    buttons->addButton(QStringLiteral("Cancel"), QDialogButtonBox::RejectRole);
+    layout->addWidget(buttons);
+    connect(buttons, &QDialogButtonBox::rejected, this, [this] {
+        // cancelEncodingWithConfirmation(): while busy the box hides and a
+        // ConfirmBox asks; Cancel there brings the box back.
+        if (!isVideoSaving()) {
+            if (m_videoSaverBox) {
+                m_videoSaverBox->deleteLater();
+            }
+            return;
+        }
+        m_videoSaverBox->hide();
+        const auto answer = QMessageBox::question(this, QStringLiteral("Video saver"),
+                                                  QStringLiteral("Video saving will be interrupted."),
+                                                  QMessageBox::Ok | QMessageBox::Cancel);
+        if (answer == QMessageBox::Ok) {
+            if (m_videoSaver) {
+                m_videoSaver->cancel();
+            }
+        } else if (m_videoSaverBox) {
+            m_videoSaverBox->show();
+        }
+    });
+    m_videoSaverBox = box;
+    box->show();
+}
+
+void HistoryView::onVideoSaverStateChanged()
+{
+    if (!m_videoSaver) {
+        return;
+    }
+    switch (m_videoSaver->state()) {
+    case HistoryVideoSaver::State::Done:
+    case HistoryVideoSaver::State::Canceled:
+        // S_done / S_canceled: the box goes away, nothing else is said.
+        if (m_videoSaverBox) {
+            m_videoSaverBox->deleteLater();
+        }
+        m_videoSaverBar = nullptr;
+        break;
+    case HistoryVideoSaver::State::Error: {
+        if (m_videoSaverBox) {
+            m_videoSaverBox->hide();
+            m_videoSaverBox->deleteLater();
+        }
+        m_videoSaverBar = nullptr;
+        const QString message = m_videoSaver->errorString();
+        QMessageBox::critical(this, QStringLiteral("Error"), message);
+        break;
+    }
+    default:
+        break;
+    }
 }
 
 void HistoryView::onToggleRunningApps()
@@ -4248,6 +5469,10 @@ void HistoryView::onToggleRunningApps()
     const int openX = width() - m_appsPanel->width() - 10;
     const int closedX = video.right() + 1;
     m_appsAnimation->stop();
+    if (!m_appsOpen) {
+        // rightPadding drops to 0 as soon as the button is unchecked.
+        m_videoBody->setContentsMargins(0, 0, 0, 0);
+    }
     if (m_appsOpen) {
         positionOverlays();
         m_appsPanel->move(closedX, m_appsPanel->y());
@@ -4275,7 +5500,9 @@ void HistoryView::updateHistoryStatusIcon(qint64 momentMs)
     };
     QString kind;
     if (m_statesLoaded && momentMs >= 0) {
-        if (!inRanges(m_onlineRanges)) {
+        // noData only where the session was there without data
+        // (online_session_nodata); an offline stretch has no infoFrame.
+        if (inRanges(m_noDataRanges)) {
             kind = QStringLiteral("noData");
         } else if (inRanges(m_lockRanges)) {
             kind = QStringLiteral("lock");
@@ -4286,6 +5513,11 @@ void HistoryView::updateHistoryStatusIcon(qint64 momentMs)
     m_historyStatusIcon->setKind(kind);
     m_historyStatusIcon->setVisible(!kind.isEmpty());
     m_historyStatusIcon->raise();
+    // History.qml:145-149: videoFrames = [] while the icon shows -- the
+    // screens disappear, Video's #45464d stays behind the icon.
+    m_videoStrip->setVisible(kind.isEmpty());
+    m_stripScrollBar->setVisible(kind.isEmpty()
+                                 && m_monitorStripArea->horizontalScrollBar()->maximum() > 0);
     // History.qml:172-178: a status icon takes the view out of panelFull.
     if (!kind.isEmpty() && m_panelFull) {
         togglePanelFull();
@@ -4300,6 +5532,11 @@ void HistoryView::updateAppsButton()
 
 void HistoryView::onChangeSettingsClicked()
 {
+    // History.qml:383-389: no period change while the video is encoded.
+    if (isVideoSaving()) {
+        QMessageBox::critical(this, QStringLiteral("Error"), QStringLiteral("Can't change period during video encoding"));
+        return;
+    }
     HistoryChoiceDialog dialog(HistoryChoiceDialog::Mode::Change, employeeList(), m_currentDeviceKey,
                                m_period, m_timeStepMs, this);
     dialog.move(mapToGlobal(rect().center()) - QPoint(dialog.width() / 2, dialog.height() / 2));
@@ -4308,10 +5545,20 @@ void HistoryView::onChangeSettingsClicked()
     }
     m_timeStepMs = dialog.timeStepMs();
     applyTimeStep();
+    // History.qml:259-262: appButton.checked = false; markersPerSecond = 0;
+    // a new period opens at its start.
+    setAppsOpen(false);
+    m_resumeMomentMs = -1;
+    m_resumePlaying = false;
     if (m_currentTab >= 0) {
-        m_historyTabs[m_currentTab] = {dialog.employee(), dialog.period(), m_timeStepMs};
+        HistoryTab &tab = m_historyTabs[m_currentTab];
+        tab.deviceKey = dialog.employee();
+        tab.employeeName = m_deviceNames.value(dialog.employee());
+        tab.period = dialog.period();
+        tab.timeStepMs = m_timeStepMs;
         updateHistoryTabText(m_currentTab);
     }
+    saveTabs();
     jumpTo(dialog.employee(), dialog.period());
 }
 
@@ -4321,41 +5568,75 @@ void HistoryView::onFramesReceived(quint32 streamId, const QString &day,
     if (day != m_rangeKey || !historyStreams().contains(streamId)) {
         return;
     }
-    const bool hadData = m_timeline->hasData();
     m_framesByStream.insert(streamId, timestamps);
     mergeFrameLists();
-    const bool allAnswered = m_framesByStream.size() >= historyStreams().size();
-    if (m_timestamps.isEmpty()) {
-        // Nothing yet -- but only say so once every screen has answered.
-        if (allAnswered) {
-            m_statusLabel->setText(QStringLiteral("No information for selected period"));
-            updateStatusVisibility();
-            m_videoStrip->setStreams({});
-            hideLoadingDialog();
-        }
+    if (m_infoPending) {
+        checkInfoReady();
+        return;
+    }
+    // A list arriving after the information (a reconnect): this screen's
+    // state at the current moment.
+    if (m_timeline->currentMarker() < 0 && m_timeline->hasData()) {
+        startPlayer();
+        return;
+    }
+    const qint64 moment = m_timeline->timestampForMarker(m_timeline->currentMarker());
+    if (moment >= 0 && showFromStore(moment) && !m_frameRequestInFlight) {
+        dispatchFrameRequest();
+    }
+}
+
+void HistoryView::checkInfoReady()
+{
+    if (!m_infoPending) {
+        return;
+    }
+    // LoadInfoDone: the screens, every screen's frame list and the session
+    // states are known (or the information timed out).
+    bool framesKnown = m_screensAnswered;
+    for (quint32 streamId : historyStreams()) {
+        framesKnown = framesKnown && m_framesByStream.contains(streamId);
+    }
+    if (!(framesKnown && m_statesLoaded) && !m_infoTimedOut) {
+        return;
+    }
+    m_infoPending = false;
+    m_infoTimeout->stop();
+    hideLoadingDialog();
+    if (!m_timeline->hasData()) {
+        // Video.qml excuse: !isOnline && !waitingForLoad.
+        m_statusLabel->setText(QStringLiteral("No information for selected period"));
+        updateStatusVisibility();
+        m_videoStrip->setStreams({});
         return;
     }
     m_statusLabel->clear();
     updateStatusVisibility();
-    hideLoadingDialog();
-    // The first screen to answer puts the player at the end of the period;
-    // the others only widen the gray layer under it.
-    if (!hadData) {
-        rebuildMonitorStrip();
-        if (m_resumeMarker >= 0) {
-            // Reloaded after a reconnect: the same moment, playing again if
-            // it was.
-            const int marker = m_timeline->nearestAllowedMarker(m_resumeMarker, false);
-            m_resumeMarker = -1;
-            requestFrameAtMarker(marker >= 0 ? marker : m_timeline->lastAllowedMarker());
-            if (m_resumePlaying) {
-                m_resumePlaying = false;
-                setPlaying(true);
-                m_playbackTimer->start();
-            }
-        } else {
-            requestFrameAtMarker(m_timeline->lastAllowedMarker());
-        }
+    rebuildMonitorStrip();
+    startPlayer();
+}
+
+void HistoryView::startPlayer()
+{
+    // FUN_140272ef0: setMarker(0) snaps to the first recorded moment -- or,
+    // for a tab shown again / a period reloaded after a reconnect, the
+    // moment it was at, playing again if it was.
+    int marker = -1;
+    if (m_resumeMomentMs >= 0) {
+        marker = m_timeline->nearestAllowedMarker(m_timeline->markerForTimestamp(m_resumeMomentMs), false);
+    } else if (m_resumeMarker >= 0) {
+        marker = m_timeline->nearestAllowedMarker(m_resumeMarker, false);
+    }
+    m_resumeMomentMs = -1;
+    m_resumeMarker = -1;
+    if (marker < 0) {
+        marker = m_timeline->nearestAllowedMarker(0, true);
+    }
+    requestFrameAtMarker(marker);
+    if (m_resumePlaying) {
+        m_resumePlaying = false;
+        setPlaying(true);
+        m_playbackTimer->start();
     }
 }
 
@@ -4365,14 +5646,19 @@ void HistoryView::onConnectionStatus(bool connected)
         return;
     }
     m_connectionLost = true;
-    // Nothing sent before the drop will be answered: stop playing (frames
-    // cannot arrive) and free every request slot, keeping the last pictures.
-    if (m_resumeMarker < 0) {
-        m_resumeMarker = m_timeline->currentMarker();
-        m_resumePlaying = m_playbackTimer->isActive();
+    // Nothing sent before the drop will be answered: the request slots are
+    // freed (the download in flight is asked for again after the reconnect),
+    // while the player keeps its moment, its play state, the cache and the
+    // blue ranges -- what is downloaded keeps playing, the rest waits as
+    // Loading. Only a period whose timeline never arrived is reloaded.
+    if (!m_timeline->hasData()) {
+        if (m_resumeMarker < 0) {
+            m_resumeMarker = m_timeline->currentMarker();
+            m_resumePlaying = m_playbackTimer->isActive();
+        }
+        m_playbackTimer->stop();
+        setPlaying(false);
     }
-    m_playbackTimer->stop();
-    setPlaying(false);
     m_frameWatchdog->stop();
     m_frameRequestInFlight = false;
     m_inFlightStreams.clear();
@@ -4409,6 +5695,27 @@ void HistoryView::onSessionStarted()
 void HistoryView::resumeAfterReconnect()
 {
     m_reloadPending = false;
+    if (m_timeline->hasData() && !m_rangeKey.isEmpty()) {
+        // No reload: the queue picks up around the current moment.
+        m_segmentRequestInFlight = false;
+        m_resumeMarker = -1;
+        m_resumePlaying = false;
+        if (!m_statesLoaded) {
+            m_connection.requestSessionStates(m_periodAnchor, periodStartMs(), periodStopMs());
+        }
+        for (quint32 screen : historyStreams()) {
+            if (!m_videoSegments.contains(screen)) {
+                m_connection.requestHistorySegments(screen, periodStartMs(), periodStopMs());
+            }
+        }
+        dispatchPrefetch();
+        const int marker = m_timeline->currentMarker();
+        if (marker >= 0) {
+            requestFrameAtMarker(marker);
+        }
+        updateAppsButton();
+        return;
+    }
     const int marker = m_resumeMarker;
     const bool playing = m_resumePlaying;
     loadPeriod();
@@ -4447,7 +5754,10 @@ void HistoryView::onScreensReceived(quint32 streamId, const QString &day,
     for (const QPair<quint32, QString> &screen : screens) {
         m_historyStreams.append(screen.first);
     }
+    m_screensAnswered = true;
     if (m_historyStreams.isEmpty()) {
+        m_infoPending = false;
+        m_infoTimeout->stop();
         m_statusLabel->setText(QStringLiteral("No information for selected period"));
         updateStatusVisibility();
         m_videoStrip->setStreams({});
@@ -4467,20 +5777,6 @@ void HistoryView::onScreensReceived(quint32 streamId, const QString &day,
 void HistoryView::onFrameReceived(quint32 streamId, qint64 timestampMs, const QImage &image,
                                   quint64 requestId)
 {
-    if (m_videoExport.active && streamId == m_videoExport.streamId
-        && requestId == m_videoExport.requestId && !m_videoExport.pending.isEmpty()) {
-        m_videoExport.pending.removeFirst();
-        const QString fileName = QDateTime::fromMSecsSinceEpoch(timestampMs)
-                                     .toString(QStringLiteral("HH-mm-ss"));
-        const QImage toSave = m_videoExport.qualityPercent >= 100
-            ? image
-            : image.scaled(image.size() * m_videoExport.qualityPercent / 100,
-                           Qt::KeepAspectRatio, Qt::SmoothTransformation);
-        toSave.save(QStringLiteral("%1/%2.png").arg(m_videoExport.directory, fileName));
-        exportNextVideoFrame();
-        return;
-    }
-
     // An answer prepared for a period or an employee the user has already
     // left must never reach the screen.
     if (!isCurrentGeneration(requestId)) {
@@ -4543,6 +5839,12 @@ void HistoryView::onSegmentsReceived(quint32 streamId, const QString &day,
     }
     m_videoSegments.insert(streamId, segments);
     dispatchPrefetch();
+    // Which of this screen's moments are Loading and which have no video
+    // is known now.
+    const qint64 moment = m_timeline->timestampForMarker(m_timeline->currentMarker());
+    if (moment >= 0 && showFromStore(moment) && !m_frameRequestInFlight) {
+        dispatchFrameRequest();
+    }
 }
 
 void HistoryView::dispatchPrefetch()
@@ -4550,7 +5852,7 @@ void HistoryView::dispatchPrefetch()
     // One run in flight at a time: the host serves frames the user is waiting
     // on ahead of this anyway, and a single outstanding request keeps the
     // order "nearest to the cursor first" meaningful.
-    if (m_segmentRequestInFlight || m_rangeKey.isEmpty()) {
+    if (m_segmentRequestInFlight || m_rangeKey.isEmpty() || !m_connection.isAuthenticated()) {
         return;
     }
     const qint64 periodStart = periodStartMs();
@@ -4562,7 +5864,7 @@ void HistoryView::dispatchPrefetch()
     qint64 bestSequence = 0;
     qint64 bestFrom = 0;
     qint64 bestTo = 0;
-    qint64 bestDistance = std::numeric_limits<qint64>::max();
+    quint64 bestDistance = std::numeric_limits<quint64>::max();
 
     for (quint32 streamId : historyStreams()) {
         for (const HistoryVideoSegmentInfo &run : m_videoSegments.value(streamId)) {
@@ -4578,12 +5880,10 @@ void HistoryView::dispatchPrefetch()
             if (isEmptyRange(streamId, gap)) {
                 continue;
             }
-            // The screen the user is actually looking at wins ties, and
-            // within a screen the stretch nearest the cursor goes first.
-            qint64 distance = qAbs(gap - (around < 0 ? start : around));
-            if (streamId != currentStreamId()) {
-                distance += 24LL * 3600 * 1000; // secondary screens come after
-            }
+            // FUN_14025e8c0's order: (uint64)(segment.stop - wantedPos)
+            // ascending -- from the playhead forward, then wrapping round to
+            // the period's start; every screen alike.
+            const quint64 distance = quint64(gap - (around < 0 ? start : around));
             if (distance < bestDistance) {
                 bestDistance = distance;
                 bestStream = streamId;
@@ -4594,8 +5894,19 @@ void HistoryView::dispatchPrefetch()
         }
     }
     if (bestStream == 0) {
-        return; // everything in the period is held
+        // Everything in the period is held -- "downloaded", once every
+        // screen's run list is known.
+        bool listsKnown = true;
+        for (quint32 streamId : historyStreams()) {
+            listsKnown = listsKnown && m_videoSegments.contains(streamId);
+        }
+        m_downloadComplete = listsKnown && !historyStreams().isEmpty();
+        if (m_downloadComplete && m_videoSaver && m_videoSaver->state() == HistoryVideoSaver::State::Waiting) {
+            tryStartVideoJob();
+        }
+        return;
     }
+    m_downloadComplete = false;
     m_segmentRequestInFlight = true;
     m_segmentStreamId = bestStream;
     m_segmentFromMs = bestFrom;
@@ -4620,18 +5931,29 @@ void HistoryView::onSegmentReceived(quint32 streamId, quint64 requestId,
         }
         return;
     }
+    // A complete answer (no hasMore) that stops short of what was asked:
+    // nothing was recorded between its last frame and the end of the asked
+    // stretch. Remember it, or the same gap would be asked for again and
+    // again (the answer is a chunk already held) and the period would never
+    // count as downloaded.
+    if (wasOurs && streamId == m_segmentStreamId && !segment.hasMore && !segment.frames.isEmpty()) {
+        qint64 last = segment.frames.first().timestampMs;
+        for (const ViewerProtocol::SegmentFrame &frame : segment.frames) {
+            last = qMax(last, frame.timestampMs);
+        }
+        const qint64 tail = qMax(m_segmentFromMs, last + 1);
+        if (tail < m_segmentToMs) {
+            m_emptyRanges[streamId].append({tail, m_segmentToMs});
+        }
+    }
     if (m_segmentStore.addSegment(streamId, segment)) {
         const int marker = m_timeline->currentMarker();
         const qint64 around = marker >= 0 ? m_timeline->timestampForMarker(marker) : periodStartMs();
         m_segmentStore.trim(around);
-        if (streamId == currentStreamId()) {
-            // SliderBar.qml's loadedRanges: the whole new stretch turns blue
-            // at once, which is what makes the progress actually visible.
-            // Only this segment -- re-marking every held span on each arrival
-            // grew with the period and did nothing new.
-            m_timeline->markLoadedRange(segment.frames.first().timestampMs,
-                                        segment.frames.last().timestampMs);
-        }
+        // SliderBar.qml's loadedRanges: the union of every screen's
+        // downloaded segments -- the whole new stretch turns blue at once.
+        m_timeline->markLoadedRange(segment.frames.first().timestampMs,
+                                    segment.frames.last().timestampMs);
         qCDebug(lcHistoryTiming, "segment: %lld frames for screen %u, %lld KB held",
                 qint64(segment.frames.size()), streamId, m_segmentStore.bytes() / 1024);
         // The position the user is on may have just become available.
@@ -4659,37 +5981,144 @@ void HistoryView::onSegmentMissing(quint32 streamId, quint64 requestId)
     dispatchPrefetch();
 }
 
+HistoryView::ScreenState HistoryView::screenState(quint32 streamId, qint64 timestampMs, qint64 *lookupMs) const
+{
+    if (lookupMs) {
+        *lookupMs = timestampMs;
+    }
+    // A screen holds its last picture up to a Time step past its run's end
+    // (the markers come from every screen's frames, not exactly this one's).
+    const qint64 hold = qMax<qint64>(2000, m_timeStepMs);
+    const auto runs = m_videoSegments.constFind(streamId);
+    if (runs != m_videoSegments.cend()) {
+        for (const HistoryVideoSegmentInfo &run : runs.value()) {
+            if (timestampMs < run.beginMs || timestampMs > run.endMs + hold) {
+                continue;
+            }
+            const qint64 at = qMin(timestampMs, run.endMs);
+            if (lookupMs) {
+                *lookupMs = at;
+            }
+            if (m_segmentStore.covers(streamId, at)) {
+                return ScreenState::Ready;
+            }
+            // Nothing recorded there: the screen still shows its last
+            // picture before the stretch (the latest image at or before the
+            // moment), if that one is held.
+            for (const QPair<qint64, qint64> &range : m_emptyRanges.value(streamId)) {
+                if (at < range.first || at >= range.second) {
+                    continue;
+                }
+                const qint64 before = range.first - 1;
+                if (before >= run.beginMs && m_segmentStore.covers(streamId, before)) {
+                    if (lookupMs) {
+                        *lookupMs = before;
+                    }
+                    return ScreenState::Ready;
+                }
+                return ScreenState::Offline;
+            }
+            return ScreenState::Loading;
+        }
+    }
+    if (m_segmentStore.covers(streamId, timestampMs) || !cachedFrame(streamId, timestampMs).isNull()) {
+        return ScreenState::Ready;
+    }
+    if (runs == m_videoSegments.cend() || !m_framesByStream.contains(streamId)) {
+        return ScreenState::Loading; // not known yet
+    }
+    // History from before the VP8 runs: a single picture, fetched on demand
+    // where the screen's frame list has one near the moment.
+    const QList<qint64> frames = m_framesByStream.value(streamId);
+    const auto near = std::lower_bound(frames.cbegin(), frames.cend(), timestampMs - hold);
+    if (near != frames.cend() && *near <= timestampMs + hold) {
+        return ScreenState::Fetch;
+    }
+    return ScreenState::Offline;
+}
+
+bool HistoryView::markerReady(int marker) const
+{
+    const qint64 timestampMs = m_timeline->timestampForMarker(marker);
+    if (timestampMs < 0) {
+        return true;
+    }
+    for (quint32 streamId : historyStreams()) {
+        if (screenState(streamId, timestampMs) == ScreenState::Loading) {
+            return false;
+        }
+    }
+    return true;
+}
+
 bool HistoryView::showFromStore(qint64 timestampMs)
 {
-    bool complete = true;
+    bool needsFetch = false;
     for (quint32 streamId : historyStreams()) {
+        qint64 lookupMs = timestampMs;
+        const ScreenState state = screenState(streamId, timestampMs, &lookupMs);
+        if (state == ScreenState::Fetch) {
+            needsFetch = true;
+            continue;
+        }
+        if (state == ScreenState::Loading) {
+            m_videoStrip->setLoading(streamId);
+            continue;
+        }
+        if (state == ScreenState::Offline) {
+            m_videoStrip->setOffline(streamId);
+            continue;
+        }
         // Downloaded VP8 first -- decoding a delta locally is far cheaper
         // than a round trip for a JPEG.
-        QImage image = m_segmentStore.frameAt(streamId, timestampMs);
+        QImage image = m_segmentStore.frameAt(streamId, lookupMs);
         if (image.isNull()) {
             image = cachedFrame(streamId, timestampMs);
         }
         if (image.isNull()) {
-            complete = false;
+            m_videoStrip->setLoading(streamId);
             continue;
         }
         m_videoStrip->setFrame(streamId, image);
         m_displayedOrdinal = m_seekOrdinal;
-        if (streamId == currentStreamId()) {
-            noteFrameShown(timestampMs);
+        noteFrameShown(timestampMs);
+    }
+    return needsFetch;
+}
+
+QString HistoryView::cacheTag(quint32 deviceKey, const HistoryPeriod &period) const
+{
+    // The employee and where the period starts: a "today" period keeps its
+    // file while the day goes on (its end is "now").
+    const QString who = m_deviceNames.value(deviceKey, QString::number(deviceKey));
+    return who + QLatin1Char('|') + QString::number(period.begin().toMSecsSinceEpoch());
+}
+
+void HistoryView::evictUnusedCaches()
+{
+    QSet<QString> mine;
+    if (!m_cacheTag.isEmpty()) {
+        mine.insert(QFileInfo(HistorySegmentStore::cacheFileForTag(m_cacheTag)).fileName());
+    }
+    for (const HistoryTab &tab : std::as_const(m_historyTabs)) {
+        mine.insert(QFileInfo(HistorySegmentStore::cacheFileForTag(cacheTag(tab.deviceKey, tab.period))).fileName());
+    }
+    referencedCacheFiles().insert(this, mine);
+    QSet<QString> referenced;
+    for (const QSet<QString> &files : std::as_const(referencedCacheFiles())) {
+        referenced.unite(files);
+    }
+    const QDir dir(HistorySegmentStore::cacheDirectory());
+    const QStringList files = dir.entryList({QStringLiteral("vhdb.*.sqlite")}, QDir::Files);
+    for (const QString &file : files) {
+        if (!referenced.contains(file)) {
+            QFile::remove(dir.filePath(file)); // fails harmlessly while open
         }
     }
-    return complete;
 }
 
 void HistoryView::onHistoryFrameMissing(quint32 streamId, quint64 requestId)
 {
-    if (m_videoExport.active && streamId == m_videoExport.streamId
-        && requestId == m_videoExport.requestId && !m_videoExport.pending.isEmpty()) {
-        m_videoExport.pending.removeFirst();
-        exportNextVideoFrame();
-        return;
-    }
     if (!isCurrentGeneration(requestId) || requestId != m_inFlightRequestId) {
         return;
     }
@@ -4738,8 +6167,7 @@ void HistoryView::updateInfoPanel()
     const qint64 step = qMax<qint64>(1000, m_timeStepMs);
     const qint64 windowStart = rangeStart + (moment - rangeStart) / step * step;
     const qint64 windowEnd = windowStart + step;
-    const QHash<QString, QString> categories = effectiveCategories();
-    const auto build = [&](const QList<HistoryAppSegment> &segments) {
+    const auto build = [&](const QList<HistoryAppSegment> &segments, bool webPages) {
         QHash<QString, qint64> usedMs;
         // The title shown for a resource is the one it had AT the current
         // moment -- not the latest across the whole period. A resource can
@@ -4772,47 +6200,77 @@ void HistoryView::updateInfoPanel()
                 momentTitle.contains(it.key()) ? momentTitle.value(it.key()) : windowTitle.value(it.key());
             items.append({it.key(), title.isEmpty() ? QStringLiteral("No title") : title,
                           100.0 * it.value() / qMax<qint64>(1, totalMs),
-                          categories.value(it.key()), it.key() == active});
+                          m_scopes.resolve(it.key(), webPages), it.key() == active, webPages});
         }
         std::sort(items.begin(), items.end(), [](const HistoryInfoPanel::Item &a, const HistoryInfoPanel::Item &b) {
             return a.percent > b.percent;
         });
         return items;
     };
-    m_infoPanel->setItems(build(m_webVisits), build(m_appSegments));
+    m_infoPanel->setItems(build(m_webVisits, true), build(m_appSegments, false));
 }
 
-void HistoryView::onCategorizationRequested(const QString &resource)
+bool runCategorizationDialog(QWidget *parent, ViewerConnection &connection, quint32 streamId,
+                             const QString &resource, bool webPage, const QString &employeeName,
+                             CategoryScopes &scopes)
 {
-    CategorizationDialog dialog(resource, m_categories.value(resource), m_employeeCategories.value(resource),
-                                m_deviceNames.value(m_currentDeviceKey), this);
-    dialog.move(mapToGlobal(rect().center()) - QPoint(dialog.width() / 2, dialog.height() / 2));
+    const QString key = CategoryScopes::key(resource, webPage);
+    QList<CategorizationDialog::Row> rows;
+    rows.append({QStringLiteral("All employees"), false, false, scopes.organization.value(key)});
+    for (const HistoryDepartmentCategories &department : std::as_const(scopes.departments)) {
+        rows.append({department.name, false, false, department.categories.value(key)});
+    }
+    rows.append({employeeName, true, false, scopes.employee.value(key)});
+    CategorizationDialog dialog(key, rows, parent);
+    dialog.move(parent->mapToGlobal(parent->rect().center()) - QPoint(dialog.width() / 2, dialog.height() / 2));
     if (dialog.exec() != QDialog::Accepted) {
-        return;
+        return false;
     }
-    if (dialog.category() != m_categories.value(resource, QStringLiteral("none"))) {
-        m_categories[resource] = dialog.category();
-        m_connection.setAppCategory(currentStreamId(), resource, dialog.category());
+    const auto unchanged = [](const QString &before, const QString &after) {
+        return (before.isEmpty() ? QStringLiteral("none") : before) == after;
+    };
+    bool changed = false;
+    // insert / update / delete: only the scopes whose rule was edited.
+    const QString organization = dialog.category(0);
+    if (!unchanged(scopes.organization.value(key), organization)) {
+        scopes.organization.insert(key, organization);
+        connection.setAppCategory(streamId, key, organization);
+        changed = true;
     }
-    if (dialog.employeeCategory() != m_employeeCategories.value(resource, QStringLiteral("none"))) {
-        if (dialog.employeeCategory() == QStringLiteral("none")) {
-            m_employeeCategories.remove(resource);
-        } else {
-            m_employeeCategories[resource] = dialog.employeeCategory();
+    for (int i = 0; i < scopes.departments.size(); ++i) {
+        HistoryDepartmentCategories &department = scopes.departments[i];
+        const QString category = dialog.category(i + 1);
+        if (unchanged(department.categories.value(key), category)) {
+            continue;
         }
-        m_connection.setAppCategory(currentStreamId(), resource, dialog.employeeCategory(), true);
+        if (category == QStringLiteral("none")) {
+            department.categories.remove(key);
+        } else {
+            department.categories.insert(key, category);
+        }
+        connection.setDepartmentCategory(streamId, department.id, key, category);
+        changed = true;
     }
-    m_chartsModel->applicationsChanged();
-    updateInfoPanel();
+    const QString employee = dialog.category(int(scopes.departments.size()) + 1);
+    if (!unchanged(scopes.employee.value(key), employee)) {
+        if (employee == QStringLiteral("none")) {
+            scopes.employee.remove(key);
+        } else {
+            scopes.employee.insert(key, employee);
+        }
+        connection.setAppCategory(streamId, key, employee, true);
+        changed = true;
+    }
+    return changed;
 }
 
-QHash<QString, QString> HistoryView::effectiveCategories() const
+void HistoryView::onCategorizationRequested(const QString &resource, bool webPage)
 {
-    QHash<QString, QString> categories = m_categories;
-    for (auto it = m_employeeCategories.cbegin(); it != m_employeeCategories.cend(); ++it) {
-        categories.insert(it.key(), it.value());
+    if (runCategorizationDialog(this, m_connection, currentStreamId(), resource, webPage,
+                                m_deviceNames.value(m_currentDeviceKey), m_scopes)) {
+        m_chartsModel->applicationsChanged();
+        updateInfoPanel();
     }
-    return categories;
 }
 
 void HistoryView::onEmployeeCategoriesReceived(quint32 streamId, const QHash<QString, QString> &categories)
@@ -4820,7 +6278,7 @@ void HistoryView::onEmployeeCategoriesReceived(quint32 streamId, const QHash<QSt
     if (streamId != currentStreamId()) {
         return;
     }
-    m_employeeCategories = categories;
+    m_scopes.employee = categories;
     updateInfoPanel();
 }
 
@@ -4829,18 +6287,21 @@ void HistoryView::onCategoriesReceived(quint32 streamId, const QHash<QString, QS
     if (streamId != currentStreamId()) {
         return;
     }
-    m_categories = categories;
+    m_scopes.organization = categories;
     updateInfoPanel();
 }
 
 void HistoryView::onKeystrokesReceived(quint32 streamId, const QString &day,
                                        const QList<HistoryKeystrokeEntry> &entries)
 {
+    if (m_textExport.active && streamId == m_textExport.streamId && day == m_textExport.rangeKey) {
+        finishTextExport(entries);
+    }
     if (streamId != currentStreamId() || day != m_rangeKey) {
         return;
     }
     m_keystrokeEntries = entries;
-    const QList<KeylogRow> rows = groupKeystrokeEntries(entries);
+    const QList<KeylogRow> rows = groupKeystrokeEntries(entries, m_appSegments);
 
     m_textLog->setRowCount(rows.size());
     // Newest first, same as the real keylogger table (ListView.BottomToTop).
@@ -4855,7 +6316,7 @@ void HistoryView::onKeystrokesReceived(quint32 streamId, const QString &day,
                                             .toString(QStringLiteral("HH:mm:ss")));
         m_textLog->setItem(i, 0, new QTableWidgetItem(date));
         m_textLog->setItem(i, 1, new QTableWidgetItem(period));
-        m_textLog->setItem(i, 2, new QTableWidgetItem(QStringLiteral("--")));
+        m_textLog->setItem(i, 2, new QTableWidgetItem(row.application));
         m_textLog->setItem(i, 3, new QTableWidgetItem(row.windowTitle));
         m_textLog->setItem(i, 4, new QTableWidgetItem(row.text));
     }
@@ -4885,7 +6346,7 @@ void HistoryView::updateTextLogHighlight(qint64 timestampMs)
     // Select+scroll to the table row (newest-first, see onKeystrokesReceived)
     // whose period contains -- or is nearest to -- the current timeline
     // position.
-    const QList<KeylogRow> rows = groupKeystrokeEntries(m_keystrokeEntries);
+    const QList<KeylogRow> rows = groupKeystrokeEntries(m_keystrokeEntries, m_appSegments);
     if (rows.isEmpty()) {
         return;
     }

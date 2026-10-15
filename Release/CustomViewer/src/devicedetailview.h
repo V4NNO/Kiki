@@ -85,6 +85,8 @@ public:
     // Lock / screensaver of the session (StatusIcon lock / saver; the video
     // stays, as Windows.qml only hides it for the other kinds).
     void setActivityState(bool locked, bool saver);
+    // Session.noData (see DeviceTileWidget::setNoData).
+    void setNoData(bool noData);
     // The streams the Monitors / Programs column shows live (fps 2); empty
     // on the other tabs or while the StatusIcon replaces the video.
     QList<quint32> wantedStreams() const;
@@ -126,7 +128,7 @@ private:
     // utils/SessionInfo.qml -> WebPagesAndPrograms: the same TriLine rows
     // and CategorizationPanel History uses.
     void updateInfoPanel();
-    void onCategorizationRequested(const QString &resource);
+    void onCategorizationRequested(const QString &resource, bool webPage);
     void rebuildKeyloggerTable();
     void filterKeyloggerTable();
     void updateVideoGeometry();
@@ -169,6 +171,7 @@ private:
     bool m_nodeOnline = true;
     bool m_locked = false;
     bool m_saver = false;
+    bool m_noData = false;
 
     // "Programs" sub-tab: shows every currently open window on the device,
     // live, stacked the same way "Monitors" stacks screens -- see
@@ -243,9 +246,8 @@ private:
     QList<HistoryAppUsage> m_lastPrograms;
     QList<HistoryAppUsage> m_lastWebPages;
     QTimer *m_refreshTimer = nullptr;
-    // Same category map HistoryView keeps (same server-side
-    // requestCategories/setAppCategory calls, keyed by streamId not day) --
-    // shared so category edits made here show up in History and vice versa.
-    QHash<QString, QString> m_categories;
-    QHash<QString, QString> m_employeeCategories;
+    // The same scopes HistoryView keeps (same server-side requestCategories
+    // / setCategory calls) -- the organization's, the departments' and the
+    // employee's rules, so an edit made here shows up in History too.
+    CategoryScopes m_scopes;
 };

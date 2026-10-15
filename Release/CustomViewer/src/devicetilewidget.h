@@ -67,6 +67,14 @@ public:
     // False while the viewer has no connection to KikiHost (StatusIcon
     // "nodeOffline").
     void setNodeOnline(bool online);
+    // Session.noData: the session is online but its grabber has delivered
+    // nothing for a while ("Stopped statistics collection").
+    void setNoData(bool noData);
+    // ActiveApplicationRanker's activeWebPage: the browser page in front and
+    // its category -- a categorized page wins over the program.
+    void setActiveWebPage(const QString &url, const QString &category);
+    // ViolationsAlerts.alertsPerLine = the cell's occupiedColumns.
+    void setOccupiedColumns(int columns);
     // The grabber's live activity: the foreground application, its idle
     // text ("Idle hh:mm:ss" / "Locked hh:mm:ss" / empty), whether the
     // screensaver runs, and that application's efficiency category --
@@ -129,6 +137,20 @@ private:
     QString m_category;
     bool m_locked = false;
     bool m_saver = false;
+    bool m_noData = false;
+    QString m_webUrl;
+    QString m_webCategory;
+    int m_occupiedColumns = 1;
+    bool m_footerHovered = false;
+    // ActiveApplicationRanker.result: the rated web page, else the rated
+    // program, else nothing.
+    struct ActiveAppData {
+        QString text;
+        QString category;
+        bool isWebPage = false;
+    };
+    ActiveAppData activeAppData() const;
+    QRect footerTextRect() const;
     qint64 m_idleSinceMs = 0; // 0 = not idle
     QTimer *m_idleTicker = nullptr;
     QPoint m_hover{-1, -1};

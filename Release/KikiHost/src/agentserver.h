@@ -33,8 +33,11 @@ public:
     void broadcastFrame(quint32 streamId, const QImage &image);
     // activeMonitorStreamId: the global monitor stream the foreground window
     // is on (0 = none/unknown), for the tile's "Show active monitor" button.
+    // url: the active browser page (empty when the foreground is no
+    // browser) -- the viewer's ActiveApplicationRanker prefers a categorized
+    // web page over the program.
     void broadcastMetadata(quint32 streamId, const QString &application, const QString &idleText,
-                           quint32 activeMonitorStreamId, bool saver);
+                           quint32 activeMonitorStreamId, bool saver, const QString &url = QString());
     void broadcastMonitorList(const QList<MonitorInfo> &monitors);
     void broadcastStreamClosed(quint32 streamId);
 
@@ -70,6 +73,7 @@ private:
         QString idleText;
         quint32 activeMonitorStreamId = 0;
         bool saver = false;
+        QString url;
     };
     QHash<quint32, QImage> m_latestFrames;
     QHash<quint32, LatestMetadata> m_latestMetadata;

@@ -1,5 +1,7 @@
 #include "keylogger.h"
 
+#include <QDateTime>
+
 Keylogger *Keylogger::s_instance = nullptr;
 
 Keylogger::Keylogger(QObject *parent)
@@ -26,6 +28,35 @@ QString foregroundWindowTitle()
     wchar_t buffer[256] = {0};
     GetWindowTextW(fg, buffer, 256);
     return QString::fromWCharArray(buffer);
+}
+
+// The foreground window's executable name (as ForegroundObserver reports
+// it), so a keylogger chunk carries the program it was typed into.
+QString foregroundExecutable()
+{
+    HWND fg = GetForegroundWindow();
+    if (!fg) {
+        return QString();
+    }
+    DWORD processId = 0;
+    GetWindowThreadProcessId(fg, &processId);
+    if (processId == 0) {
+        return QString();
+    }
+    HANDLE process = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, processId);
+    if (!process) {
+        return QString();
+    }
+    QString name;
+    wchar_t path[MAX_PATH] = {0};
+    DWORD size = MAX_PATH;
+    if (QueryFullProcessImageNameW(process, 0, path, &size)) {
+        const QString fullPath = QString::fromWCharArray(path, static_cast<int>(size));
+        const int slash = fullPath.lastIndexOf(QLatin1Char('\\'));
+        name = slash >= 0 ? fullPath.mid(slash + 1) : fullPath;
+    }
+    CloseHandle(process);
+    return name;
 }
 
 // Best-effort virtual-key -> readable text, matching the bracketed-special-
@@ -89,9 +120,14 @@ void Keylogger::handleKeyDown(DWORD vkCode)
     noteActivity();
 
     const QString title = foregroundWindowTitle();
-    if (title != m_pendingWindowTitle) {
+    const QString application = foregroundExecutable();
+    if (title != m_pendingWindowTitle || application != m_pendingApplication) {
         flush();
         m_pendingWindowTitle = title;
+        m_pendingApplication = application;
+    }
+    if (m_pendingText.isEmpty()) {
+        m_pendingBeginMs = QDateTime::currentMSecsSinceEpoch();
     }
     m_pendingText += keyToText(vkCode);
 }
@@ -145,7 +181,7 @@ int Keylogger::consumeActivityCount()
 void Keylogger::flush()
 {
     if (!m_pendingText.isEmpty()) {
-        emit textFlushed(m_pendingWindowTitle, m_pendingText);
+        emit textFlushed(m_pendingWindowTitle, m_pendingText, m_pendingBeginMs, m_pendingApplication);
         m_pendingText.clear();
     }
 }

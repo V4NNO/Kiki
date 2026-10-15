@@ -67,6 +67,19 @@ struct SessionStates {
     QList<QPair<qint64, qint64>> online;
     QList<QPair<qint64, qint64>> lock;
     QList<QPair<qint64, qint64>> saver;
+    // online_session_nodata: the session was there (logged on, active) but
+    // no data came from it -- statistics collection stopped. An interval
+    // with no session at all is offline, never noData.
+    QList<QPair<qint64, qint64>> noData;
+};
+
+// One department of the chain an employee belongs to (root first), with
+// its own categorization rules (CategorizationPanel.qml: one Rating per
+// department, then the employee's own).
+struct DepartmentRules {
+    qint64 id = 0;
+    QString name;
+    QList<QPair<QString, QString>> categories;
 };
 
 struct ActivitySample {
@@ -75,9 +88,11 @@ struct ActivitySample {
 };
 
 struct KeystrokeEntry {
-    qint64 timestampMs = 0;
+    qint64 timestampMs = 0; // when the chunk was flushed (its last key)
     QString windowTitle;
     QString text;
+    qint64 beginMs = 0;      // its first key; 0 for chunks recorded before this was kept
+    QString application;     // the executable typed into; empty for older chunks
 };
 
 // One row of a chart series, as node.exe's dbClient::adapter::
@@ -163,10 +178,14 @@ public:
     // online_session_idle) from the subservice's idle text ("Locked
     // HH:MM:SS" / "Idle HH:MM:SS", both counting from the moment the state
     // began). These are what volume_total / volume_activity are made of.
+    // Called on every session poll for each logged-on, active session: the
+    // session is there even while no data comes from it (noData).
+    void noteSessionPresent(const QString &sessionUsername);
     void noteSessionState(const QString &sessionUsername, const QString &idleText,
                           double idleSeconds, bool screensaver);
 
-    void recordKeystroke(quint32 sessionId, const QString &windowTitle, const QString &text);
+    void recordKeystroke(quint32 sessionId, const QString &windowTitle, const QString &text,
+                         qint64 beginMs = 0, const QString &application = QString());
 
     void setCategory(const QString &application, const QString &category);
     // One employee's own rule for an application, overriding the global
@@ -174,6 +193,18 @@ public:
     void setEmployeeCategory(const QString &username, const QString &application,
                              const QString &category);
     QList<QPair<QString, QString>> listEmployeeCategories(const QString &username) const;
+    // The departments the employee belongs to, root first, each with its
+    // rules; empty when the employee is in no department.
+    QList<DepartmentRules> departmentChain(const QString &username) const;
+    // A department's rule; "none" removes it (the department inherits).
+    void setDepartmentCategory(qint64 departmentId, const QString &application, const QString &category);
+    // The rules that apply to the employee: the organization's, overridden
+    // by each department from the root down, overridden by the employee's
+    // own (CategorizationPanel.qml's scope order).
+    QHash<QString, QString> effectiveRules(const QString &username) const;
+    // app.urlToSite(): a web page is categorized by its site -- the host,
+    // lower-case, without a leading "www." (the url itself when it has none).
+    static QString siteFromUrl(const QString &url);
     // The user a persisted stream id belongs to (see stableStreamId).
     QString usernameForStream(quint32 streamId) const;
 
@@ -268,4 +299,8 @@ private:
     QHash<quint64, OpenWebSegment> m_openWebSegments; // key: (sessionId << 32) | monitorStreamId
     QHash<QString, OpenRange> m_openOnline;   // key: session username
     QHash<QString, OpenRange> m_openInactive; // key: username + '\x1f' + kind
+    // Since when each session has been continuously logged on and active
+    // (noteSessionPresent), and when it was last seen so.
+    QHash<QString, qint64> m_presentSince;
+    QHash<QString, qint64> m_presentLastSeen;
 };

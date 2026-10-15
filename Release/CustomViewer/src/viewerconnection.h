@@ -1,5 +1,6 @@
 #pragma once
 
+#include "categoryrules.h"
 #include "frameprotocol.h"
 
 #include <QHash>
@@ -41,10 +42,16 @@ struct HistoryVideoSegmentInfo {
     int height = 0;
 };
 
+// One recorded keylogger chunk: the keys typed into one window of one
+// program, from its first key (beginMs) to when it was flushed
+// (timestampMs). Chunks recorded before the host kept beginMs/application
+// carry 0 / an empty application.
 struct HistoryKeystrokeEntry {
     qint64 timestampMs = 0;
     QString windowTitle;
     QString text;
+    qint64 beginMs = 0;
+    QString application;
 };
 
 // One session's serie of a chartSeries reply (node.exe's
@@ -117,6 +124,9 @@ public:
     // global one ("none" then removes the rule).
     void setAppCategory(quint32 streamId, const QString &application, const QString &category,
                         bool employeeScope = false);
+    // One department's own rule ("none" removes it).
+    void setDepartmentCategory(quint32 streamId, qint64 departmentId, const QString &application,
+                               const QString &category);
     void requestKeystrokes(quint32 streamId, const QString &day);
 
     // The same queries over an explicit [startMs, stopMs) (History's
@@ -167,6 +177,8 @@ signals:
     // saver: the session's screensaver is running (Session.inSaver).
     void metadataChanged(quint32 streamId, const QString &application,
                          const QString &idleText, quint32 activeMonitorStreamId, bool saver);
+    // The active browser page with that metadata (empty: no browser in front).
+    void activeUrlChanged(quint32 streamId, const QString &url);
     // Authenticated with the host -- the start of a (re)connected session:
     // AgentHello/frames for every stream follow.
     void sessionStarted();
@@ -186,10 +198,13 @@ signals:
     void historyError(quint32 streamId, const QString &message);
     // A getFrame request had no frame for that screen near that moment.
     void historyFrameMissing(quint32 streamId, quint64 requestId);
+    // noData: online_session_nodata -- the session was there but no data
+    // came from it (statistics collection stopped).
     void historySessionStatesReceived(quint32 streamId, const QString &day,
                                       const QList<QPair<qint64, qint64>> &online,
                                       const QList<QPair<qint64, qint64>> &lock,
-                                      const QList<QPair<qint64, qint64>> &saver);
+                                      const QList<QPair<qint64, qint64>> &saver,
+                                      const QList<QPair<qint64, qint64>> &noData);
     void historyActivityReceived(quint32 streamId, const QString &day,
                                  const QList<HistoryActivitySample> &samples);
     void historyAppSegmentsReceived(quint32 streamId, const QString &day,
@@ -205,6 +220,10 @@ signals:
     void historyCategoriesReceived(quint32 streamId, const QHash<QString, QString> &categories);
     // The same reply's per-employee overrides for that screen's employee.
     void historyEmployeeCategoriesReceived(quint32 streamId, const QHash<QString, QString> &categories);
+    // The same reply's departments between the organization and that
+    // employee, root first, each with its own rules.
+    void historyDepartmentCategoriesReceived(quint32 streamId,
+                                             const QList<HistoryDepartmentCategories> &departments);
     void historyKeystrokesReceived(quint32 streamId, const QString &day,
                                    const QList<HistoryKeystrokeEntry> &entries);
     void historyChartSeriesReceived(quint32 streamId, const HistoryChartResult &result);

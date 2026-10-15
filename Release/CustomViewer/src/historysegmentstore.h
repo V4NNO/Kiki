@@ -4,6 +4,7 @@
 
 #include <QByteArray>
 #include <QHash>
+#include <QString>
 #include <QImage>
 #include <QList>
 #include <QPair>
@@ -33,6 +34,19 @@ public:
 
     void clear();
 
+    // The original keeps every period's downloaded video in a SQLite file
+    // of its own (videoStore.cpp, %LOCALAPPDATA%\KickidlerViewer\tmp\
+    // vhdb.<n>.sqlite): what was downloaded once is there again after a
+    // restart (and blue on the slider at once). open() attaches such a file
+    // -- the runs it holds become known straight away, their frames are read
+    // back only when shown -- and every run added from then on is written to
+    // it. Without a file the store is memory only.
+    bool open(const QString &databasePath);
+    void close();
+    // Where those files live (one per History tag), and the file for a tag.
+    static QString cacheDirectory();
+    static QString cacheFileForTag(const QString &tag);
+
     // Takes one downloaded run. Returns false when it carried nothing or
     // duplicated what is already held.
     bool addSegment(quint32 streamId, const ViewerProtocol::HistorySegmentPayload &payload);
@@ -58,7 +72,9 @@ public:
 
     qint64 bytes() const { return m_bytes; }
     void setBudgetBytes(qint64 budget) { m_budgetBytes = budget; }
-    // Drops the runs furthest from `aroundMs` until the budget is met.
+    // Frees the frames of the runs furthest from `aroundMs` until the budget
+    // is met (with a database they stay known and are read back on demand;
+    // without one they are forgotten).
     void trim(qint64 aroundMs);
 
 private:
@@ -69,8 +85,11 @@ private:
         qint64 firstMs = 0;
         qint64 lastMs = 0;
         qint64 bytes = 0;
-        QList<ViewerProtocol::SegmentFrame> frames;
+        qint64 rowId = 0; // in the database, 0 = memory only
+        QList<ViewerProtocol::SegmentFrame> frames; // empty while paged out
     };
+    // Reads a paged-out chunk's frames back from the database.
+    bool ensureResident(Chunk &chunk);
 
     // Where the warm decoder for one screen currently stands, so stepping
     // forward feeds one delta instead of replaying the whole chunk.
@@ -100,4 +119,5 @@ private:
     std::unordered_map<quint32, Stream> m_streams;
     qint64 m_bytes = 0;
     qint64 m_budgetBytes = 192 * 1024 * 1024;
+    QString m_connectionName; // empty while no database is attached
 };

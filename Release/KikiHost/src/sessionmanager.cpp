@@ -109,6 +109,9 @@ void SessionManager::pollSessions()
         }
 
         seen.insert(info.SessionId);
+        if (m_historyRecorder) {
+            m_historyRecorder->noteSessionPresent(username);
+        }
         if (!m_sessions.contains(info.SessionId)) {
             launchSubService(info.SessionId, username, wtsStateToString(info.State));
         }
@@ -379,7 +382,7 @@ void SessionManager::onMetadataChanged(quint32 sessionId, quint32 localStreamId,
             : it.value().localToGlobal.value(activeMonitorLocalStreamId, 0);
     if (m_server) {
         m_server->broadcastMetadata(globalId, application, idleText, activeMonitorGlobalId,
-                                    screensaver);
+                                    screensaver, url);
     }
     if (m_historyRecorder) {
         // Online / idle / lock / saver ranges behind the Activity chart's
@@ -404,10 +407,10 @@ void SessionManager::onMetadataChanged(quint32 sessionId, quint32 localStreamId,
 }
 
 void SessionManager::onKeystrokeReceived(quint32 sessionId, const QString &windowTitle,
-                                         const QString &text)
+                                         const QString &text, qint64 beginMs, const QString &application)
 {
     if (m_historyRecorder) {
-        m_historyRecorder->recordKeystroke(sessionId, windowTitle, text);
+        m_historyRecorder->recordKeystroke(sessionId, windowTitle, text, beginMs, application);
     }
 }
 

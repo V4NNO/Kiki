@@ -75,7 +75,8 @@ public:
     // streamId 0: keystrokes aren't tied to a specific monitor, only to the
     // session (matches how Keylogger observes the foreground window
     // regardless of which physical screen it's on).
-    void pushKeystroke(const QString &windowTitle, const QString &text);
+    void pushKeystroke(const QString &windowTitle, const QString &text, qint64 beginMs,
+                       const QString &application);
 
 signals:
     void hostConnected();

@@ -50,7 +50,8 @@ signals:
                          const QString &idleText, int inputEvents, const QString &url,
                          quint32 activeMonitorLocalStreamId, const QString &windowTitle,
                          double idleSeconds, bool screensaver);
-    void keystrokeReceived(quint32 sessionId, const QString &windowTitle, const QString &text);
+    void keystrokeReceived(quint32 sessionId, const QString &windowTitle, const QString &text,
+                           qint64 beginMs, const QString &application);
     // See MessageType::StreamClosed -- the authoritative "this window
     // stream is gone" signal, forwarded as-is with the local streamId
     // (SessionManager resolves it to the global one, same as everywhere

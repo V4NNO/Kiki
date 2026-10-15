@@ -7,7 +7,7 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 set(CMAKE_AUTOMOC ON)
 
-find_package(Qt6 6.5 REQUIRED COMPONENTS Core Gui Widgets Network)
+find_package(Qt6 6.5 REQUIRED COMPONENTS Core Gui Widgets Network Sql)
 
 qt_add_executable(KikiViewer WIN32
     src/main.cpp
@@ -31,6 +31,11 @@ qt_add_executable(KikiViewer WIN32
     src/historyview.h
     src/historysegmentstore.cpp
     src/historysegmentstore.h
+    src/historyvideoexport.cpp
+    src/historyvideoexport.h
+    src/webmwriter.cpp
+    src/webmwriter.h
+    src/categoryrules.h
     src/vp8decoder.cpp
     src/vp8decoder.h
     src/viewerconnection.cpp
@@ -56,6 +61,7 @@ target_link_libraries(KikiViewer PRIVATE
     Qt6::Gui
     Qt6::Widgets
     Qt6::Network
+    Qt6::Sql
 )
 
 # Vendored libvpx (VP8), the same static lib KikiHost encodes with. History

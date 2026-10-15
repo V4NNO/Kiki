@@ -9,6 +9,8 @@
 #include <QMap>
 #include <QSqlError>
 #include <QSqlQuery>
+#include <QSet>
+#include <QUrl>
 
 #include <algorithm>
 
@@ -449,6 +451,70 @@ bool HistoryRecorder::start(QString *error)
         "  PRIMARY KEY (username, monitor_name)"
         ")"));
 
+    // The keylogger chunk's first key and program (older rows: NULL).
+    query.exec(QStringLiteral("ALTER TABLE keystrokes ADD COLUMN begin_ms INTEGER"));
+    query.exec(QStringLiteral("ALTER TABLE keystrokes ADD COLUMN application TEXT"));
+
+    // Departments (organization tree) and their categorization rules. The
+    // organization's own rules stay in app_categories (the root).
+    query.exec(QStringLiteral(
+        "CREATE TABLE IF NOT EXISTS departments ("
+        "  id INTEGER PRIMARY KEY AUTOINCREMENT,"
+        "  name TEXT NOT NULL,"
+        "  parent_id INTEGER"
+        ")"));
+    query.exec(QStringLiteral(
+        "CREATE TABLE IF NOT EXISTS department_members ("
+        "  username TEXT PRIMARY KEY,"
+        "  department_id INTEGER NOT NULL"
+        ")"));
+    query.exec(QStringLiteral(
+        "CREATE TABLE IF NOT EXISTS app_categories_department ("
+        "  department_id INTEGER NOT NULL,"
+        "  application TEXT NOT NULL,"
+        "  category TEXT NOT NULL,"
+        "  PRIMARY KEY (department_id, application)"
+        ")"));
+
+    // Web pages used to be rated by their full url; the original rates the
+    // site. Move every url-keyed rule onto its site (an existing site rule
+    // wins).
+    for (const QString &table : {QStringLiteral("app_categories"), QStringLiteral("app_categories_user")}) {
+        const bool perUser = table == QStringLiteral("app_categories_user");
+        QSqlQuery rows(m_database);
+        if (!rows.exec(QStringLiteral("SELECT %1application, category FROM %2 WHERE application LIKE '%://%'")
+                           .arg(perUser ? QStringLiteral("username, ") : QString(), table))) {
+            continue;
+        }
+        QList<QStringList> moves;
+        while (rows.next()) {
+            moves.append({perUser ? rows.value(0).toString() : QString(),
+                          rows.value(perUser ? 1 : 0).toString(), rows.value(perUser ? 2 : 1).toString()});
+        }
+        for (const QStringList &move : std::as_const(moves)) {
+            const QString site = siteFromUrl(move.at(1));
+            QSqlQuery insert(m_database);
+            insert.prepare(perUser
+                ? QStringLiteral("INSERT OR IGNORE INTO app_categories_user (username, application, category) VALUES (?, ?, ?)")
+                : QStringLiteral("INSERT OR IGNORE INTO app_categories (application, category) VALUES (?, ?)"));
+            if (perUser) {
+                insert.addBindValue(move.at(0));
+            }
+            insert.addBindValue(site);
+            insert.addBindValue(move.at(2));
+            insert.exec();
+            QSqlQuery remove(m_database);
+            remove.prepare(perUser
+                ? QStringLiteral("DELETE FROM app_categories_user WHERE username = ? AND application = ?")
+                : QStringLiteral("DELETE FROM app_categories WHERE application = ?"));
+            if (perUser) {
+                remove.addBindValue(move.at(0));
+            }
+            remove.addBindValue(move.at(1));
+            remove.exec();
+        }
+    }
+
     emit logMessage(QStringLiteral("Istoric activat (VP8), ~%1 cadre/s per monitor, in %2")
                         .arg(1000.0 / m_minIntervalMs, 0, 'g', 3)
                         .arg(m_historyDir));
@@ -874,6 +940,23 @@ void HistoryRecorder::noteSessionState(const QString &sessionUsername, const QSt
             online->endMs = now;
         }
     } else {
+        // The silence before this push: if the session was logged on and
+        // active the whole time, it is online_session_nodata (statistics
+        // collection stopped) -- otherwise it was simply offline.
+        if (online != m_openOnline.end()) {
+            const qint64 gapBegin = online->endMs;
+            const auto since = m_presentSince.constFind(sessionUsername);
+            if (since != m_presentSince.cend() && since.value() <= gapBegin) {
+                QSqlQuery noData(m_database);
+                noData.prepare(QStringLiteral(
+                    "INSERT INTO session_inactive (session_username, kind, begin_ms, end_ms) "
+                    "VALUES (?, 'nodata', ?, ?)"));
+                noData.addBindValue(sessionUsername);
+                noData.addBindValue(gapBegin);
+                noData.addBindValue(now);
+                noData.exec();
+            }
+        }
         QSqlQuery insert(m_database);
         insert.prepare(QStringLiteral(
             "INSERT INTO session_online (session_username, begin_ms, end_ms) VALUES (?, ?, ?)"));
@@ -948,19 +1031,39 @@ void HistoryRecorder::updateInactiveRange(const QString &username, const QString
     m_openInactive[key] = OpenRange{insert.lastInsertId().toLongLong(), beginMs, nowMs};
 }
 
+void HistoryRecorder::noteSessionPresent(const QString &sessionUsername)
+{
+    if (sessionUsername.isEmpty()) {
+        return;
+    }
+    // Polled every 5 s; a longer absence (logged off, disconnected, the
+    // host itself stopped) starts a new presence.
+    constexpr qint64 kPresenceGapMs = 20 * 1000;
+    const qint64 now = QDateTime::currentMSecsSinceEpoch();
+    const qint64 last = m_presentLastSeen.value(sessionUsername, -1);
+    if (last < 0 || now - last > kPresenceGapMs) {
+        m_presentSince.insert(sessionUsername, now);
+    }
+    m_presentLastSeen.insert(sessionUsername, now);
+}
+
 void HistoryRecorder::recordKeystroke(quint32 sessionId, const QString &windowTitle,
-                                      const QString &text)
+                                      const QString &text, qint64 beginMs, const QString &application)
 {
     if (!m_database.isOpen() || text.isEmpty()) {
         return;
     }
+    const qint64 now = QDateTime::currentMSecsSinceEpoch();
     QSqlQuery query(m_database);
     query.prepare(QStringLiteral(
-        "INSERT INTO keystrokes (session_id, timestamp_ms, window_title, text) VALUES (?, ?, ?, ?)"));
+        "INSERT INTO keystrokes (session_id, timestamp_ms, window_title, text, begin_ms, application) "
+        "VALUES (?, ?, ?, ?, ?, ?)"));
     query.addBindValue(sessionId);
-    query.addBindValue(QDateTime::currentMSecsSinceEpoch());
+    query.addBindValue(now);
     query.addBindValue(windowTitle);
     query.addBindValue(text);
+    query.addBindValue(beginMs > 0 && beginMs <= now ? beginMs : now);
+    query.addBindValue(application);
     if (!query.exec()) {
         emit logMessage(
             QStringLiteral("Nu am putut scrie textul tastat: %1").arg(query.lastError().text()));
@@ -1028,6 +1131,99 @@ QList<QPair<QString, QString>> HistoryRecorder::listEmployeeCategories(const QSt
     return categories;
 }
 
+QList<DepartmentRules> HistoryRecorder::departmentChain(const QString &username) const
+{
+    QList<DepartmentRules> chain;
+    if (!m_database.isOpen() || username.isEmpty()) {
+        return chain;
+    }
+    QSqlQuery member(m_database);
+    member.prepare(QStringLiteral("SELECT department_id FROM department_members WHERE username = ?"));
+    member.addBindValue(username);
+    qint64 departmentId = member.exec() && member.next() ? member.value(0).toLongLong() : 0;
+    QSet<qint64> visited; // a broken tree must not loop
+    while (departmentId > 0 && !visited.contains(departmentId)) {
+        visited.insert(departmentId);
+        QSqlQuery department(m_database);
+        department.prepare(QStringLiteral("SELECT name, parent_id FROM departments WHERE id = ?"));
+        department.addBindValue(departmentId);
+        if (!department.exec() || !department.next()) {
+            break;
+        }
+        DepartmentRules rules;
+        rules.id = departmentId;
+        rules.name = department.value(0).toString();
+        const qint64 parent = department.value(1).isNull() ? 0 : department.value(1).toLongLong();
+        QSqlQuery categories(m_database);
+        categories.prepare(QStringLiteral(
+            "SELECT application, category FROM app_categories_department WHERE department_id = ?"));
+        categories.addBindValue(departmentId);
+        if (categories.exec()) {
+            while (categories.next()) {
+                rules.categories.append({categories.value(0).toString(), categories.value(1).toString()});
+            }
+        }
+        chain.prepend(rules); // walking up: the root ends up first
+        departmentId = parent;
+    }
+    return chain;
+}
+
+void HistoryRecorder::setDepartmentCategory(qint64 departmentId, const QString &application,
+                                            const QString &category)
+{
+    if (!m_database.isOpen() || departmentId <= 0 || application.isEmpty()) {
+        return;
+    }
+    QSqlQuery query(m_database);
+    if (category == QStringLiteral("none")) {
+        query.prepare(QStringLiteral(
+            "DELETE FROM app_categories_department WHERE department_id = ? AND application = ?"));
+        query.addBindValue(departmentId);
+        query.addBindValue(application);
+    } else {
+        query.prepare(QStringLiteral(
+            "INSERT INTO app_categories_department (department_id, application, category) VALUES (?, ?, ?) "
+            "ON CONFLICT(department_id, application) DO UPDATE SET category = excluded.category"));
+        query.addBindValue(departmentId);
+        query.addBindValue(application);
+        query.addBindValue(category);
+    }
+    if (!query.exec()) {
+        emit logMessage(
+            QStringLiteral("Nu am putut salva categoria departamentului: %1").arg(query.lastError().text()));
+    }
+}
+
+QHash<QString, QString> HistoryRecorder::effectiveRules(const QString &username) const
+{
+    // A "none" at a level means "no rule here" -- the level above decides.
+    QHash<QString, QString> rules;
+    const auto apply = [&rules](const QList<QPair<QString, QString>> &entries) {
+        for (const auto &entry : entries) {
+            if (entry.second != QStringLiteral("none")) {
+                rules.insert(entry.first, entry.second);
+            }
+        }
+    };
+    apply(listCategories());
+    for (const DepartmentRules &department : departmentChain(username)) {
+        apply(department.categories);
+    }
+    apply(listEmployeeCategories(username));
+    return rules;
+}
+
+QString HistoryRecorder::siteFromUrl(const QString &url)
+{
+    const QUrl parsed = QUrl::fromUserInput(url.trimmed());
+    QString host = parsed.host().toLower();
+    if (host.startsWith(QStringLiteral("www."))) {
+        host = host.mid(4);
+    }
+    return host.isEmpty() ? url.trimmed() : host;
+}
+
 QString HistoryRecorder::usernameForStream(quint32 streamId) const
 {
     if (!m_database.isOpen()) {
@@ -1090,7 +1286,7 @@ SessionStates HistoryRecorder::listSessionStates(quint32 monitorStreamId, qint64
     }
     const QString username = usernameForStream(monitorStreamId);
     states.online = loadRanges(QStringLiteral("session_online"), username, startMs, stopMs);
-    for (const QString &kind : {QStringLiteral("lock"), QStringLiteral("saver")}) {
+    for (const QString &kind : {QStringLiteral("lock"), QStringLiteral("saver"), QStringLiteral("nodata")}) {
         QSqlQuery query(m_database);
         query.prepare(QStringLiteral("SELECT begin_ms, end_ms FROM session_inactive WHERE session_username = ? "
                                      "AND kind = ? AND begin_ms < ? AND end_ms > ? ORDER BY begin_ms"));
@@ -1098,7 +1294,9 @@ SessionStates HistoryRecorder::listSessionStates(quint32 monitorStreamId, qint64
         query.addBindValue(kind);
         query.addBindValue(stopMs);
         query.addBindValue(startMs);
-        QList<QPair<qint64, qint64>> &ranges = kind == QStringLiteral("lock") ? states.lock : states.saver;
+        QList<QPair<qint64, qint64>> &ranges = kind == QStringLiteral("lock")    ? states.lock
+                                             : kind == QStringLiteral("saver") ? states.saver
+                                                                               : states.noData;
         if (query.exec()) {
             while (query.next()) {
                 ranges.append({qMax(startMs, query.value(0).toLongLong()), qMin(stopMs, query.value(1).toLongLong())});
@@ -1234,7 +1432,7 @@ QList<KeystrokeEntry> HistoryRecorder::listKeystrokes(quint32 sessionId, qint64 
     }
     QSqlQuery query(m_database);
     query.prepare(QStringLiteral(
-        "SELECT timestamp_ms, window_title, text FROM keystrokes WHERE session_id = ? "
+        "SELECT timestamp_ms, window_title, text, begin_ms, application FROM keystrokes WHERE session_id = ? "
         "AND timestamp_ms >= ? AND timestamp_ms < ? ORDER BY timestamp_ms ASC"));
     query.addBindValue(sessionId);
     query.addBindValue(startMs);
@@ -1243,7 +1441,9 @@ QList<KeystrokeEntry> HistoryRecorder::listKeystrokes(quint32 sessionId, qint64 
     if (query.exec()) {
         while (query.next()) {
             entries.append(KeystrokeEntry{query.value(0).toLongLong(), query.value(1).toString(),
-                                          query.value(2).toString()});
+                                          query.value(2).toString(),
+                                          query.value(3).isNull() ? 0 : query.value(3).toLongLong(),
+                                          query.value(4).toString()});
         }
     }
     return entries;
@@ -1339,13 +1539,8 @@ QList<ChartPoint> HistoryRecorder::chartProductivity(quint32 monitorStreamId, qi
 
     // The employee's rating rule for an executable or site: their own
     // override, else the global one; none when neither exists.
-    QHash<QString, QString> rules;
-    for (const auto &entry : listCategories()) {
-        rules.insert(entry.first, entry.second);
-    }
-    for (const auto &entry : listEmployeeCategories(username)) {
-        rules.insert(entry.first, entry.second);
-    }
+    // (organization -> departments -> employee, see effectiveRules).
+    const QHash<QString, QString> rules = effectiveRules(username);
     const auto hasRule = [&rules](const QString &key) {
         return !key.isEmpty() && rules.contains(key) && rules.value(key) != QStringLiteral("none");
     };
@@ -1362,7 +1557,8 @@ QList<ChartPoint> HistoryRecorder::chartProductivity(quint32 monitorStreamId, qi
         query.addBindValue(from);
         if (query.exec()) {
             while (query.next()) {
-                siteRanges[query.value(0).toString()].append(
+                // rating_s ON site_mask = program.site: by site, not url.
+                siteRanges[siteFromUrl(query.value(0).toString())].append(
                     {qMax(from, query.value(1).toLongLong()), qMin(to, query.value(2).toLongLong())});
             }
         }

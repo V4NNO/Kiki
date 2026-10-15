@@ -53,6 +53,8 @@ protected:
 private:
     quint32 shownStream() const;
     QList<VideoSelectorStrip::Button> selectorButtons() const;
+    int selectorMaxWidth() const;
+    int selectorClipRight(const QList<VideoSelectorStrip::Button> &buttons) const;
     QRect closeRect() const;
     QRect videoRect() const;
 

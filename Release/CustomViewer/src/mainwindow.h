@@ -307,7 +307,10 @@ protected:
     QHash<quint32, QPair<QString, QString>> m_deviceActivity;
     QHash<QString, QString> m_globalCategories;
     QHash<quint32, QHash<QString, QString>> m_deviceEmployeeCategories;
-    QString deviceCategory(quint32 deviceKey, const QString &application) const;
+    QHash<quint32, QList<HistoryDepartmentCategories>> m_deviceDepartmentCategories;
+    // ActiveApplicationRanker's rating of the device's program (or, with
+    // webPage, its site): employee -> departments -> organization.
+    QString deviceCategory(quint32 deviceKey, const QString &resource, bool webPage = false) const;
     void refreshTileActivity(quint32 deviceKey);
     // Keyed by tileId (NOT deviceKey) -- the same device can now be added to
     // a tab more than once (each add gets its own tile instance), so a
@@ -421,6 +424,14 @@ protected:
     // Lock / screensaver per device (the screensaver flag of its primary
     // stream's metadata; locked comes from the idle text).
     QHash<quint32, bool> m_deviceSaver; // key: deviceKey
+    QHash<quint32, QString> m_deviceUrl; // key: deviceKey -- the active browser page
+    // Session.noData, live: an online session whose grabber has pushed no
+    // metadata (it pushes every 2 s) for longer than the host's no-data gap
+    // (HistoryRecorder kOnlineGapMs, 35 s -- online_session_nodata).
+    QHash<quint32, qint64> m_deviceLastDataMs; // key: deviceKey
+    QSet<quint32> m_deviceNoData;
+    QTimer *m_noDataTimer = nullptr;
+    void refreshNoData();
     // The enlarged cell's own VideoSelector (TrackerQuadratorActiveCell's,
     // never loaded -- it starts on the active display) and its top layer.
     VideoSelectorModel *m_activeCellSelector = nullptr;

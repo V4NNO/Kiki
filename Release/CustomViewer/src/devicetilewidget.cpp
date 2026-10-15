@@ -2,6 +2,8 @@
 
 #include <QContextMenuEvent>
 #include <QDateTime>
+#include <QUrl>
+#include <QDesktopServices>
 #include <QHelpEvent>
 #include <QMenu>
 #include <QMouseEvent>
@@ -300,6 +302,59 @@ void DeviceTileWidget::setNodeOnline(bool online)
     }
 }
 
+void DeviceTileWidget::setActiveWebPage(const QString &url, const QString &category)
+{
+    if (m_webUrl != url || m_webCategory != category) {
+        m_webUrl = url;
+        m_webCategory = category;
+        update();
+    }
+}
+
+void DeviceTileWidget::setOccupiedColumns(int columns)
+{
+    if (m_occupiedColumns != qMax(1, columns)) {
+        m_occupiedColumns = qMax(1, columns);
+        update();
+    }
+}
+
+DeviceTileWidget::ActiveAppData DeviceTileWidget::activeAppData() const
+{
+    const auto rated = [](const QString &category) {
+        return category == QStringLiteral("productive") || category == QStringLiteral("neutral")
+            || category == QStringLiteral("unproductive");
+    };
+    if (!m_webUrl.isEmpty() && rated(m_webCategory)) {
+        return {m_webUrl, m_webCategory, true};
+    }
+    if (!m_application.isEmpty() && rated(m_category)) {
+        return {m_application, m_category, false};
+    }
+    return {};
+}
+
+QRect DeviceTileWidget::footerTextRect() const
+{
+    // ViolationsAlerts: bottom strip 16px, alertWidth = width / alertsPerLine;
+    // Application.qml: "!" 9px in, the text 11px after it.
+    const QRect content = contentRect();
+    const int stripWidth = content.width() / m_occupiedColumns;
+    const QFontMetrics bangMetrics(tileFont(9));
+    const int textLeft = content.left() + 9 + bangMetrics.horizontalAdvance(QStringLiteral("!")) + 11;
+    return QRect(textLeft, content.bottom() - 15, content.left() + stripWidth - textLeft, 16);
+}
+
+void DeviceTileWidget::setNoData(bool noData)
+{
+    if (m_noData != noData) {
+        m_noData = noData;
+        resetSelectorRowIfHidden();
+        update();
+        emit streamsChanged();
+    }
+}
+
 QString DeviceTileWidget::statusKind() const
 {
     // Model/trackerQuadratorCell/StatusIcon.qml, in its order, for the
@@ -316,6 +371,12 @@ QString DeviceTileWidget::statusKind() const
         || !m_hasStreams) {
         return QStringLiteral("noSessions");
     }
+    // (ttVideoIsNotRecording / billing have no counterpart here.)
+    if (m_noData) {
+        return QStringLiteral("noData");
+    }
+    // (videoWatchDisabled / videoCaptureDisabled: no permission or capture
+    // switch exists in this system.)
     if (m_locked) {
         return QStringLiteral("lock");
     }
@@ -457,8 +518,9 @@ void DeviceTileWidget::paintEvent(QPaintEvent *)
                           blurredTextShadow(shadowBox.size(), timeFont, time, QColor(0, 0, 0, 0x40)));
         // textColor: cellBackground.forcedHighlight (Productive/NonProductive
         // only -- a neutral app keeps the default) ? forcedColor : #f5f5f5.
-        const bool forced = m_category == QStringLiteral("productive") || m_category == QStringLiteral("unproductive");
-        painter.setPen(forced ? ratingColor(m_category) : QColor(0xf5, 0xf5, 0xf5));
+        const ActiveAppData app = activeAppData();
+        const bool forced = app.category == QStringLiteral("productive") || app.category == QStringLiteral("unproductive");
+        painter.setPen(forced ? ratingColor(app.category) : QColor(0xf5, 0xf5, 0xf5));
         painter.drawText(content, Qt::AlignCenter, time);
     }
 
@@ -467,25 +529,26 @@ void DeviceTileWidget::paintEvent(QPaintEvent *)
     // application 11px after it, both in the rating color. Only while the
     // application is rated -- ActiveApplicationRanker gives no
     // activeAppData for an uncategorized one.
-    const bool rated = m_category == QStringLiteral("productive") || m_category == QStringLiteral("neutral")
-                    || m_category == QStringLiteral("unproductive");
-    if (!m_application.isEmpty() && rated && showsActivity) {
-        const QRect strip(content.left(), content.bottom() - 15, content.width(), 16);
+    const ActiveAppData app = activeAppData();
+    if (!app.text.isEmpty() && showsActivity) {
+        const QRect strip(content.left(), content.bottom() - 15, content.width() / m_occupiedColumns, 16);
         QColor stripColor(0x40, 0x41, 0x47);
         stripColor.setAlphaF(0.75);
         painter.fillRect(strip, stripColor);
         const QFont bang = tileFont(9); // Fonts.rr_medium_b
         painter.setFont(bang);
-        painter.setPen(ratingColor(m_category));
+        painter.setPen(ratingColor(app.category));
         const int bangWidth = QFontMetrics(bang).horizontalAdvance(QStringLiteral("!"));
         painter.drawText(QRect(strip.left() + 9, strip.top(), bangWidth + 1, strip.height()),
                          Qt::AlignLeft | Qt::AlignVCenter, QStringLiteral("!"));
-        const QFont appFont = tileFont(8); // Fonts.rr_small_b
+        // Fonts.rr_small_b, underlined (rr_small_b_u) while a web page's
+        // link is hovered.
+        QFont appFont = tileFont(8);
+        appFont.setUnderline(app.isWebPage && m_footerHovered);
         painter.setFont(appFont);
-        const int textLeft = strip.left() + 9 + bangWidth + 11;
-        const QRect textRect(textLeft, strip.top(), strip.right() - textLeft, strip.height());
+        const QRect textRect = footerTextRect();
         painter.drawText(textRect, Qt::AlignLeft | Qt::AlignVCenter,
-                         QFontMetrics(appFont).elidedText(m_application, Qt::ElideMiddle, textRect.width()));
+                         QFontMetrics(appFont).elidedText(app.text, Qt::ElideMiddle, textRect.width()));
     }
 
     painter.restore();
@@ -533,9 +596,11 @@ void DeviceTileWidget::paintEvent(QPaintEvent *)
     // cellBackground: a 1px border in the rating color while the active
     // application is rated Productive or NonProductive (forcedHighlight),
     // else #63646c while the cell is hovered (TrackerQuadratorCell highlight).
-    const bool forced = m_category == QStringLiteral("productive") || m_category == QStringLiteral("unproductive");
+    const ActiveAppData borderApp = activeAppData();
+    const bool forced = borderApp.category == QStringLiteral("productive")
+                     || borderApp.category == QStringLiteral("unproductive");
     if (forced || underMouse() || m_dropHighlight) {
-        painter.setPen(forced ? ratingColor(m_category) : QColor(0x63, 0x64, 0x6c));
+        painter.setPen(forced ? ratingColor(borderApp.category) : QColor(0x63, 0x64, 0x6c));
         painter.setBrush(Qt::NoBrush);
         painter.drawRect(rect().adjusted(0, 0, -1, -1));
     }
@@ -586,6 +651,15 @@ void DeviceTileWidget::mouseReleaseEvent(QMouseEvent *event)
     if (captionTextRect().contains(press)) {
         return;
     }
+    // Application.qml: a web page's text is a link (MouseArea enabled only
+    // for isWebPage) -- Qt.openUrlExternally(text).
+    const ActiveAppData app = activeAppData();
+    if (app.isWebPage && statusKind() != QStringLiteral("offline") && footerTextRect().contains(press)) {
+        if (footerTextRect().contains(event->pos())) {
+            QDesktopServices::openUrl(QUrl::fromUserInput(app.text));
+        }
+        return;
+    }
     // TrackerQuadratorCell: clicking the tile activates it.
     if (rect().contains(event->pos())) {
         emit opened(m_sessionKey);
@@ -596,6 +670,12 @@ void DeviceTileWidget::mouseMoveEvent(QMouseEvent *event)
 {
     m_hover = event->pos();
     update(QRect(0, 0, width(), kHeaderTop + kHeaderHeight));
+    const bool overLink = activeAppData().isWebPage && footerTextRect().contains(m_hover);
+    if (overLink != m_footerHovered) {
+        m_footerHovered = overLink;
+        setCursor(overLink ? Qt::PointingHandCursor : Qt::ArrowCursor);
+        update(footerTextRect());
+    }
 }
 
 void DeviceTileWidget::enterEvent(QEnterEvent *)

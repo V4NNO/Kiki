@@ -2,6 +2,8 @@
 
 #include <QTimer>
 
+#include <cmath>
+
 #include <QHelpEvent>
 #include <QMouseEvent>
 #include <QPainter>
@@ -27,11 +29,12 @@ QPixmap pixmap(const QString &path)
     return it.value();
 }
 
-QFont captionFont() // Fonts.rb_small_b
+// Fonts.rb_small_b (FullMonitor.qml:113): 8pt, drawn at regular weight by
+// the running original -- see roboto() in devicedetailview.cpp.
+QFont captionFont()
 {
     QFont font(QStringLiteral("Roboto"));
     font.setPointSize(8);
-    font.setBold(true);
     return font;
 }
 }
@@ -119,12 +122,33 @@ QList<VideoSelectorStrip::Button> LiveMonitorOverlay::selectorButtons() const
     return m_strip.buttons(*m_selector, kHeaderLeft + kSelectorMargin, kHeaderTop, kHeaderHeight);
 }
 
+int LiveMonitorOverlay::selectorMaxWidth() const
+{
+    // FullMonitor.qml:100: maxWidth = header.width - (headerSep1.width +
+    // headerSep2.width + headerCloser.width), header.width = parent.width - 2.
+    const int lineWidth = pixmap(QStringLiteral(":/tracker/header/line.png")).width();
+    const int closeWidth = pixmap(QStringLiteral(":/controls/closeButton/medium_close_normal.png")).width();
+    return (width() - 2 * kHeaderLeft) - (2 * lineWidth + closeWidth);
+}
+
+int LiveMonitorOverlay::selectorClipRight(const QList<VideoSelectorStrip::Button> &buttons) const
+{
+    // VideoSelector.qml's contentHolder (3px in, contentW wide, clip: true)
+    // ends 3px before the selector's own right edge; nothing past it is
+    // painted or receives the mouse.
+    return kHeaderLeft + VideoSelectorStrip::width(buttons, selectorMaxWidth()) - kSelectorMargin;
+}
+
 QRect LiveMonitorOverlay::closeRect() const
 {
     const QPixmap close = pixmap(QStringLiteral(":/controls/closeButton/medium_close_normal.png"));
     const int right = width() - kHeaderLeft - kRightSpacer;
-    return QRect(right - close.width(), kHeaderTop + (kHeaderHeight - close.height() + 1) / 2, close.width(),
-                 close.height());
+    // FullMonitor.qml:86-135: the RowLayout centers the 10x11 CloseButton in
+    // its 16px row and, snapping to the pixel grid (Qt 5.6
+    // QGridLayoutEngine::setGeometries), moves it to floor(y + 0.5):
+    // floor(2.5 + 0.5) = 3 under the header's top.
+    const int y = static_cast<int>(std::floor((kHeaderHeight - close.height()) / 2.0 + 0.5));
+    return QRect(right - close.width(), kHeaderTop + y, close.width(), close.height());
 }
 
 QRect LiveMonitorOverlay::videoRect() const
@@ -180,12 +204,12 @@ void LiveMonitorOverlay::paintEvent(QPaintEvent *)
 
     // RowLayout: [VideoSelector] line caption line close 3px.
     const QList<VideoSelectorStrip::Button> buttons = selectorButtons();
-    VideoSelectorStrip::paint(painter, buttons, m_hover, m_press);
+    VideoSelectorStrip::paint(painter, buttons, m_hover, m_press, selectorClipRight(buttons));
     if (m_strip.animating()) {
         QTimer::singleShot(16, this, [this] { update(); });
     }
     const QPixmap line = pixmap(QStringLiteral(":/tracker/header/line.png"));
-    const int line1 = kHeaderLeft + VideoSelectorStrip::width(buttons);
+    const int line1 = kHeaderLeft + VideoSelectorStrip::width(buttons, selectorMaxWidth());
     painter.drawPixmap(line1, kHeaderTop, line);
     const QRect close = closeRect();
     const int line2 = close.left() - line.width();
@@ -224,8 +248,10 @@ void LiveMonitorOverlay::mouseReleaseEvent(QMouseEvent *event)
         }
         return;
     }
-    for (const VideoSelectorStrip::Button &button : selectorButtons()) {
-        if (!button.flyer && button.rect.contains(press)) {
+    const QList<VideoSelectorStrip::Button> buttons = selectorButtons();
+    const int clipRight = selectorClipRight(buttons);
+    for (const VideoSelectorStrip::Button &button : buttons) {
+        if (!button.flyer && button.rect.contains(press) && press.x() < clipRight) {
             if (button.rect.contains(event->pos()) && m_selector) {
                 m_strip.click(*m_selector, button);
             }
@@ -257,8 +283,10 @@ bool LiveMonitorOverlay::event(QEvent *event)
     if (event->type() == QEvent::ToolTip) {
         const auto *help = static_cast<QHelpEvent *>(event);
         QString tip;
-        for (const VideoSelectorStrip::Button &button : selectorButtons()) {
-            if (button.rect.contains(help->pos())) {
+        const QList<VideoSelectorStrip::Button> buttons = selectorButtons();
+        const int clipRight = selectorClipRight(buttons);
+        for (const VideoSelectorStrip::Button &button : buttons) {
+            if (button.rect.contains(help->pos()) && help->pos().x() < clipRight) {
                 tip = button.tooltip;
             }
         }
